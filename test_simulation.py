@@ -3,6 +3,7 @@
 TACAW Simulation Test Script
 
 This script loads a LAMMPS trajectory and runs the complete TACAW workflow:
+
 1. Load trajectory from LAMMPS dump file
 2. Run multislice simulation for each timestep
 3. Convert time-domain data to frequency domain via FFT (JACR method)
@@ -152,167 +153,353 @@ def setup_probe_positions(trajectory, grid_dim="1x1", manual_positions=None):
 
 
 
+def create_dispersion_plot(k_points=None, n_samples=200):
+    """
+    Create a dispersion plot with custom k-points and sampling.
+
+    Args:
+        k_points: List of (kx, ky) tuples defining the k-space path
+        n_samples: Number of sampling points between each k-point
+
+    Returns:
+        kx_path, ky_path: Arrays of interpolated k-points along the path
+    """
+    if k_points is None:
+        # Default high-symmetry path for 2D system
+        k_points = [(0, 0), (2, 0), (2, 2), (0, 2), (-2, 2), (-2, 0), (-2, -2), (0, -2), (2, -2), (2, 0)]
+
+    # Create k-space path by interpolating between k-points
+    kx_path = []
+    ky_path = []
+
+    for i in range(len(k_points)):
+        start_point = k_points[i]
+        end_point = k_points[(i + 1) % len(k_points)]
+
+        # Interpolate between points
+        for j in range(n_samples):
+            t = j / (n_samples - 1)
+            kx_interp = start_point[0] + t * (end_point[0] - start_point[0])
+            ky_interp = start_point[1] + t * (end_point[1] - start_point[1])
+            kx_path.append(kx_interp)
+            ky_path.append(ky_interp)
+
+    return np.array(kx_path), np.array(ky_path)
+
+
 def plot_tacaw_results(tacaw_data, output_dir):
-    """Create comprehensive plots of TACAW analysis results."""
+    """Create comprehensive plots of TACAW analysis results with enhanced styling."""
     logger.info("Creating TACAW analysis plots...")
-    
+
+    # Set up professional plot style
+    plt.style.use('default')  # Reset to default
+    plt.rcParams.update({
+        'font.family': 'sans-serif',
+        'font.sans-serif': ['DejaVu Sans', 'Helvetica', 'Arial'],
+        'font.size': 12,
+        'axes.labelsize': 14,
+        'axes.titlesize': 16,
+        'xtick.labelsize': 12,
+        'ytick.labelsize': 12,
+        'legend.fontsize': 12,
+        'figure.titlesize': 18,
+        'axes.grid': True,
+        'grid.alpha': 0.3,
+        'grid.linestyle': '--',
+        'axes.facecolor': '#fafafa',
+        'figure.facecolor': 'white',
+        'axes.edgecolor': '#333333',
+        'axes.linewidth': 1.2,
+    })
+
+    # Enhanced color palette
+    spectrum_colors = ['#2E86AB', '#A23B72', '#F18F01', '#C73E1D', '#3B8EA5',
+                      '#7D5BA6', '#0B9A6D', '#F6C85F', '#D34F73']
+
     # Create multiple figure sets for different analyses
-    
+
     # Figure 1: Frequency spectra for different probe positions
     n_probes = len(tacaw_data.probe_positions)
 
     if n_probes == 1:
-        # Single probe - use single plot
-        fig, ax = plt.subplots(1, 1, figsize=(10, 6))
-        spectrum = tacaw_data.spectrum(probe_index=0)
+        # Single probe - use single plot (square aspect)
+        fig, ax = plt.subplots(1, 1, figsize=(10, 10))
 
-        # Filter to positive frequencies only
+        spectrum = tacaw_data.spectrum(probe_index=0)
         positive_freq_mask = tacaw_data.frequency >= 0
         freq_pos = tacaw_data.frequency[positive_freq_mask]
         spectrum_pos = spectrum[positive_freq_mask]
 
-        ax.plot(freq_pos, spectrum_pos, linewidth=2, color='darkblue')
-        ax.set_xlabel('Frequency (THz)', fontsize=12)
-        ax.set_ylabel('Intensity', fontsize=12)
-        ax.set_title(f'Frequency Spectrum at Probe Position {tacaw_data.probe_positions[0]}',
-                    fontsize=14, fontweight='bold')
-        ax.grid(True, alpha=0.3)
-        ax.set_facecolor('#f8f9fa')
+        # Enhanced line plot with gradient fill
+        ax.plot(freq_pos, spectrum_pos, linewidth=3, color='#2E86AB', alpha=0.9)
+        ax.fill_between(freq_pos, spectrum_pos, alpha=0.3, color='#2E86AB')
+
+        ax.set_xlabel('Frequency (THz)', fontsize=14, fontweight='bold')
+        ax.set_ylabel('Intensity (a.u.)', fontsize=14, fontweight='bold')
+
+        probe_pos = tacaw_data.probe_positions[0]
+        ax.set_title(f'TACAW Frequency Spectrum\nProbe Position: ({probe_pos[0]:.1f}, {probe_pos[1]:.1f}) Å',
+                    fontsize=16, fontweight='bold', pad=20)
+
+        # Enhanced grid and styling
+        ax.grid(True, alpha=0.4, linestyle='--', linewidth=0.8)
+        ax.set_facecolor('#fafafa')
+
+        # Add subtle spine styling
+        for spine in ax.spines.values():
+            spine.set_edgecolor('#666666')
+            spine.set_linewidth(1.5)
+
     else:
-        # Multiple probes - use subplot grid, handle more than 4 probes
-        max_plots = min(9, n_probes)  # Show max 9 probes (3x3 grid)
+        # Multiple probes - use subplot grid
+        max_plots = min(9, n_probes)
         cols = min(3, max_plots)
-        rows = (max_plots + cols - 1) // cols  # Ceiling division
+        rows = (max_plots + cols - 1) // cols
 
-        fig, axes = plt.subplots(rows, cols, figsize=(4*cols, 3*rows))
+        fig, axes = plt.subplots(rows, cols, figsize=(5*cols, 5*rows))
         if max_plots == 1:
-            axes = [axes]  # Make it iterable
+            axes = [axes]
         elif rows == 1:
-            axes = axes if isinstance(axes, list) else [axes]  # Single row
+            axes = axes if isinstance(axes, list) else [axes]
         else:
-            axes = axes.flatten()  # Multi-dimensional array
-
-        colors_list = ['darkblue', 'darkgreen', 'darkred', 'darkorange', 'purple', 'brown', 'pink', 'gray', 'olive']
+            axes = axes.flatten()
 
         for i in range(max_plots):
             ax = axes[i]
             spectrum = tacaw_data.spectrum(probe_index=i)
-
-            # Filter to positive frequencies only
             positive_freq_mask = tacaw_data.frequency >= 0
             freq_pos = tacaw_data.frequency[positive_freq_mask]
             spectrum_pos = spectrum[positive_freq_mask]
 
-            color = colors_list[i % len(colors_list)]
-            ax.plot(freq_pos, spectrum_pos, linewidth=2, color=color)
-            ax.set_xlabel('Frequency (THz)', fontsize=10)
-            ax.set_ylabel('Intensity', fontsize=10)
-            probe_pos = tacaw_data.probe_positions[i]
-            ax.set_title(f'Probe {i} @ ({probe_pos[0]:.1f}, {probe_pos[1]:.1f})',
-                        fontsize=11, fontweight='bold')
-            ax.grid(True, alpha=0.3)
-            ax.set_facecolor('#f8f9fa')
+            color = spectrum_colors[i % len(spectrum_colors)]
 
-        # Hide unused subplots if any
+            # Enhanced line plot
+            ax.plot(freq_pos, spectrum_pos, linewidth=2.5, color=color, alpha=0.9)
+            ax.fill_between(freq_pos, spectrum_pos, alpha=0.2, color=color)
+
+            ax.set_xlabel('Frequency (THz)', fontsize=11, fontweight='bold')
+            ax.set_ylabel('Intensity (a.u.)', fontsize=11, fontweight='bold')
+
+            probe_pos = tacaw_data.probe_positions[i]
+            ax.set_title(f'Probe {i+1}\n({probe_pos[0]:.1f}, {probe_pos[1]:.1f}) Å',
+                        fontsize=12, fontweight='bold', pad=10)
+
+            ax.grid(True, alpha=0.3, linestyle='--')
+            ax.set_facecolor('#fafafa')
+
+        # Hide unused subplots
         for i in range(max_plots, len(axes)):
             axes[i].set_visible(False)
-    
+
     plt.tight_layout()
-    plt.savefig(output_dir / 'frequency_spectra.png', dpi=150, bbox_inches='tight')
+    plt.savefig(output_dir / 'frequency_spectra.png', dpi=300, bbox_inches='tight',
+                facecolor='white', edgecolor='none')
     plt.close()
     
-    # Figure 2: Diffraction patterns
+    # Figure 2: Diffraction patterns with enhanced colormaps
     if n_probes == 1:
         # Single probe - use single plot
-        fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+        fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+
         diffraction = tacaw_data.diffraction(probe_index=0)
+        diffraction_log = np.log10(diffraction + 1e-10)
 
-        # Apply logarithmic scaling to compress dynamic range
-        diffraction_log = np.log10(diffraction + 1e-10)  # Add small value to avoid log(0)
-
+        # Enhanced colormap with inferno (user preference)
         im = ax.imshow(diffraction_log, extent=[tacaw_data.kx.min(), tacaw_data.kx.max(),
                                               tacaw_data.ky.min(), tacaw_data.ky.max()],
-                       origin='lower', cmap='inferno')
-        plt.colorbar(im, ax=ax, label='log₁₀(Intensity)')
-        ax.set_xlabel('kx (Å⁻¹)', fontsize=12)
-        ax.set_ylabel('ky (Å⁻¹)', fontsize=12)
-        ax.set_title('Diffraction Pattern (Log Scale)', fontsize=14, fontweight='bold')
+                       origin='lower', cmap='inferno', aspect='equal')
+
+        # Enhanced colorbar
+        cbar = plt.colorbar(im, ax=ax, shrink=0.8, aspect=30)
+        cbar.set_label('log10(Intensity)', fontsize=14, fontweight='bold')
+        cbar.ax.tick_params(labelsize=12)
+
+        ax.set_xlabel('kx (Å⁻¹)', fontsize=14, fontweight='bold')
+        ax.set_ylabel('ky (Å⁻¹)', fontsize=14, fontweight='bold')
+
+        probe_pos = tacaw_data.probe_positions[0]
+        ax.set_title(f'TACAW Diffraction Pattern\nProbe Position: ({probe_pos[0]:.1f}, {probe_pos[1]:.1f}) Å',
+                    fontsize=16, fontweight='bold', pad=20)
+
         ax.set_xlim([-10, 10])
         ax.set_ylim([-10, 10])
-        ax.grid(True, alpha=0.3)
-    else:
-        # Multiple probes - use subplot grid, handle more than 4 probes
-        max_plots = min(9, n_probes)  # Show max 9 probes (3x3 grid)
-        cols = min(3, max_plots)
-        rows = (max_plots + cols - 1) // cols  # Ceiling division
+        ax.set_aspect('equal', adjustable='box')
+        ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.8)
 
-        fig, axes = plt.subplots(rows, cols, figsize=(4*cols, 3.5*rows))
+        # Add center crosshair
+        ax.axhline(y=0, color='white', linestyle='-', alpha=0.5, linewidth=1)
+        ax.axvline(x=0, color='white', linestyle='-', alpha=0.5, linewidth=1)
+
+    else:
+        # Multiple probes - use subplot grid
+        max_plots = min(9, n_probes)
+        cols = min(3, max_plots)
+        rows = (max_plots + cols - 1) // cols
+
+        fig, axes = plt.subplots(rows, cols, figsize=(4.5*cols, 4.5*rows))
         if max_plots == 1:
-            axes = [axes]  # Make it iterable
+            axes = [axes]
         elif rows == 1:
-            axes = axes if isinstance(axes, list) else [axes]  # Single row
+            axes = axes if isinstance(axes, list) else [axes]
         else:
-            axes = axes.flatten()  # Multi-dimensional array
+            axes = axes.flatten()
 
         for i in range(max_plots):
             ax = axes[i]
             diffraction = tacaw_data.diffraction(probe_index=i)
-
-            # Apply logarithmic scaling to compress dynamic range
-            diffraction_log = np.log10(diffraction + 1e-10)  # Add small value to avoid log(0)
+            diffraction_log = np.log10(diffraction + 1e-10)
 
             im = ax.imshow(diffraction_log, extent=[tacaw_data.kx.min(), tacaw_data.kx.max(),
                                                   tacaw_data.ky.min(), tacaw_data.ky.max()],
-                           origin='lower', cmap='inferno')
-            plt.colorbar(im, ax=ax, label='log₁₀(Intensity)', shrink=0.8)
-            ax.set_xlabel('kx (Å⁻¹)', fontsize=10)
-            ax.set_ylabel('ky (Å⁻¹)', fontsize=10)
+                           origin='lower', cmap='inferno', aspect='equal')
+
+            cbar = plt.colorbar(im, ax=ax, shrink=0.7, aspect=20)
+            cbar.set_label('log10(I)', fontsize=10, fontweight='bold')
+            cbar.ax.tick_params(labelsize=9)
+
+            ax.set_xlabel('kx (Å⁻¹)', fontsize=11, fontweight='bold')
+            ax.set_ylabel('ky (Å⁻¹)', fontsize=11, fontweight='bold')
+
             probe_pos = tacaw_data.probe_positions[i]
-            ax.set_title(f'Probe {i} @ ({probe_pos[0]:.1f}, {probe_pos[1]:.1f})',
-                        fontsize=11, fontweight='bold')
+            ax.set_title(f'Probe {i+1}\n({probe_pos[0]:.1f}, {probe_pos[1]:.1f}) Å',
+                        fontsize=12, fontweight='bold', pad=10)
+
             ax.set_xlim([-10, 10])
             ax.set_ylim([-10, 10])
-            ax.grid(True, alpha=0.3)
+            ax.set_aspect('equal', adjustable='box')
+            ax.grid(True, alpha=0.3, linestyle='--')
 
-        # Hide unused subplots if any
+            # Add center crosshair
+            ax.axhline(y=0, color='white', linestyle='-', alpha=0.4, linewidth=0.8)
+            ax.axvline(x=0, color='white', linestyle='-', alpha=0.4, linewidth=0.8)
+
+        # Hide unused subplots
         for i in range(max_plots, len(axes)):
             axes[i].set_visible(False)
-    
+
     plt.tight_layout()
-    plt.savefig(output_dir / 'diffraction_patterns.png', dpi=150, bbox_inches='tight')
+    plt.savefig(output_dir / 'diffraction_pattern.png', dpi=300, bbox_inches='tight',
+                facecolor='white', edgecolor='none')
     plt.close()
     
     # Figure 3: Spectral diffraction at specific frequencies
     fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-    
+
+    # Add main title
+    fig.suptitle('TACAW Spectral Diffraction Analysis', fontsize=18, fontweight='bold', y=0.98)
+
     # Select some interesting positive frequencies only
     positive_freqs = tacaw_data.frequency[tacaw_data.frequency > 0]
     max_freq = positive_freqs.max()
-    test_frequencies = [max_freq*0.1, max_freq*0.2, max_freq*0.3, 
+    test_frequencies = [max_freq*0.1, max_freq*0.2, max_freq*0.3,
                        max_freq*0.4, max_freq*0.5, max_freq*0.6]
-    
+
     for i, freq in enumerate(test_frequencies):
         ax = axes[i//3, i%3]
         spectral_diff = tacaw_data.spectral_diffraction(frequency=freq, probe_index=0)
-        
-        # Apply logarithmic scaling to compress dynamic range
-        spectral_diff_log = np.log10(spectral_diff + 1e-10)  # Add small value to avoid log(0)
-        
+        spectral_diff_log = np.log10(spectral_diff + 1e-10)
+
+        # Enhanced colormap for spectral diffraction (using inferno)
         im = ax.imshow(spectral_diff_log, extent=[tacaw_data.kx.min(), tacaw_data.kx.max(),
                                                 tacaw_data.ky.min(), tacaw_data.ky.max()],
-                       origin='lower', cmap='inferno')
-        plt.colorbar(im, ax=ax, label='log₁₀(Intensity)')
-        ax.set_xlabel('kx (Å⁻¹)', fontsize=11)
-        ax.set_ylabel('ky (Å⁻¹)', fontsize=11)
-        ax.set_title(f'Spectral Diffraction at {freq:.1f} THz (Log Scale)', fontsize=12, fontweight='bold')
+                       origin='lower', cmap='inferno', aspect='equal')
+
+        # Enhanced colorbar
+        cbar = plt.colorbar(im, ax=ax, shrink=0.8, aspect=25)
+        cbar.set_label('log10(I)', fontsize=11, fontweight='bold')
+        cbar.ax.tick_params(labelsize=10)
+
+        ax.set_xlabel('kx (Å⁻¹)', fontsize=12, fontweight='bold')
+        ax.set_ylabel('ky (Å⁻¹)', fontsize=12, fontweight='bold')
+
+        ax.set_title(f'{freq:.2f} THz', fontsize=14, fontweight='bold', pad=15)
+
         ax.set_xlim([-10, 10])
         ax.set_ylim([-10, 10])
-        ax.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig(output_dir / 'spectral_diffraction.png', dpi=150, bbox_inches='tight')
+        ax.set_aspect('equal', adjustable='box')
+        ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.8)
+
+        # Add center crosshair
+        ax.axhline(y=0, color='white', linestyle='-', alpha=0.6, linewidth=1)
+        ax.axvline(x=0, color='white', linestyle='-', alpha=0.6, linewidth=1)
+
+        plt.tight_layout()
+    plt.savefig(output_dir / 'spectral_diffraction.png', dpi=300, bbox_inches='tight',
+                facecolor='white', edgecolor='none')
     plt.close()
-    
+
+    # Figure 4: Dispersion plot - frequency vs k-space heatmap
+    logger.info("Creating dispersion plot...")
+
+    # Create simple dispersion path from (0,0) to (5,0)
+    n_samples = 30  # More samples for smoother curve
+    kx_path, ky_path = create_dispersion_plot(
+        k_points=[(0, 0), (5, 0)],  # Simple path along kx
+        n_samples=n_samples
+    )
+
+    # Sample intensity along the k-path for each frequency
+    dispersion_data = []
+
+    for freq_idx, freq in enumerate(tacaw_data.frequency):
+        if freq > 0:  # Only positive frequencies
+            intensities = []
+
+            for kx_val, ky_val in zip(kx_path, ky_path):
+                # Find nearest k-point in the data
+                kx_idx = np.argmin(np.abs(tacaw_data.kx - kx_val))
+                ky_idx = np.argmin(np.abs(tacaw_data.ky - ky_val))
+
+                # Get intensity at this k-point and frequency
+                intensity = tacaw_data.intensity[0, freq_idx, kx_idx, ky_idx]  # Use first probe
+                intensities.append(intensity)
+
+            dispersion_data.append(intensities)
+
+    dispersion_data = np.array(dispersion_data)
+    freq_positive = tacaw_data.frequency[tacaw_data.frequency > 0]
+
+    # Apply logarithmic scaling to the intensity data
+    dispersion_data = np.log10(dispersion_data + 1e-10)  # Add small value to avoid log(0)
+
+    # Create dispersion plot
+    fig, ax = plt.subplots(1, 1, figsize=(12, 8))
+
+    # Plot heatmap using imshow (correct orientation: kx on x, frequency on y)
+    # Note: Using imshow instead of pcolormesh to avoid dimension mismatch issues
+    # extent defines the coordinate system: [left, right, bottom, top]
+    im = ax.imshow(dispersion_data, extent=[0, 5, freq_positive.min(), freq_positive.max()],
+                   aspect='auto', cmap='inferno', origin='lower', interpolation='bilinear')
+
+    # Add colorbar for log intensity
+    cbar = plt.colorbar(im, ax=ax, shrink=0.8, aspect=20)
+    cbar.set_label('log₁₀(Intensity)', fontsize=12, fontweight='bold')
+    cbar.ax.tick_params(labelsize=10)
+
+    # Set labels and title with correct axis orientation
+    ax.set_xlabel('k$_x$ (Å⁻¹)', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Frequency (THz)', fontsize=14, fontweight='bold')
+    ax.set_title('TACAW Dispersion: Frequency vs k$_x$', fontsize=16, fontweight='bold', pad=20)
+
+    # Add grid
+    ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.8)
+
+    # Mark k-point boundaries (vertical lines for kx coordinates)
+    ax.axvline(x=0, color='white', linestyle='-', alpha=0.8, linewidth=1)
+    ax.axvline(x=5, color='white', linestyle='-', alpha=0.8, linewidth=1)
+
+    # Add numerical labels for kx coordinates (no symbols)
+    k_labels = ['0', '5']
+    k_positions = [0, 5]  # Actual kx coordinates
+
+    ax.set_xticks(k_positions[:len(k_labels)])
+    ax.set_xticklabels(k_labels[:len(k_labels)], fontsize=12, fontweight='bold')
+
+    plt.tight_layout()
+    plt.savefig(output_dir / 'dispersion_plot.png', dpi=300, bbox_inches='tight',
+                facecolor='white', edgecolor='none')
+    plt.close()
+
    
 
 
@@ -360,38 +547,42 @@ def main():
     logger.info(f"Trajectory frames: {trajectory.n_frames}, atoms: {trajectory.n_atoms}")
     
     start_time = time.time()
-    
-    try:
-        wf_data = calculator.run_simulation(
-            trajectory=trajectory,
-            probe_positions=probe_positions,
-            **sim_params
-        )
-        
-        simulation_time = time.time() - start_time
-        logger.info(f"Simulation completed in {simulation_time:.2f} seconds")
-        
-        
-        # Convert to TACAW data via FFT (JACR method) with caching
-        # This avoids expensive re-computation of the FFT if the same simulation has been run before
-        tacaw_cache_file = output_dir / "tacaw_data.pkl"
 
-        # Check if cached TACAWData exists
-        if tacaw_cache_file.exists():
-            logger.info(f"Loading cached TACAWData from: {tacaw_cache_file.name}")
-            tacaw_data = TACAWData.load(tacaw_cache_file)
+    # Check for cached TACAWData first to avoid expensive wf_data generation
+    tacaw_data = None
+    tacaw_cache_file = output_dir / "TACAWdata.pkl"
 
-            if tacaw_data is not None:
-                logger.info(f"TACAWData loaded successfully. Frequency range: {tacaw_data.frequency.min():.2f} to {tacaw_data.frequency.max():.2f} THz")
-            else:
-                logger.warning("Failed to load cached TACAWData, performing fresh conversion...")
-                tacaw_data = None
+    # Check if cached TACAWData exists with simple filename
+    if tacaw_cache_file.exists():
+        logger.info(f"Loading cached TACAWData from: {tacaw_cache_file.name}")
+        tacaw_data = TACAWData.load(tacaw_cache_file)
+
+        if tacaw_data is not None:
+            logger.info(f"TACAWData loaded successfully. Frequency range: {tacaw_data.frequency.min():.2f} to {tacaw_data.frequency.max():.2f} THz")
+            logger.info("Skipping wf_data simulation since TACAWData cache exists")
         else:
+            logger.warning(f"Failed to load cached TACAWData from {tacaw_cache_file.name}, will perform fresh simulation and conversion...")
             tacaw_data = None
+    else:
+        logger.info("No TACAWData cache found, will perform simulation and conversion...")
 
-        # Perform conversion if no cached data or loading failed
+    try:
+        # Only run expensive simulation if no cached TACAWData exists
         if tacaw_data is None:
-            logger.info("Converting to frequency domain (JACR method)...")
+            logger.info("Running TACAW multislice simulation to generate wf_data...")
+            simulation_start = time.time()
+
+            wf_data = calculator.run_simulation(
+                trajectory=trajectory,
+                probe_positions=probe_positions,
+                **sim_params
+            )
+
+            simulation_time = time.time() - simulation_start
+            logger.info(f"WF data simulation completed in {simulation_time:.2f} seconds")
+
+            # Convert wf_data to TACAW data via FFT (JACR method)
+            logger.info("Converting wf_data to frequency domain (JACR method)...")
             conversion_start = time.time()
             tacaw_data = wf_data.fft_to_tacaw_data()
             conversion_time = time.time() - conversion_start
@@ -400,12 +591,12 @@ def main():
 
             # Save the converted data for future use
             logger.info("Saving TACAWData for future use...")
-            success = tacaw_data.save(output_dir, auto_generate_filename=True,
-                                    trajectory=trajectory, sim_params=sim_params,
-                                    probe_positions=probe_positions)
+            success = tacaw_data.save(tacaw_cache_file, auto_generate_filename=False)
             if success:
-                # Update cache file path for summary
-                tacaw_cache_file = output_dir / f"tacaw_data_{trajectory.n_frames}f_{len(probe_positions)}p_*.pkl"
+                logger.info(f"TACAWData saved to: {tacaw_cache_file.name}")
+        else:
+            # TACAWData was loaded from cache
+            simulation_time = 0.0  # No simulation was performed
         
         # Create TACAW analysis plots
         plot_tacaw_results(tacaw_data, output_dir)
@@ -433,14 +624,20 @@ def main():
         logger.info(f"k-space sampling: {len(tacaw_data.kx)} × {len(tacaw_data.ky)}")
         logger.info(f"Frequency range: {tacaw_data.frequency.min():.2f} to {tacaw_data.frequency.max():.2f} THz")
         logger.info(f"Intensity data shape: {tacaw_data.intensity.shape}")
-        logger.info(f"Simulation time: {simulation_time:.2f} seconds")
+
+        if simulation_time > 0:
+            logger.info(f"Simulation time: {simulation_time:.2f} seconds")
+            logger.info("Data source: Fresh simulation")
+        else:
+            logger.info("Simulation time: 0.0 seconds (loaded from cache)")
+            logger.info("Data source: Cached TACAWData")
+
         logger.info(f"Results saved to: {output_dir.absolute()}")
         logger.info(f"TACAWData cache: {tacaw_cache_file.name}")
         logger.info("="*60)
 
         logger.info("JACR TACAW simulation test completed successfully!")
-        logger.info(f"Note: To clear cached data, delete: {tacaw_cache_file}")
-        
+       
     except Exception as e:
         logger.error(f"Simulation failed: {e}")
         raise
