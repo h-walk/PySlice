@@ -22,7 +22,6 @@ class Trajectory:
 The `Trajectory` class stores molecular dynamics data loaded from LAMMPS dump files. It supports:
 - Loading from LAMMPS dump files via OVITO
 - Automatic caching of trajectory data
-- Optional atomic number mapping from LAMMPS types to actual atomic numbers
 - Coordinate transformations and analysis
 
 ### WFData (Wave Function Data)
