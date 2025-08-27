@@ -163,37 +163,6 @@ spectrum = tacaw_data.spectrum(probe_index=0)
 diffraction = tacaw_data.diffraction(probe_index=0)
 ```
 
-### Advanced Usage
-
-```python
-# Multiple probe positions in a grid
-from src.tacaw.ms_calculator_abtem import MultisliceCalculatorAbtem
-
-# Grid probe positions
-probe_positions = [
-    (0.0, 0.0),   # Center
-    (5.0, 0.0),   # Right
-    (0.0, 5.0),   # Top
-    (-5.0, 0.0),  # Left
-    (0.0, -5.0),  # Bottom
-]
-
-# Run with multiple probes
-wf_data = calculator.run_simulation(
-    trajectory=trajectory,
-    probe_positions=probe_positions,
-    aperture=1.0,  # 1 mrad aperture for convergent beam
-    **sim_params
-)
-
-# Convert and analyze
-tacaw_data = wf_data.fft_to_tacaw_data()
-
-# Extract real-space intensity map at specific frequency
-frequency_thz = 50.0  # 50 THz
-intensity_map = tacaw_data.spectrum_image(frequency_thz)
-```
-
 ## Data Flow
 
 ```
@@ -209,20 +178,12 @@ WFData.fft_to_tacaw_data() → TACAWData → Analysis & Visualization
 ### Trajectory Loading
 - **OVITO Integration**: Robust LAMMPS dump file parsing
 - **Caching**: Automatic .npy file caching for fast reloading
-- **Atomic Numbers**: Optional mapping from LAMMPS types to atomic numbers
 - **Validation**: Comprehensive data validation and error checking
 
 ### Multislice Simulation
 - **Abtem Backend**: High-performance multislice calculations
-- **ASE Compatibility**: Full integration with Atomic Simulation Environment
 - **Batch Processing**: Memory-efficient processing of large trajectories
 - **Progress Monitoring**: Real-time progress tracking with tqdm
-
-### TACAW Analysis
-- **FFT Processing**: Time → frequency domain conversion
-- **Multiple Metrics**: Spectra, diffraction patterns, real-space maps
-- **Spatial Analysis**: k-space masking and region-specific analysis
-- **Visualization**: Comprehensive plotting functions
 
 ### Performance Optimizations
 - **Intelligent Caching**: Avoids recomputation of expensive operations
