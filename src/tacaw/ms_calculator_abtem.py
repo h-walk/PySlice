@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 abtem.config.set({"precision": "float64"})
 
 
-class MultisliceCalculatorASE:
+class MultisliceCalculatorAbtem:
     """
     ASE-based multislice calculator for electron microscopy simulations.
 
@@ -60,7 +60,7 @@ class MultisliceCalculatorASE:
         cleanup_temp_files: bool = False,
     ) -> WFData:
         """
-        Run multislice simulation for each frame in the trajectory using ASE + abtem.
+        Run multislice simulation for each frame in the trajectory using abtem.
         
         This method saves each frame's results to disk to minimize memory usage.
 
@@ -431,7 +431,7 @@ if __name__ == "__main__":
     )
 
     # Initialize ASE-based calculator
-    calculator = MultisliceCalculatorASE()
+    calculator = MultisliceCalculatorAbtem()
 
     # Run simulation
     wf_data = calculator.run_simulation(

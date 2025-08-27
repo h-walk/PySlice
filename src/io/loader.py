@@ -5,6 +5,7 @@ import numpy as np
 from pathlib import Path
 import logging
 from tqdm import tqdm
+from typing import Optional
 
 
 from ..tacaw.trajectory import Trajectory
@@ -21,7 +22,7 @@ except ImportError as e:
 logger = logging.getLogger(__name__)
 
 class TrajectoryLoader:
-    def __init__(self, filename: str, timestep: float = 1.0):
+    def __init__(self, filename: str, timestep: float = 1.0, atomic_numbers: Optional[dict[int, int]] = None):
         """
         Initialize trajectory loader for LAMMPS dump files.
 
@@ -29,6 +30,9 @@ class TrajectoryLoader:
             filename: Path to LAMMPS dump file
             timestep: Timestep in picoseconds (LAMMPS files only contain frame numbers,
                 not timestep values, so this must be provided)
+            atomic_numbers: Optional dictionary mapping LAMMPS atom types to actual atomic numbers.
+                If provided, LAMMPS atom types will be converted to actual atomic numbers.
+                Example: {1: 6, 2: 8} maps LAMMPS type 1 to carbon (6) and type 2 to oxygen (8)
         """
         if timestep <= 0:
             raise ValueError("timestep must be positive.")
@@ -36,6 +40,43 @@ class TrajectoryLoader:
         if not self.filepath.exists():
             raise FileNotFoundError(f"Trajectory file not found: {filename}")
         self.timestep = timestep
+        self.atomic_numbers = atomic_numbers
+
+    def _apply_atomic_number_mapping(self, atom_types: np.ndarray) -> np.ndarray:
+        """
+        Apply atomic number mapping to convert LAMMPS atom types to actual atomic numbers.
+
+        Args:
+            atom_types: Array of LAMMPS atom types
+
+        Returns:
+            Array of atomic numbers (same shape as input)
+        """
+        if self.atomic_numbers is None:
+            return atom_types
+
+        # Validate that atomic numbers are reasonable (between 1 and 118)
+        for lammps_type, atomic_num in self.atomic_numbers.items():
+            if not (1 <= atomic_num <= 118):
+                raise ValueError(f"Invalid atomic number {atomic_num} for LAMMPS type {lammps_type}. Atomic numbers must be between 1 and 118.")
+
+        # Create a copy to avoid modifying the original
+        mapped_types = atom_types.copy()
+
+        # Apply mapping for each unique LAMMPS atom type
+        unique_types = np.unique(atom_types)
+        unmapped_types = []
+
+        for lammps_type in unique_types:
+            if lammps_type in self.atomic_numbers:
+                mapped_types[atom_types == lammps_type] = self.atomic_numbers[lammps_type]
+            else:
+                unmapped_types.append(lammps_type)
+
+        if unmapped_types:
+            logger.warning(f"No atomic number mapping provided for LAMMPS atom types {unmapped_types}. These will keep their original LAMMPS type values.")
+
+        return mapped_types
 
     def load(self) -> Trajectory:
         """Load trajectory from LAMMPS dump file."""
@@ -58,6 +99,8 @@ class TrajectoryLoader:
 
                 if box_mat.shape != (3,3):
                     raise ValueError(f"Cached box_matrix has shape {box_mat.shape}, expected (3,3).")
+
+                # Note: Cached data already contains mapped atomic numbers if mapping was applied
 
                 trajectory = Trajectory(
                     atom_types=atom_types,
@@ -157,6 +200,9 @@ class TrajectoryLoader:
         else:
             logger.warning(f"OVITO: Particle types missing/mismatched (expected {n_atoms}). Defaulting types to 1.")
             atom_types_arr = np.ones(n_atoms, dtype=np.int32)
+
+        # Apply atomic number mapping if provided
+        atom_types_arr = self._apply_atomic_number_mapping(atom_types_arr)
 
         logger.info(f"Trajectory '{self.filepath.name}' loaded via OVITO: {n_frames} frames, {n_atoms} atoms.")
 
