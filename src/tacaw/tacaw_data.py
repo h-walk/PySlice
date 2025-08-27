@@ -74,38 +74,7 @@ class TACAWData:
         
         return np.array(spectrum_intensities)
 
-    def spectrum_image_2d(self, frequency: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Create a 2D spectrum image map when probe positions are arranged in a grid.
-        
-        Args:
-            frequency: Frequency value in THz
-            
-        Returns:
-            Tuple of (X_grid, Y_grid, intensity_map) for 2D plotting
-        """
-        # Get intensities for all probe positions
-        intensities = self.spectrum_image(frequency)
-        
-        # Extract x and y coordinates of probe positions
-        x_coords = np.array([pos[0] for pos in self.probe_positions])
-        y_coords = np.array([pos[1] for pos in self.probe_positions])
-        
-        # Create unique sorted coordinates for gridding
-        unique_x = np.unique(x_coords)
-        unique_y = np.unique(y_coords)
-        
-        # Create 2D grid
-        X_grid, Y_grid = np.meshgrid(unique_x, unique_y)
-        intensity_map = np.zeros_like(X_grid)
-        
-        # Fill intensity map
-        for i, (x, y) in enumerate(self.probe_positions):
-            x_idx = np.where(unique_x == x)[0][0]
-            y_idx = np.where(unique_y == y)[0][0]
-            intensity_map[y_idx, x_idx] = intensities[i]
-        
-        return X_grid, Y_grid, intensity_map
+
 
     def diffraction(self, probe_index: int = 0) -> np.ndarray:
         """
@@ -310,10 +279,6 @@ if __name__ == '__main__':
     # Test spectrum image (real space intensity at specific frequency)
     spec_img = tacaw_obj.spectrum_image(frequency=10.0, probe_indices=[0, 1])
     print(f"Spectrum image at 10 THz for 2 probes: {spec_img.shape} array (real space intensities)")
-    
-    # Test 2D spectrum image
-    X, Y, intensity_map = tacaw_obj.spectrum_image_2d(frequency=10.0)
-    print(f"2D spectrum image at 10 THz: {intensity_map.shape} spatial map")
 
     # Test diffraction
     diff_pattern = tacaw_obj.diffraction(probe_index=0)

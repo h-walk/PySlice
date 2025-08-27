@@ -1,8 +1,8 @@
-# Installation Instructions for JACR TACAW
+# Installation Instructions for TACAW
 
 ## Prerequisites
 
-- Python 3.8 or higher
+- Python 3.12 or higher
 - pip package manager
 
 ## Installation Steps
@@ -25,29 +25,21 @@
      pip install ovito --find-links https://www.ovito.org/pip/
      ```
 
-   - **ptyrodactyl**: If ptyrodactyl is not available via pip, you may need to install from source:
-     ```bash
-     pip install git+https://github.com/PyTEM/ptyrodactyl.git
-     ```
-
-   - **JAX with GPU support** (optional, for faster computation):
-     ```bash
-     pip install jax[cuda12_pip] -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-     ```
+   - **abtem**: The abtem library may require specific installation steps. Check the [abtem documentation](https://abtem.readthedocs.io/en/latest/) for detailed installation instructions.
 
 ## Testing the Installation
 
-Run the test script to verify everything is working:
+Run the main simulation script to verify everything is working:
 ```bash
-python3 test_jacr_simulation.py
+python3 main.py
 ```
 
 ## Troubleshooting
 
 - **OVITO installation issues**: OVITO sometimes requires specific Python versions. Check the [OVITO documentation](https://www.ovito.org/docs/current/python/) for compatibility.
 
-- **ptyrodactyl not found**: This package may need to be installed from source or a specific repository. Check the ptyrodactyl documentation for installation instructions.
+- **abtem installation**: If you encounter abtem issues, refer to the [abtem installation guide](https://abtem.readthedocs.io/en/latest/installation.html).
 
-- **JAX installation**: If you encounter JAX issues, refer to the [JAX installation guide](https://github.com/google/jax#installation).
+- **Memory issues**: For large trajectories, you may need to adjust the `batch_size` parameter or limit the number of frames processed.
 
-- **Memory issues**: For large trajectories, you may need to adjust the `supersampling` parameter or limit the number of frames processed.
+- **ASE compatibility**: Ensure your ASE version is compatible with abtem. The requirements.txt specifies compatible versions.

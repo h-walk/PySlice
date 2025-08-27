@@ -2,35 +2,23 @@
 numpy>=1.20.0
 scipy>=1.7.0
 
-# JAX for GPU acceleration
-jax>=0.4.0
-jaxlib>=0.4.0
-
 # Plotting and visualization
 matplotlib>=3.5.0
-seaborn>=0.11.0
 
 # Progress bars and utilities
 tqdm>=4.62.0
-pathlib
 
-# Multislice electron microscopy simulation
-abtem>=1.0.0
-ase>=3.22.0
+# Multislice electron microscopy simulation (abtem-based)
+abtem>=1.0.6
+ase>=3.26.0
 
-# Optional: ptyrodactyl (if you want to use the ptyrodactyl-based calculator)
-# ptyrodactyl>=0.3.0
-
-# LAMMPS trajectory loading (optional but recommended)
+# LAMMPS trajectory loading
 ovito>=3.8.0
 
 # Data structures and typing
 dataclasses
 typing-extensions
 
-# Logging and debugging
-logging
-
-# Optional: Jupyter notebook support
+# Jupyter notebook support
 jupyter>=1.0.0
 ipykernel>=6.0.0
