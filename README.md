@@ -7,7 +7,7 @@ TACAW is a Python package for simulating and analyzing **time-resolved electron 
 The system bridges molecular dynamics simulations with electron microscopy experiments by:
 - Converting LAMMPS MD trajectories into electron diffraction patterns
 - Performing multislice simulations using the abtem library
-- Applying FFT-based JACR analysis to extract frequency-domain information
+- Applying FFT-based analysis to extract frequency-domain information
 - Providing comprehensive visualization and analysis tools
 
 ## System Architecture
