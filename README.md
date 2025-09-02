@@ -1,6 +1,6 @@
 # TACAW
 
-TACAW is a Python package for simulating and analyzing **time-resolved electron diffraction patterns** from molecular dynamics trajectories. It implements the Time Autocorrelation of Auxiliary Wave Method to convert time-domain electron scattering data into the frequency-domain, enabling the analysis of phonon dynamics and vibrational modes in materials.
+TACAW is a Python package for simulating and analyzing **time-resolved electron diffraction data** from molecular dynamics trajectories. It implements the Time Autocorrelation of Auxiliary Wave Method to convert time-domain electron scattering data into the frequency-domain, enabling the analysis of phonon dynamics and vibrational modes in materials.
 
 ## Core Value Proposition
 
