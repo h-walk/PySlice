@@ -1,6 +1,6 @@
-# JAX_TACAW
+# TACAW
 
-JAX_TACAW is a Python package for simulating and analyzing **time-resolved electron diffraction patterns** from molecular dynamics trajectories. It implements the **JACR method** to convert time-domain electron scattering data into frequency-domain spectra, enabling the analysis of phonon dynamics and vibrational modes in materials at the atomic scale.
+TACAW is a Python package for simulating and analyzing **time-resolved electron diffraction patterns** from molecular dynamics trajectories. It implements the Time Autocorrelation of Auxiliary Wave Method to convert time-domain electron scattering data into the frequency-domain, enabling the analysis of phonon dynamics and vibrational modes in materials.
 
 ## Core Value Proposition
 
