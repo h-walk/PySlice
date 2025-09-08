@@ -54,7 +54,7 @@ def setup_simulation_parameters():
         'defocus': 0.0,             # No defocus
         'slice_thickness': 0.5,     # 1 Å slice thickness
         'sampling': 0.1,            # Real space sampling in Å
-        'batch_size': 10,           # Process 10 frames at a time (adjust based on memory)
+        'batch_size': 10,          # Process 10 frames at a time (adjust based on memory)
     }
 
 
@@ -541,8 +541,8 @@ def main():
     # For production: change to "2x2", "3x3", etc. for multiple probe positions
     probe_positions = setup_probe_positions(trajectory, grid_dim="1x1")
     
-    # Initialize optimized NumPy class-based calculator  
-    logger.info("Initializing optimized NumPy class-based MultisliceCalculator...")
+    # Initialize multiprocessing calculator  
+    logger.info("Initializing multiprocessing MultisliceCalculator...")
     calculator = MultisliceCalculatorNumpy()
     
     # Run JACR simulation

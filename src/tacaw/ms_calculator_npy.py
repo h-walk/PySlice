@@ -11,6 +11,8 @@ from tqdm import tqdm
 import time
 import pickle
 import hashlib
+import os
+from multiprocessing import Pool
 
 # Import our optimized classes
 from .potential import Potential
@@ -21,6 +23,41 @@ from .trajectory import Trajectory
 from .wf_data import WFData
 
 logger = logging.getLogger(__name__)
+
+
+def _process_frame_worker(args):
+    """Worker function for multiprocessing frame computation."""
+    frame_idx, positions, atom_types, xs, ys, zs, aperture, eV, probe_positions, element_map, cache_file = args
+    
+    # Check cache first
+    if cache_file.exists():
+        return frame_idx, np.load(cache_file), True  # (frame_idx, data, was_cached)
+    
+    # Convert atom types to element names
+    atom_type_names = []
+    for atom_type in atom_types:
+        if atom_type in element_map:
+            atom_type_names.append(element_map[atom_type])
+        else:
+            atom_type_names.append(atom_type)
+    
+    # Create potential and probe
+    potential = Potential(xs, ys, zs, positions, atom_type_names, kind="kirkland")
+    probe = Probe(xs, ys, aperture, eV)
+    
+    # Compute wavefunctions for each probe position
+    n_probes = len(probe_positions)
+    nx, ny = len(xs), len(ys)
+    frame_data = np.zeros((n_probes, nx, ny, 1, 1), dtype=complex)
+    for probe_idx, (px, py) in enumerate(probe_positions):
+        # Get real-space exit wavefunction and convert to k-space
+        exit_wave = Propagate(probe, potential)
+        diffraction_pattern = np.fft.fftshift(np.fft.fft2(exit_wave))
+        frame_data[probe_idx, :, :, 0, 0] = diffraction_pattern
+    
+    # Cache result
+    np.save(cache_file, frame_data)
+    return frame_idx, frame_data, False  # (frame_idx, data, was_cached)
 
 
 class MultisliceCalculatorNumpy:
@@ -74,7 +111,8 @@ class MultisliceCalculatorNumpy:
         probe_positions: Optional[List[Tuple[float, float]]] = None,
         batch_size: int = 10,
         save_path: Optional[Path] = None,
-        cleanup_temp_files: bool = False
+        cleanup_temp_files: bool = False,
+        nworkers: int = 10
     ) -> WFData:
         """
         Run multislice simulation using optimized class-based approach.
@@ -91,6 +129,7 @@ class MultisliceCalculatorNumpy:
             batch_size: Number of frames to process at once
             save_path: Optional path to save wave function data
             cleanup_temp_files: Whether to delete temp files after loading
+            nworkers: Number of parallel workers for multiprocessing
             
         Returns:
             WFData: Wave function data containing complex amplitudes
@@ -125,52 +164,60 @@ class MultisliceCalculatorNumpy:
         n_frames = trajectory.n_frames
         n_probes = len(probe_positions)
         
-        # Storage: [frame, probe, x, y, z, complex]
-        wavefunction_data = np.zeros((n_frames, n_probes, nx, ny, 1, 1), dtype=complex)
+        # Storage: [probe, frame, x, y, layer] - matches WFData expected format
+        wavefunction_data = np.zeros((n_probes, n_frames, nx, ny, 1), dtype=complex)
         
-        # Process frames with caching
+        # Process frames with caching and multiprocessing
         total_start_time = time.time()
         frames_computed = 0
         frames_cached = 0
         
-        for frame_idx in range(n_frames):
-            cache_file = output_dir / f"frame_{frame_idx}.npy"
-            
-            if cache_file.exists():
-                # Load from cache
-                cached_data = np.load(cache_file)
-                wavefunction_data[frame_idx] = cached_data
-                frames_cached += 1
-            else:
-                # Compute frame
-                positions = trajectory.positions[frame_idx]
-                atom_types = trajectory.atom_types
+        # Process in batches using multiprocessing
+        n_batches = (n_frames + batch_size - 1) // batch_size
+        
+        # Use tqdm for progress tracking
+        with tqdm(total=n_frames, desc="Processing frames", unit="frame") as pbar:
+            for batch_idx in range(n_batches):
+                batch_start = batch_idx * batch_size
+                batch_end = min(batch_start + batch_size, n_frames)
+                batch_frames = list(range(batch_start, batch_end))
                 
-                # Convert atom types to element names
-                atom_type_names = []
-                for atom_type in atom_types:
-                    if atom_type in self.element_map:
-                        atom_type_names.append(self.element_map[atom_type])
+                # Debug: log batch info
+                logger.info(f"Batch {batch_idx + 1}/{n_batches}: frames {batch_start}-{batch_end-1} ({len(batch_frames)} frames)")
+                
+                # Prepare arguments for worker processes
+                worker_args = []
+                for frame_idx in batch_frames:
+                    cache_file = output_dir / f"frame_{frame_idx}.npy"
+                    positions = trajectory.positions[frame_idx]
+                    atom_types = trajectory.atom_types
+                    
+                    args = (frame_idx, positions, atom_types, xs, ys, zs, 
+                           aperture, eV, probe_positions, self.element_map, cache_file)
+                    worker_args.append(args)
+                
+                # Process batch with multiprocessing or sequential fallback
+                if os.name == 'posix':
+                    # Use multiprocessing on POSIX systems
+                    with Pool(processes=nworkers) as pool:
+                        batch_results = pool.map(_process_frame_worker, worker_args)
+                else:
+                    # Use sequential processing on Windows
+                    batch_results = [_process_frame_worker(args) for args in worker_args]
+                
+                # Store results using the returned frame_idx (handles out-of-order completion)
+                for frame_idx, frame_data, was_cached in batch_results:
+                    # frame_data shape: (n_probes, nx, ny, 1, 1) -> need (n_probes, nx, ny, 1)
+                    for probe_idx in range(n_probes):
+                        wavefunction_data[probe_idx, frame_idx, :, :, 0] = frame_data[probe_idx, :, :, 0, 0]
+                    
+                    if was_cached:
+                        frames_cached += 1
                     else:
-                        atom_type_names.append(atom_type)
+                        frames_computed += 1
                 
-                # Create potential and probe
-                potential = Potential(xs, ys, zs, positions, atom_type_names, kind="kirkland")
-                probe = Probe(xs, ys, aperture, eV)
-                
-                # Compute wavefunctions for each probe position
-                frame_data = np.zeros((n_probes, nx, ny, 1, 1), dtype=complex)
-                for probe_idx, (px, py) in enumerate(probe_positions):
-                    wavefunction = Propagate(probe, potential)
-                    frame_data[probe_idx, :, :, 0, 0] = wavefunction
-                
-                # Cache and store result
-                np.save(cache_file, frame_data)
-                wavefunction_data[frame_idx] = frame_data
-                frames_computed += 1
-            
-            # Progress ticker every frame
-            logger.info(f"Processed {frame_idx + 1}/{n_frames} frames")
+                # Update progress bar once per batch (correct count)
+                pbar.update(len(batch_results))
         
         logger.info(f"Frame processing complete: {frames_computed} computed, {frames_cached} cached")
         
@@ -193,9 +240,9 @@ class MultisliceCalculatorNumpy:
         
         # Create coordinate arrays for output
         # Note: WFData expects (probe_positions, time, kx, ky, layer) format
-        # Convert real space coordinates to k-space coordinates via FFT frequencies
-        kx = np.fft.fftfreq(nx, sampling)  # k-space sampling
-        ky = np.fft.fftfreq(ny, sampling)  # k-space sampling
+        # Create k-space coordinates to match expected format (same as AbTem)
+        kx = np.fft.fftshift(np.fft.fftfreq(nx, sampling) * 2 * np.pi)  # k-space in Å⁻¹
+        ky = np.fft.fftshift(np.fft.fftfreq(ny, sampling) * 2 * np.pi)  # k-space in Å⁻¹
         time_array = np.arange(n_frames) * trajectory.timestep  # Time array in ps
         layer_array = np.array([0])  # Single layer for now
         
