@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 # Import our TACAW modules
 try:
     from src.io.loader import TrajectoryLoader
-    from src.tacaw.ms_calculator_abtem import MultisliceCalculatorAbtem 
+    from src.tacaw.ms_calculator_npy import MultisliceCalculatorNumpy
     from src.tacaw.tacaw_data import TACAWData
 except ImportError as e:
     logger.error(f"Failed to import TACAW modules: {e}")
@@ -541,9 +541,9 @@ def main():
     # For production: change to "2x2", "3x3", etc. for multiple probe positions
     probe_positions = setup_probe_positions(trajectory, grid_dim="1x1")
     
-    # Initialize Abtem-based calculator
-    logger.info("Initializing Abtem-based MultisliceCalculator...")
-    calculator = MultisliceCalculatorAbtem()
+    # Initialize optimized NumPy class-based calculator  
+    logger.info("Initializing optimized NumPy class-based MultisliceCalculator...")
+    calculator = MultisliceCalculatorNumpy()
     
     # Run JACR simulation
     logger.info("Running TACAW multislice simulation...")
