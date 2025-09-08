@@ -131,7 +131,6 @@ class Potential:
         self.kys = np.fft.fftfreq(ny, d=dy)
         qsq = self.kxs[:, None]**2 + self.kys[None, :]**2
         
-        logger.info(f"Building potential: {nx}×{ny}×{nz} grid, {len(positions)} atoms")
         
         # Initialize potential array
         reciprocal = np.zeros((nx, ny, nz), dtype=complex)
@@ -159,7 +158,7 @@ class Potential:
                 form_factors[at] = np.exp(-1**2 * qsq / 2)
         
         # Process each atom type separately (reuse form factors)
-        for at in tqdm(unique_atom_types, desc="Building potential (optimized)"):
+        for at in unique_atom_types:
             form_factor = form_factors[at]
             
             # OPTIMIZATION 2: Vectorized atom type masking
@@ -202,4 +201,3 @@ class Potential:
         # Apply proper normalization (same as k-space NumPy)
         self.array = potential_real * dx * dy
         
-        logger.info("Potential construction complete")

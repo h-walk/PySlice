@@ -73,13 +73,10 @@ class Probe:
         self.kxs = np.fft.fftfreq(nx, d=dx)
         self.kys = np.fft.fftfreq(ny, d=dy)
         
-        logger.info(f"Creating probe: {mrad}mrad aperture, {eV/1000:.1f}kV ({self.wavelength:.4f}Å)")
-        
         # PREPARE PROBE: plane wave, or disks in reciprocal space
         if mrad == 0:
             # Plane wave
             self.array = np.ones((nx, ny), dtype=complex)
-            logger.info("  Probe type: Plane wave")
         else:
             # Convergent beam - create disk in reciprocal space
             reciprocal = np.zeros((nx, ny), dtype=complex)
@@ -87,7 +84,6 @@ class Probe:
             radii = np.sqrt(self.kxs[:, None]**2 + self.kys[None, :]**2)
             reciprocal[radii < radius] = 1
             self.array = np.fft.ifftshift(np.fft.ifft2(reciprocal))
-            logger.info(f"  Probe type: Convergent beam, radius={radius:.6f} Å⁻¹")
 
 
 def Propagate(probe, potential):
@@ -117,15 +113,12 @@ def Propagate(probe, potential):
     P = np.exp(-1j * np.pi * probe.wavelength * dz * 
                (potential.kxs[:, None]**2 + potential.kys[None, :]**2))
     
-    logger.info(f"Propagating through {len(potential.zs)} slices")
-    logger.info(f"  Interaction parameter σ = {sigma:.6e}")
-    logger.info(f"  Slice thickness Δz = {dz:.3f} Å")
     
     # Initialize wavefunction with probe
     array = probe.array.copy()
     
     # Multislice propagation through each slice
-    for z in tqdm(range(len(potential.zs)), desc="Multislice propagation"):
+    for z in range(len(potential.zs)):
         # Transmission function: t = exp(iσV(x,y,z))
         # where V(x,y,z) is the projected potential for slice z
         t = np.exp(1j * sigma * potential.array[:, :, z])
@@ -138,5 +131,4 @@ def Propagate(probe, potential):
         if z < len(potential.zs) - 1:
             array = np.fft.ifft2(P * np.fft.fft2(array))
     
-    logger.info("Multislice propagation complete")
     return array

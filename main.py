@@ -580,6 +580,7 @@ def main():
             wf_data = calculator.run_simulation(
                 trajectory=trajectory,
                 probe_positions=probe_positions,
+                cleanup_temp_files=False,
                 **sim_params
             )
 
