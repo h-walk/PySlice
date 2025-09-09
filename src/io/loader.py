@@ -9,6 +9,7 @@ from typing import Optional
 
 
 from ..tacaw.trajectory import Trajectory
+from ..tacaw.potential import getZfromElementName
 
 # Try to import OVITO, but don't fail if it's not available
 try:
@@ -22,7 +23,10 @@ except ImportError as e:
 logger = logging.getLogger(__name__)
 
 class TrajectoryLoader:
-    def __init__(self, filename: str, timestep: float = 1.0, atomic_numbers: Optional[dict[int, int]] = None):
+    def __init__(self, filename: str, 
+				timestep: float = 1.0, 
+				atomic_numbers: Optional[dict[int, int]] = None, 
+				element_names: Optional[dict[str,int]] = None):
         """
         Initialize trajectory loader for LAMMPS dump files.
 
@@ -41,6 +45,9 @@ class TrajectoryLoader:
             raise FileNotFoundError(f"Trajectory file not found: {filename}")
         self.timestep = timestep
         self.atomic_numbers = atomic_numbers
+
+        if not element_names is None:
+            self.atomic_numbers = { k:getZfromElementName(element_names[k]) for k in element_names.keys() }		
 
     def _apply_atomic_number_mapping(self, atom_types: np.ndarray) -> np.ndarray:
         """
