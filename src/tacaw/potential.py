@@ -198,6 +198,6 @@ class Potential:
             potential_slice = np.fft.ifft2(reciprocal[:, :, z])
             potential_real[:, :, z] = np.real(potential_slice)
         
-        # Apply proper normalization (same as k-space NumPy)
-        self.array = potential_real * dx * dy
+        # No dx*dy normalization to match PyTorch approach
+        self.array = potential_real
         

@@ -9,10 +9,7 @@ import logging
 from typing import Optional, Tuple, List
 from tqdm import tqdm
 import time
-import pickle
 import hashlib
-import os
-from multiprocessing import Pool
 
 # Import our optimized classes
 from .potential import Potential
@@ -26,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 def _process_frame_worker(args):
-    """Worker function for multiprocessing frame computation."""
+    """Worker function for frame computation."""
     frame_idx, positions, atom_types, xs, ys, zs, aperture, eV, probe_positions, element_map, cache_file = args
     
     # Check cache first
@@ -50,9 +47,26 @@ def _process_frame_worker(args):
     nx, ny = len(xs), len(ys)
     frame_data = np.zeros((n_probes, nx, ny, 1, 1), dtype=complex)
     for probe_idx, (px, py) in enumerate(probe_positions):
-        # Get real-space exit wavefunction and convert to k-space
-        exit_wave = Propagate(probe, potential)
-        diffraction_pattern = np.fft.fftshift(np.fft.fft2(exit_wave))
+        # Create a copy of the probe for shifting
+        shifted_probe = probe.copy()
+        
+        # Apply probe shift using k-space phase modulation (same as PyTorch version)
+        probe_k = np.fft.fft2(shifted_probe.array)
+        
+        # Create phase shifts for probe position
+        kx_shift = np.exp(2j * np.pi * shifted_probe.kxs[:, None] * px)
+        ky_shift = np.exp(2j * np.pi * shifted_probe.kys[None, :] * py)
+        probe_k_shifted = probe_k * kx_shift * ky_shift
+        
+        # Convert back to real space
+        shifted_probe.array = np.fft.ifft2(probe_k_shifted)
+        
+        # Propagate the shifted probe through the specimen
+        exit_wave = Propagate(shifted_probe, potential)
+        
+        # Convert to diffraction pattern
+        exit_wave_k = np.fft.fft2(exit_wave)
+        diffraction_pattern = np.fft.fftshift(exit_wave_k)
         frame_data[probe_idx, :, :, 0, 0] = diffraction_pattern
     
     # Cache result
@@ -112,7 +126,6 @@ class MultisliceCalculatorNumpy:
         batch_size: int = 10,
         save_path: Optional[Path] = None,
         cleanup_temp_files: bool = False,
-        nworkers: int = 10
     ) -> WFData:
         """
         Run multislice simulation using optimized class-based approach.
@@ -129,7 +142,6 @@ class MultisliceCalculatorNumpy:
             batch_size: Number of frames to process at once
             save_path: Optional path to save wave function data
             cleanup_temp_files: Whether to delete temp files after loading
-            nworkers: Number of parallel workers for multiprocessing
             
         Returns:
             WFData: Wave function data containing complex amplitudes
@@ -182,9 +194,6 @@ class MultisliceCalculatorNumpy:
                 batch_end = min(batch_start + batch_size, n_frames)
                 batch_frames = list(range(batch_start, batch_end))
                 
-                # Debug: log batch info
-                logger.info(f"Batch {batch_idx + 1}/{n_batches}: frames {batch_start}-{batch_end-1} ({len(batch_frames)} frames)")
-                
                 # Prepare arguments for worker processes
                 worker_args = []
                 for frame_idx in batch_frames:
@@ -196,14 +205,8 @@ class MultisliceCalculatorNumpy:
                            aperture, eV, probe_positions, self.element_map, cache_file)
                     worker_args.append(args)
                 
-                # Process batch with multiprocessing or sequential fallback
-                if os.name == 'posix':
-                    # Use multiprocessing on POSIX systems
-                    with Pool(processes=nworkers) as pool:
-                        batch_results = pool.map(_process_frame_worker, worker_args)
-                else:
-                    # Use sequential processing on Windows
-                    batch_results = [_process_frame_worker(args) for args in worker_args]
+                # Process batch sequentially (removed multiprocessing)
+                batch_results = [_process_frame_worker(args) for args in worker_args]
                 
                 # Store results using the returned frame_idx (handles out-of-order completion)
                 for frame_idx, frame_data, was_cached in batch_results:

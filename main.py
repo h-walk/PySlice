@@ -6,21 +6,14 @@ This script loads a LAMMPS trajectory and runs the complete TACAW workflow:
 
 1. Load trajectory from LAMMPS dump file
 2. Run multislice simulation for each timestep
-3. Convert time-domain data to frequency domain via FFT (JACR method)
+3. Convert time-domain data to frequency domain via FFT (TACAW method)
 4. Generate comprehensive plots of the results
-
-
-
-
-
 
 Features:
 - Grid-based probe positioning
 - Smart caching system
 - TACAW data analysis and visualization
 
-Usage:
-    python test_jacr_simulation.py
 """
 
 import numpy as np
@@ -37,7 +30,8 @@ logger = logging.getLogger(__name__)
 # Import our TACAW modules
 try:
     from src.io.loader import TrajectoryLoader
-    from src.tacaw.ms_calculator_npy import MultisliceCalculatorNumpy
+    from src.tacaw.ms_calculator_torch import MultisliceCalculatorTorch
+    from src.tacaw.wf_data import WFData
     from src.tacaw.tacaw_data import TACAWData
 except ImportError as e:
     logger.error(f"Failed to import TACAW modules: {e}")
@@ -54,7 +48,6 @@ def setup_simulation_parameters():
         'defocus': 0.0,             # No defocus
         'slice_thickness': 0.5,     # 1 Å slice thickness
         'sampling': 0.1,            # Real space sampling in Å
-        'batch_size': 10,          # Process 10 frames at a time (adjust based on memory)
     }
 
 
@@ -117,7 +110,7 @@ def setup_probe_positions(trajectory, grid_dim="1x1", manual_positions=None):
     probe_positions = []
 
     # Add padding to avoid probe positions right at the boundaries
-    padding_fraction = 0.1  # 10% padding from edges
+    padding_fraction = 0.05  # 5% padding from edges
 
     for i in range(rows):
         for j in range(cols):
@@ -148,12 +141,7 @@ def setup_probe_positions(trajectory, grid_dim="1x1", manual_positions=None):
     return probe_positions
 
 
-
-
-
-
-
-def create_dispersion_plot(k_points=None, n_samples=200):
+def create_dispersion_plot(k_points=None, n_samples=1000):
     """
     Create a dispersion plot with custom k-points and sampling.
 
@@ -166,15 +154,15 @@ def create_dispersion_plot(k_points=None, n_samples=200):
     """
     if k_points is None:
         # Default high-symmetry path for 2D system
-        k_points = [(0, 0), (2, 0), (2, 2), (0, 2), (-2, 2), (-2, 0), (-2, -2), (0, -2), (2, -2), (2, 0)]
+        k_points = [(0, 0), (5,0)]
 
     # Create k-space path by interpolating between k-points
     kx_path = []
     ky_path = []
 
-    for i in range(len(k_points)):
+    for i in range(len(k_points) - 1):  # Don't wrap around to first point
         start_point = k_points[i]
-        end_point = k_points[(i + 1) % len(k_points)]
+        end_point = k_points[i + 1]
 
         # Interpolate between points
         for j in range(n_samples):
@@ -203,9 +191,7 @@ def plot_tacaw_results(tacaw_data, output_dir):
         'ytick.labelsize': 12,
         'legend.fontsize': 12,
         'figure.titlesize': 18,
-        'axes.grid': True,
-        'grid.alpha': 0.3,
-        'grid.linestyle': '--',
+        'axes.grid': False,
         'axes.facecolor': '#fafafa',
         'figure.facecolor': 'white',
         'axes.edgecolor': '#333333',
@@ -242,8 +228,8 @@ def plot_tacaw_results(tacaw_data, output_dir):
                     fontsize=16, fontweight='bold', pad=20)
 
         # Enhanced grid and styling
-        ax.grid(True, alpha=0.4, linestyle='--', linewidth=0.8)
-        ax.set_facecolor('#fafafa')
+        
+       
 
         # Add subtle spine styling
         for spine in ax.spines.values():
@@ -284,8 +270,8 @@ def plot_tacaw_results(tacaw_data, output_dir):
             ax.set_title(f'Probe {i+1}\n({probe_pos[0]:.1f}, {probe_pos[1]:.1f}) Å',
                         fontsize=12, fontweight='bold', pad=10)
 
-            ax.grid(True, alpha=0.3, linestyle='--')
-            ax.set_facecolor('#fafafa')
+           
+           
 
         # Hide unused subplots
         for i in range(max_plots, len(axes)):
@@ -302,16 +288,17 @@ def plot_tacaw_results(tacaw_data, output_dir):
         fig, ax = plt.subplots(1, 1, figsize=(10, 10))
 
         diffraction = tacaw_data.diffraction(probe_index=0)
-        diffraction_log = np.log10(diffraction + 1e-10)
+        # Double square root for better visualization of weak features
+        diffraction_scaled = np.sqrt(np.sqrt(diffraction))
 
         # Enhanced colormap with inferno (user preference)
-        im = ax.imshow(diffraction_log, extent=[tacaw_data.kx.min(), tacaw_data.kx.max(),
+        im = ax.imshow(diffraction_scaled, extent=[tacaw_data.kx.min(), tacaw_data.kx.max(),
                                               tacaw_data.ky.min(), tacaw_data.ky.max()],
                        origin='lower', cmap='inferno', aspect='equal')
 
         # Enhanced colorbar
         cbar = plt.colorbar(im, ax=ax, shrink=0.8, aspect=30)
-        cbar.set_label('log10(Intensity)', fontsize=14, fontweight='bold')
+        cbar.set_label('Intensity^(1/4)', fontsize=14, fontweight='bold')
         cbar.ax.tick_params(labelsize=12)
 
         ax.set_xlabel('kx (Å⁻¹)', fontsize=14, fontweight='bold')
@@ -324,11 +311,9 @@ def plot_tacaw_results(tacaw_data, output_dir):
         ax.set_xlim([-10, 10])
         ax.set_ylim([-10, 10])
         ax.set_aspect('equal', adjustable='box')
-        ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.8)
+       
 
-        # Add center crosshair
-        ax.axhline(y=0, color='white', linestyle='-', alpha=0.5, linewidth=1)
-        ax.axvline(x=0, color='white', linestyle='-', alpha=0.5, linewidth=1)
+        # Removed crosshair lines
 
     else:
         # Multiple probes - use subplot grid
@@ -347,14 +332,15 @@ def plot_tacaw_results(tacaw_data, output_dir):
         for i in range(max_plots):
             ax = axes[i]
             diffraction = tacaw_data.diffraction(probe_index=i)
-            diffraction_log = np.log10(diffraction + 1e-10)
+            # Double square root for better visualization
+            diffraction_scaled = np.sqrt(np.sqrt(diffraction))
 
-            im = ax.imshow(diffraction_log, extent=[tacaw_data.kx.min(), tacaw_data.kx.max(),
+            im = ax.imshow(diffraction_scaled, extent=[tacaw_data.kx.min(), tacaw_data.kx.max(),
                                                   tacaw_data.ky.min(), tacaw_data.ky.max()],
                            origin='lower', cmap='inferno', aspect='equal')
 
             cbar = plt.colorbar(im, ax=ax, shrink=0.7, aspect=20)
-            cbar.set_label('log10(I)', fontsize=10, fontweight='bold')
+            cbar.set_label('I^(1/4)', fontsize=10, fontweight='bold')
             cbar.ax.tick_params(labelsize=9)
 
             ax.set_xlabel('kx (Å⁻¹)', fontsize=11, fontweight='bold')
@@ -367,11 +353,9 @@ def plot_tacaw_results(tacaw_data, output_dir):
             ax.set_xlim([-10, 10])
             ax.set_ylim([-10, 10])
             ax.set_aspect('equal', adjustable='box')
-            ax.grid(True, alpha=0.3, linestyle='--')
+            
 
-            # Add center crosshair
-            ax.axhline(y=0, color='white', linestyle='-', alpha=0.4, linewidth=0.8)
-            ax.axvline(x=0, color='white', linestyle='-', alpha=0.4, linewidth=0.8)
+            # Removed crosshair lines
 
         # Hide unused subplots
         for i in range(max_plots, len(axes)):
@@ -397,16 +381,17 @@ def plot_tacaw_results(tacaw_data, output_dir):
     for i, freq in enumerate(test_frequencies):
         ax = axes[i//3, i%3]
         spectral_diff = tacaw_data.spectral_diffraction(frequency=freq, probe_index=0)
-        spectral_diff_log = np.log10(spectral_diff + 1e-10)
+        # Double square root for better visualization
+        spectral_diff_scaled = np.sqrt(np.sqrt(spectral_diff))
 
         # Enhanced colormap for spectral diffraction (using inferno)
-        im = ax.imshow(spectral_diff_log, extent=[tacaw_data.kx.min(), tacaw_data.kx.max(),
+        im = ax.imshow(spectral_diff_scaled, extent=[tacaw_data.kx.min(), tacaw_data.kx.max(),
                                                 tacaw_data.ky.min(), tacaw_data.ky.max()],
                        origin='lower', cmap='inferno', aspect='equal')
 
         # Enhanced colorbar
         cbar = plt.colorbar(im, ax=ax, shrink=0.8, aspect=25)
-        cbar.set_label('log10(I)', fontsize=11, fontweight='bold')
+        cbar.set_label('I^(1/4)', fontsize=11, fontweight='bold')
         cbar.ax.tick_params(labelsize=10)
 
         ax.set_xlabel('kx (Å⁻¹)', fontsize=12, fontweight='bold')
@@ -417,11 +402,9 @@ def plot_tacaw_results(tacaw_data, output_dir):
         ax.set_xlim([-10, 10])
         ax.set_ylim([-10, 10])
         ax.set_aspect('equal', adjustable='box')
-        ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.8)
+        
 
-        # Add center crosshair
-        ax.axhline(y=0, color='white', linestyle='-', alpha=0.6, linewidth=1)
-        ax.axvline(x=0, color='white', linestyle='-', alpha=0.6, linewidth=1)
+        # Removed crosshair lines
 
         plt.tight_layout()
     plt.savefig(output_dir / 'spectral_diffraction.png', dpi=300, bbox_inches='tight',
@@ -432,35 +415,68 @@ def plot_tacaw_results(tacaw_data, output_dir):
     logger.info("Creating dispersion plot...")
 
     # Create simple dispersion path from (0,0) to (5,0)
-    n_samples = 200 # More samples for smoother curve
+    n_samples = 1000 # More samples for smoother curve
     kx_path, ky_path = create_dispersion_plot(
         k_points=[(0, 0), (5, 0)],  # Simple path along kx
         n_samples=n_samples
     )
 
     # Sample intensity along the k-path for each frequency
+    # For better results, we'll use scipy interpolation if available
+    try:
+        from scipy.interpolate import RegularGridInterpolator
+        use_interpolation = True
+    except ImportError:
+        use_interpolation = False
+        logger.info("scipy not available, using nearest neighbor sampling")
+    
     dispersion_data = []
-
-    for freq_idx, freq in enumerate(tacaw_data.frequency):
-        if freq > 0:  # Only positive frequencies
+    
+    # Only process positive frequencies
+    positive_freq_mask = tacaw_data.frequency > 0
+    freq_indices = np.where(positive_freq_mask)[0]
+    
+    if use_interpolation:
+        # Create interpolator for each frequency
+        for freq_idx in freq_indices:
+            # Create 2D interpolator for this frequency slice
+            interpolator = RegularGridInterpolator(
+                (tacaw_data.kx, tacaw_data.ky),
+                tacaw_data.intensity[0, freq_idx, :, :],
+                method='linear',
+                bounds_error=False,
+                fill_value=0
+            )
+            
+            # Sample along the path
+            path_points = np.column_stack([kx_path, ky_path])
+            intensities = interpolator(path_points)
+            dispersion_data.append(intensities)
+    else:
+        # Fallback to nearest neighbor
+        for freq_idx in freq_indices:
             intensities = []
-
             for kx_val, ky_val in zip(kx_path, ky_path):
                 # Find nearest k-point in the data
                 kx_idx = np.argmin(np.abs(tacaw_data.kx - kx_val))
                 ky_idx = np.argmin(np.abs(tacaw_data.ky - ky_val))
-
+                
                 # Get intensity at this k-point and frequency
-                intensity = tacaw_data.intensity[0, freq_idx, kx_idx, ky_idx]  # Use first probe
+                intensity = tacaw_data.intensity[0, freq_idx, kx_idx, ky_idx]
                 intensities.append(intensity)
-
+            
             dispersion_data.append(intensities)
 
     dispersion_data = np.array(dispersion_data)
-    freq_positive = tacaw_data.frequency[tacaw_data.frequency > 0]
+    freq_positive = tacaw_data.frequency[positive_freq_mask]
 
-    # Apply logarithmic scaling to the intensity data
-    dispersion_data = np.log10(dispersion_data + 1e-10)  # Add small value to avoid log(0)
+    # Apply double square root scaling to the intensity data for better visualization
+    # Add small epsilon to avoid NaN from zero values
+    dispersion_data = np.sqrt(np.sqrt(np.abs(dispersion_data) + 1e-10))
+    
+    # Apply contrast adjustment - clip outliers for better visualization
+    vmin = np.percentile(dispersion_data, 1)  # 1st percentile
+    vmax = np.percentile(dispersion_data, 99.9)  # 99.9th percentile
 
     # Create dispersion plot
     fig, ax = plt.subplots(1, 1, figsize=(12, 8))
@@ -469,11 +485,12 @@ def plot_tacaw_results(tacaw_data, output_dir):
     # Note: Using imshow instead of pcolormesh to avoid dimension mismatch issues
     # extent defines the coordinate system: [left, right, bottom, top]
     im = ax.imshow(dispersion_data, extent=[0, 5, freq_positive.min(), freq_positive.max()],
-                   aspect='auto', cmap='inferno', origin='lower', interpolation='bilinear')
+                   aspect='auto', cmap='inferno', origin='lower', interpolation='bilinear',
+                   vmin=vmin, vmax=vmax)
 
-    # Add colorbar for log intensity
+    # Add colorbar
     cbar = plt.colorbar(im, ax=ax, shrink=0.8, aspect=20)
-    cbar.set_label('log₁₀(Intensity)', fontsize=12, fontweight='bold')
+    cbar.set_label('Intensity^(1/4)', fontsize=12, fontweight='bold')
     cbar.ax.tick_params(labelsize=10)
 
     # Set labels and title with correct axis orientation
@@ -482,11 +499,11 @@ def plot_tacaw_results(tacaw_data, output_dir):
     ax.set_title('TACAW Dispersion: Frequency vs k$_x$', fontsize=16, fontweight='bold', pad=20)
 
     # Add grid
-    ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.8)
+    
 
     # Mark k-point boundaries (vertical lines for kx coordinates)
-    ax.axvline(x=0, color='white', linestyle='-', alpha=0.8, linewidth=1)
-    ax.axvline(x=5, color='white', linestyle='-', alpha=0.8, linewidth=1)
+    ax.axvline(x=0, color='gray', linestyle='--', alpha=0.3, linewidth=0.5)
+    ax.axvline(x=5, color='gray', linestyle='--', alpha=0.3, linewidth=0.5)
 
     # Add numerical labels for kx coordinates (no symbols)
     k_labels = ['0', '5']
@@ -535,15 +552,14 @@ def main():
     # Setup simulation parameters
     sim_params = setup_simulation_parameters()
 
-    # Grid examples: "1x1" (single center), "2x2" (4 corners), "3x3" (9 grid), "4x2" (8 rectangular)
-    # Manual example: manual_positions=[(10.0, 15.0), (25.0, 30.0)]
-    # Using 1x1 for testing - single probe at center for faster execution
-    # For production: change to "2x2", "3x3", etc. for multiple probe positions
+    # Single probe for now - keeping vectorization option for later
     probe_positions = setup_probe_positions(trajectory, grid_dim="1x1")
     
-    # Initialize multiprocessing calculator  
-    logger.info("Initializing multiprocessing MultisliceCalculator...")
-    calculator = MultisliceCalculatorNumpy()
+    # Initialize PyTorch calculator (required)
+    logger.info("Initializing PyTorch MultisliceCalculator...")
+    calculator = MultisliceCalculatorTorch()
+    logger.info(f"PyTorch calculator ready on device: {calculator.device}")
+    use_pytorch = True
     
     # Run JACR simulation
     logger.info("Running TACAW multislice simulation...")
@@ -574,7 +590,7 @@ def main():
     try:
         # Only run expensive simulation if no cached TACAWData exists
         if tacaw_data is None:
-            logger.info("Running TACAW multislice simulation to generate wf_data...")
+            logger.info("Running multislice simulation...")
             simulation_start = time.time()
 
             wf_data = calculator.run_simulation(
@@ -624,8 +640,9 @@ def main():
         logger.info("\n" + "="*60)
         logger.info("TACAW SIMULATION SUMMARY")
         logger.info("="*60)
+        logger.info(f"Calculator: {'PyTorch' if use_pytorch else 'NumPy'}")
         logger.info(f"Trajectory: {trajectory.n_frames} frames, {trajectory.n_atoms} atoms")
-        logger.info(f"Probe setup: {len(probe_positions)} probe using 1x1 grid (center position for testing)")
+        logger.info(f"Probe setup: {len(probe_positions)} probe using 1x1 grid (center position)")
         logger.info(f"Probe positions: {tacaw_data.probe_positions}")
         logger.info(f"k-space sampling: {len(tacaw_data.kx)} × {len(tacaw_data.ky)}")
         logger.info(f"Frequency range: {tacaw_data.frequency.min():.2f} to {tacaw_data.frequency.max():.2f} THz")

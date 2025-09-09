@@ -1,11 +1,6 @@
 """
-Optimized multislice calculation functions for electron microscopy.
+Optimized multislice calculation functions
 
-
-Key components:
-- Probe class: Creates probe wavefunctions (plane wave or convergent beam)
-- propagate function: Implements multislice propagation algorithm
-- Physical constants: Accurate relativistic electron wavelength calculation
 """
 
 import numpy as np
@@ -84,6 +79,12 @@ class Probe:
             radii = np.sqrt(self.kxs[:, None]**2 + self.kys[None, :]**2)
             reciprocal[radii < radius] = 1
             self.array = np.fft.ifftshift(np.fft.ifft2(reciprocal))
+    
+    def copy(self):
+        """Create a copy of the probe."""
+        new_probe = Probe(self.xs, self.ys, self.mrad, self.eV)
+        new_probe.array = self.array.copy()
+        return new_probe
 
 
 def Propagate(probe, potential):
