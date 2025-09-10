@@ -30,11 +30,12 @@ except ImportError:
 
 
 from .potentials import gridFromTrajectory,Potential
-from .multislice import Probe,Propagate,create_batched_probes
-from .trajectory import Trajectory
-from ..postprocessing.wf_data import WFData
+from .multislice import Probe,Propagate
+from ..tacaw.trajectory import Trajectory
+from ..tacaw.wf_data import WFData
 
 logger = logging.getLogger(__name__)
+
 
 class MultisliceCalculator:
     
@@ -46,7 +47,7 @@ class MultisliceCalculator:
             device: PyTorch device ('cpu', 'cuda', or None for auto-detection)
             force_cpu: Force CPU usage even if GPU is available
         """
-        if not TORCH_AVAILABLE:
+        if TORCH_AVAILABLE:
             if device is not None:
                 logger.warning("PyTorch not available, falling back to NumPy implementation")
             self.device = None
@@ -125,12 +126,7 @@ class MultisliceCalculator:
         self.trajectory = trajectory
         self.aperture = aperture
         self.voltage_eV = voltage_eV
-        self.defocus = defocus
-        self.slice_thickness = slice_thickness
-        self.sampling = sampling
         self.probe_positions = probe_positions
-        self.save_path = save_path
-        self.cleanup_temp_files = cleanup_temp_files
 
         # Generate cache key and setup output directory
         cache_key = self._generate_cache_key(trajectory, aperture, voltage_eV,
@@ -142,15 +138,12 @@ class MultisliceCalculator:
         xs,ys,zs,lx,ly,lz=gridFromTrajectory(trajectory,sampling=sampling,slice_thickness=slice_thickness)
         nx=len(xs) ; ny=len(ys) ; nz=len(zs)
         self.xs = xs ; self.ys = ys ; self.zs = zs
-        self.lx = lx ; self.ly = ly ; self.lz = lz
         self.nx = nx ; self.ny = ny ; self.nz = nz
-        self.dx = xs[1]-xs[0] ; self.dy = ys[1]-ys[0] ; self.dy = ys[1]-ys[0]
 
         # Set up default probe position if not provided
         if probe_positions is None:
             probe_positions = [(lx/2, ly/2)]  # Center probe
-        self.base_probe = Probe(xs, ys, self.aperture, self.voltage_eV)
-
+        
         # Initialize storage for results
         self.n_frames = trajectory.n_frames
         self.n_probes = len(probe_positions)
@@ -158,13 +151,12 @@ class MultisliceCalculator:
         # Storage: [probe, frame, x, y, layer] - matches WFData expected format
         self.wavefunction_data = xp.zeros((self.n_probes, self.n_frames, nx, ny, 1), dtype=complex_dtype)
         
-    def run(self) -> WFData:
-
         # Process frames with caching and multiprocessing
         total_start_time = time.time()
         frames_computed = 0
         frames_cached = 0
 
+    def run(self) -> WFData:
         # Process frames one at a time with tqdm progress tracking
         with tqdm(total=self.n_frames, desc="Processing frames", unit="frame") as pbar:
             for frame_idx in range(self.n_frames):
@@ -173,7 +165,7 @@ class MultisliceCalculator:
                 atom_types = self.trajectory.atom_types
                 
                 args = (frame_idx, positions, atom_types, self.xs, self.ys, self.zs, 
-                       self.aperture, self.voltage_eV, self.base_probe, self.probe_positions, self.element_map, 
+                       self.aperture, self.voltage_eV, self.probe_positions, self.element_map, 
                        cache_file)
                 
                 # Process frame
@@ -196,57 +188,53 @@ class MultisliceCalculator:
         
         # Create metadata
         params = {
-            'aperture': self.aperture,
-            'voltage_eV': self.voltage_eV,
-            'defocus': self.defocus,
-            'slice_thickness': self.slice_thickness,
-            'sampling': self.sampling,
-            'grid_shape': (self.nx, self.ny, self.nz),
-            'box_size': (self.lx, self.ly, self.lz),
-            'n_atoms': self.trajectory.n_atoms,
-            'calculator': 'MultisliceCalculator'
+            'aperture': aperture,
+            'voltage_eV': voltage_eV,
+            'defocus': defocus,
+            'slice_thickness': slice_thickness,
+            'sampling': sampling,
+            'grid_shape': (nx, ny, nz),
+            'box_size': (lx, ly, lz),
+            'n_atoms': trajectory.n_atoms,
+            'calculator': f'MultisliceCalculatorTorch_{self.device}' if self.use_pytorch else 'MultisliceCalculatorTorchFallback'
         }
         
         # Create coordinate arrays for output
         # Note: WFData expects (probe_positions, time, kx, ky, layer) format
         # Create k-space coordinates to match expected format (same as AbTem)
-        # TWP: If we're not going to also provide a shifted/etc reciprocal_array, we shouldn't shift the kxs
-        #kxs = xp.fft.fftfreq(self.nx, d=self.dx)
-        #kys = xp.fft.fftfreq(self.ny, d=self.dy)
-        kxs = np.fft.fftshift(xp.fft.fftfreq(self.nx, self.sampling) * 2 * xp.pi)  # k-space in Å⁻¹
-        kys = np.fft.fftshift(xp.fft.fftfreq(self.ny, self.sampling) * 2 * xp.pi)  # k-space in Å⁻¹
-        time_array = np.arange(self.n_frames) * self.trajectory.timestep  # Time array in ps
+        kx = np.fft.fftshift(np.fft.fftfreq(nx, sampling) * 2 * np.pi)  # k-space in Å⁻¹
+        ky = np.fft.fftshift(np.fft.fftfreq(ny, sampling) * 2 * np.pi)  # k-space in Å⁻¹
+        time_array = np.arange(n_frames) * trajectory.timestep  # Time array in ps
         layer_array = np.array([0])  # Single layer for now
         
         # Package results
         wf_data = WFData(
-            probe_positions=self.probe_positions,
+            probe_positions=probe_positions,
             time=time_array,
-            kxs=kxs,
-            kys=kys,
+            kx=kx,
+            ky=ky,
             layer=layer_array,
-            wavefunction_data=self.wavefunction_data,
-            probe=self.base_probe
+            wavefunction_data=wavefunction_data
         )
         
         # Handle cleanup
-        if self.cleanup_temp_files:
+        if cleanup_temp_files:
             logger.info("Cleaning up cache files...")
             for frame_idx in range(n_frames):
-                cache_file = self.output_dir / f"frame_{frame_idx}.npy"
+                cache_file = output_dir / f"frame_{frame_idx}.npy"
                 if cache_file.exists():
                     cache_file.unlink()
             try:
-                self.output_dir.rmdir()
+                output_dir.rmdir()
             except OSError:
                 pass
         else:
-            logger.info(f"Cache files saved in: {self.output_dir}")
+            logger.info(f"Cache files saved in: {output_dir}")
         
         # Save if requested
-        if self.save_path is not None:
-            wf_data.save(self.save_path)
-            logger.info(f"Wave function data saved to {self.save_path}")
+        if save_path is not None:
+            wf_data.save(save_path)
+            logger.info(f"Wave function data saved to {save_path}")
         
         return wf_data
     
@@ -255,10 +243,10 @@ class MultisliceCalculator:
 
 
 def _process_frame_worker_torch(args):
-    frame_idx, positions, atom_types, xs, ys, zs, aperture, eV, probe, probe_positions, element_map, cache_file = args
+    frame_idx, positions, atom_types, xs, ys, zs, aperture, eV, probe_positions, element_map, cache_file = args
     
     if cache_file.exists():
-        return frame_idx, xp.asarray(np.load(cache_file)), True # if always saving as numpy, then must cast to torch array if re-reading cache file back in
+        return frame_idx, np.load(cache_file), True
     
     if TORCH_AVAILABLE:
         worker_device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
@@ -273,40 +261,45 @@ def _process_frame_worker_torch(args):
             atom_type_names.append(atom_type)
     
     #try:
-    potential = Potential(xs, ys, zs, positions, atom_type_names, kind="kirkland", device=worker_device)
-
+    potential = PotentialTorch(xs, ys, zs, positions, atom_type_names, kind="kirkland", device=worker_device)
+    probe = ProbeTorch(xs, ys, aperture, eV)
+    
     n_probes = len(probe_positions)
     nx, ny = len(xs), len(ys)
-    frame_data = xp.zeros((n_probes, nx, ny, 1, 1), dtype=complex_dtype)
+    frame_data = np.zeros((n_probes, nx, ny, 1, 1), dtype=complex)
     
-    batched_probes = create_batched_probes(probe, probe_positions, worker_device)
-    exit_waves_batch = Propagate(batched_probes, potential, worker_device)
+    if TORCH_AVAILABLE and use_pytorch:
+        # Use vectorized processing for all probes at once
+        from .multislice_torch import create_batched_probes
         
-    # Convert all exit waves to k-space
-    exit_waves_k = xp.fft.fft2(exit_waves_batch, dim=(-2, -1))
-    diffraction_patterns = xp.fft.fftshift(exit_waves_k, dim=(-2, -1))
+        batched_probes = create_batched_probes(probe, probe_positions, worker_device)
+        exit_waves_batch = Propagate(batched_probes, potential, worker_device)
         
-     # Store results
-    frame_data[:, :, :, 0, 0] = diffraction_patterns #.cpu().numpy()
-    #else:
-    #    # Fallback to individual processing
-    #    for probe_idx, (px, py) in enumerate(probe_positions):
-    #        shifted_probe = probe.copy()
-    #        
-    #        probe_k = torch.fft.fft2(shifted_probe.array)
-    #        
-    #        kx_shift = torch.exp(2j * torch.pi * shifted_probe.kxs[:, None] * px)
-    #        ky_shift = torch.exp(2j * torch.pi * shifted_probe.kys[None, :] * py)
-    #       probe_k_shifted = probe_k * kx_shift * ky_shift
-    #        
-    #        shifted_probe.array = torch.fft.ifft2(probe_k_shifted)
-    #        
-    #        exit_wave_torch = PropagateTorch(shifted_probe, potential, worker_device)
-    #        
-    #        exit_wave_k = torch.fft.fft2(exit_wave_torch)
-    #       diffraction_pattern = torch.fft.fftshift(exit_wave_k)
-    #     
-    #       frame_data[probe_idx, :, :, 0, 0] = diffraction_pattern.cpu().numpy()
+        # Convert all exit waves to k-space
+        exit_waves_k = torch.fft.fft2(exit_waves_batch, dim=(-2, -1))
+        diffraction_patterns = torch.fft.fftshift(exit_waves_k, dim=(-2, -1))
+        
+        # Store results
+        frame_data[:, :, :, 0, 0] = diffraction_patterns.cpu().numpy()
+    else:
+        # Fallback to individual processing
+        for probe_idx, (px, py) in enumerate(probe_positions):
+            shifted_probe = probe.copy()
+            
+            probe_k = torch.fft.fft2(shifted_probe.array)
+            
+            kx_shift = torch.exp(2j * torch.pi * shifted_probe.kxs[:, None] * px)
+            ky_shift = torch.exp(2j * torch.pi * shifted_probe.kys[None, :] * py)
+            probe_k_shifted = probe_k * kx_shift * ky_shift
+            
+            shifted_probe.array = torch.fft.ifft2(probe_k_shifted)
+            
+            exit_wave_torch = PropagateTorch(shifted_probe, potential, worker_device)
+            
+            exit_wave_k = torch.fft.fft2(exit_wave_torch)
+            diffraction_pattern = torch.fft.fftshift(exit_wave_k)
+            
+            frame_data[probe_idx, :, :, 0, 0] = diffraction_pattern.cpu().numpy()
     
     np.save(cache_file, frame_data)
     return frame_idx, frame_data, False

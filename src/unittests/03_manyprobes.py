@@ -45,8 +45,6 @@ potential = Potential(xs, ys, zs, positions, atom_types, kind="kirkland")
 #ax.imshow(np.absolute(pr)*np.absolute(po), cmap="inferno")
 #plt.show()
 
-
-
 # TEST PROPAGATION
 ary=np.asarray( Propagate(probes_many,potential) )
 
@@ -63,8 +61,8 @@ else:
 q=np.sqrt(potential.kxs[:,None]**2+potential.kys[None,:]**2)
 fig, ax = plt.subplots()
 fft=np.fft.fft2(ary,axes=(1,2)) ; fft[:,q<2]=0 # mask in reciprocal space (keep only high scattering angles)
-#ax.imshow(np.absolute(np.fft.fftshift(fft[0]))**.1, cmap="inferno")
-#plt.show()
-HAADF=np.sum(np.absolute(fft),axis=(1,2)).reshape((len(x),len(y)))
-ax.imshow(HAADF, cmap="inferno")
+ax.imshow(np.absolute(np.fft.fftshift(fft[0]))**.1, cmap="inferno")
 plt.show()
+#HAADF=np.sum(np.absolute(fft),axis=(1,2)).reshape((len(x),len(y)))
+#ax.imshow(HAADF, cmap="inferno")
+#plt.show()

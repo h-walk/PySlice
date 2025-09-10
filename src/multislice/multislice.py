@@ -38,6 +38,12 @@ except ImportError:
         return np.fft._ifft2(ary,axes=dim)
     np.fft.ifft2=ifft2
 
+    np.fft._fftshift=np.fft.fftshift
+    def fftshift(ary,dim=None,axes=None): # WATCH OUT: imports apply throughout: if we alias a kwarg, then the calling function might still expect to find the unaliased kwarg
+        if axes is not None:
+            return np.fft._fftshift(ary,axes=axes)
+        return np.fft._fftshift(ary,axes=dim)
+    np.fft.fftshift=fftshift
 
 logger = logging.getLogger(__name__)
 
