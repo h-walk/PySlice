@@ -26,7 +26,7 @@ atom_types=trajectory.atom_types
 potential = Potential(xs, ys, zs, positions, atom_types, kind="kirkland")
 
 # TEST PROPAGATION
-ary=Propagate(probe,potential)
+ary=np.asarray( Propagate(probe,potential) )
 
 if not os.path.exists("propagate-test.npy"):
 	np.save("propagate-test.npy",ary)
@@ -39,5 +39,7 @@ else:
 
 import matplotlib.pyplot as plt
 fig, ax = plt.subplots()
-ax.imshow(np.sum(ary,axis=2), cmap="inferno")
+#ax.imshow(np.absolute(ary), cmap="inferno")
+#plt.show()
+ax.imshow(np.absolute(np.fft.fftshift(np.fft.fft2(ary)))**.1, cmap="inferno")
 plt.show()

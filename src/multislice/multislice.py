@@ -13,14 +13,30 @@ try:
         device = torch.device('cpu')
     if device.type == 'mps':
         complex_dtype = torch.complex64
+        float_dtype = torch.float32
     else:
         complex_dtype = torch.complex128
-
+        float_dtype = torch.float64
 except ImportError:
     TORCH_AVAILABLE = False
     xp = np
     print("PyTorch not available, falling back to NumPy")
     complex_dtype = np.complex128
+
+    np.fft._fft2=np.fft.fft2
+    def fft2(ary,dim=None,axes=None): # WATCH OUT: imports apply throughout: if we alias a kwarg, then the calling function might still expect to find the unaliased kwarg
+        if axes is not None:
+            return np.fft._fft2(ary,axes=axes)
+        return np.fft._fft2(ary,axes=dim)
+    np.fft.fft2=fft2
+
+    np.fft._ifft2=np.fft.ifft2
+    def ifft2(ary,dim=None,axes=None): # WATCH OUT: imports apply throughout: if we alias a kwarg, then the calling function might still expect to find the unaliased kwarg
+        if axes is not None:
+            return np.fft._ifft2(ary,axes=axes)
+        return np.fft._ifft2(ary,axes=dim)
+    np.fft.ifft2=ifft2
+
 
 logger = logging.getLogger(__name__)
 
@@ -137,94 +153,97 @@ def Propagate(probe, potential, device=None):
     Returns:
         torch.Tensor: Exit wavefunction(s) after multislice propagation
     """
-    if not TORCH_AVAILABLE:
+    if device is not None and not TORCH_AVAILABLE:
         raise ImportError("PyTorch not available. Please install PyTorch.")
     
-    # Auto-detect device if not specified
-    if device is None:
-        device = probe.device if hasattr(probe, 'device') else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
+    # TWP edit: i got rid of a bunch of stuff here. 
+    # i'm going to assume the probe is well-constructed and we don't need to assign a bunch of junk.
+    # AND, i'm going to assume the probe device matches the potential device for torch. 
+    # user would need to be a bit goofy to built them on different devices??
+    # do we NEED to re-load all these things to the device as local variables??
+    if len(probe.array.shape) == 2:
+        probe.array = probe.array[None,:,:]
     # Handle both single probe and batched multi-probe input
-    if hasattr(probe, 'array'):
-        # Single probe object
-        if isinstance(probe.array, torch.Tensor):
-            probe_array = probe.array.to(device)
-            if probe_array.dim() == 2:
-                probe_array = probe_array.unsqueeze(0)  # Add batch dimension
-        else:
-            # Convert from NumPy
-            if device.type == 'mps':
-                probe_array = torch.tensor(probe.array, dtype=torch.complex64, device=device)
-            else:
-                probe_array = torch.tensor(probe.array, dtype=torch.complex128, device=device)
-            if probe_array.dim() == 2:
-                probe_array = probe_array.unsqueeze(0)
-                
-        probe_kxs = probe.kxs.to(device) if hasattr(probe, 'kxs') else torch.fft.fftfreq(probe_array.shape[-2], device=device)
-        probe_kys = probe.kys.to(device) if hasattr(probe, 'kys') else torch.fft.fftfreq(probe_array.shape[-1], device=device)
-        probe_eV = probe.eV
-        probe_wavelength = probe.wavelength
-    else:
-        # Direct tensor input (batched probes)
-        probe_array = probe.to(device)
-        if probe_array.dim() == 2:
-            probe_array = probe_array.unsqueeze(0)
-        # Need to get these from somewhere - assume they're passed or use defaults
-        probe_kxs = torch.fft.fftfreq(probe_array.shape[-2], device=device)
-        probe_kys = torch.fft.fftfreq(probe_array.shape[-1], device=device)
-        # These would need to be passed as well for tensor input
-        probe_eV = 100000  # Default 100keV
-        probe_wavelength = wavelength(probe_eV)
-    
+    #if hasattr(probe, 'array'):
+    #    # Single probe object
+    #    if isinstance(probe.array, torch.Tensor):
+    #        probe_array = probe.array.to(device)
+    #        if probe_array.dim() == 2:
+    #            probe_array = probe_array.unsqueeze(0)  # Add batch dimension
+    #    else:
+    #        # Convert from NumPy
+    #        if device.type == 'mps':
+    #            probe_array = torch.tensor(probe.array, dtype=torch.complex64, device=device)
+    #        else:
+    #            probe_array = torch.tensor(probe.array, dtype=torch.complex128, device=device)
+    #        if probe_array.dim() == 2:
+    #            probe_array = probe_array.unsqueeze(0)
+    #            
+    #    probe_kxs = probe.kxs.to(device) if hasattr(probe, 'kxs') else torch.fft.fftfreq(probe_array.shape[-2], device=device)
+    #    probe_kys = probe.kys.to(device) if hasattr(probe, 'kys') else torch.fft.fftfreq(probe_array.shape[-1], device=device)
+    #    probe_eV = probe.eV
+    #    probe_wavelength = probe.wavelength
+    #else:
+    #    # Direct tensor input (batched probes)
+    #    probe_array = probe.to(device)
+    #    if probe_array.dim() == 2:
+    #        probe_array = probe_array.unsqueeze(0)
+    #    # Need to get these from somewhere - assume they're passed or use defaults
+    #    probe_kxs = torch.fft.fftfreq(probe_array.shape[-2], device=device)
+    #    probe_kys = torch.fft.fftfreq(probe_array.shape[-1], device=device)
+    #    # These would need to be passed as well for tensor input
+    #    probe_eV = 100000  # Default 100keV
+    #    probe_wavelength = wavelength(probe_eV)
+    #
     # Convert potential to PyTorch if needed
-    if hasattr(potential, 'array_torch'):
-        # Use PyTorch version if available
-        potential_array = potential.array_torch.to(device)
-        # All these are already tensors in PotentialTorch
-        potential_kxs = potential.kxs.to(device)
-        potential_kys = potential.kys.to(device)
-        potential_zs = potential.zs.to(device)
-    else:
-        # Convert from NumPy version
-        potential_array = torch.tensor(potential.array, dtype=torch.float32, device=device)
-        potential_kxs = torch.tensor(potential.kxs, dtype=torch.float32, device=device)
-        potential_kys = torch.tensor(potential.kys, dtype=torch.float32, device=device)
-        potential_zs = torch.tensor(potential.zs, dtype=torch.float32, device=device)
-    
+    #if hasattr(potential, 'array_torch'):
+    #    # Use PyTorch version if available
+    #    potential_array = potential.array_torch.to(device)
+    #    # All these are already tensors in PotentialTorch
+    #    potential_kxs = potential.kxs.to(device)
+    #    potential_kys = potential.kys.to(device)
+    #    potential_zs = potential.zs.to(device)
+    #else:
+    #    # Convert from NumPy version
+    #    potential_array = torch.tensor(potential.array, dtype=torch.float32, device=device)
+    #    potential_kxs = torch.tensor(potential.kxs, dtype=torch.float32, device=device)
+    #    potential_kys = torch.tensor(potential.kys, dtype=torch.float32, device=device)
+    #    potential_zs = torch.tensor(potential.zs, dtype=torch.float32, device=device)
     # Calculate interaction parameter (Kirkland Eq 5.6)
     E0_eV = m_electron * c_light**2 / q_electron
-    sigma = (2 * np.pi) / (probe_wavelength * probe_eV) * \
-            (E0_eV + probe_eV) / (2 * E0_eV + probe_eV)
-    sigma_dtype = torch.float32 if device.type == 'mps' else torch.float64
-    sigma = torch.tensor(sigma, dtype=sigma_dtype, device=device)
+    sigma = (2 * np.pi) / (probe.wavelength * probe.eV) * \
+            (E0_eV + probe.eV) / (2 * E0_eV + probe.eV)
+    if TORCH_AVAILABLE:
+        #sigma_dtype = torch.float32 if device.type == 'mps' else torch.float64
+        sigma = torch.tensor(sigma, dtype=float_dtype, device=device)
     
     # Get slice thickness
-    dz = potential_zs[1] - potential_zs[0] if len(potential_zs) > 1 else 0.5
+    dz = potential.zs[1] - potential.zs[0] if len(potential.zs) > 1 else 0.5
     
     # Pre-compute propagation operator in k-space (Fresnel propagation)
-    kx_grid, ky_grid = torch.meshgrid(potential_kxs, potential_kys, indexing='ij')
+    kx_grid, ky_grid = xp.meshgrid(potential.kxs, potential.kys, indexing='ij')
     k_squared = kx_grid**2 + ky_grid**2
-    P = torch.exp(-1j * torch.pi * probe_wavelength * dz * k_squared)
+    P = xp.exp(-1j * xp.pi * probe.wavelength * dz * k_squared)
     
     # Initialize wavefunction with probe(s) - shape: (n_probes, nx, ny)
-    array = probe_array.clone()
+    array = probe.array #.clone()
     
     # Vectorized multislice propagation through each slice
-    for z in range(len(potential_zs)):
+    for z in range(len(potential.zs)):
         # Transmission function: t = exp(iσV(x,y,z))
-        potential_slice = potential_array[:, :, z]
-        t = torch.exp(1j * sigma * potential_slice)
+        potential_slice = potential.array[:, :, z]
+        t = xp.exp(1j * sigma * potential_slice)
         
         # Apply transmission to all probes: ψ' = t × ψ
         # Broadcasting: t[nx,ny] * array[n_probes,nx,ny] = array[n_probes,nx,ny]
         array = t[None, :, :] * array
         
         # Fresnel propagation to next slice (except for last slice)
-        if z < len(potential_zs) - 1:
+        if z < len(potential.zs) - 1:
             # Vectorized FFT over spatial dimensions for all probes
-            fft_array = torch.fft.fft2(array, dim=(-2, -1))
+            fft_array = xp.fft.fft2(array, dim=(-2, -1))
             propagated_fft = P[None, :, :] * fft_array
-            array = torch.fft.ifft2(propagated_fft, dim=(-2, -1))
+            array = xp.fft.ifft2(propagated_fft, dim=(-2, -1))
     
     # Return single probe result if input was single, otherwise return batch
     if array.shape[0] == 1:
@@ -288,8 +307,8 @@ def create_batched_probes(base_probe, probe_positions, device=None):
         probe_k = torch.fft.fft2(base_probe.array)
         
         # Apply phase ramp for spatial shift
-        kx_shift = torch.exp(2j * torch.pi * base_probe.kxs[:, None] * px)
-        ky_shift = torch.exp(2j * torch.pi * base_probe.kys[None, :] * py)
+        kx_shift = xp.exp(2j * torch.pi * base_probe.kxs[:, None] * px)
+        ky_shift = xp.exp(2j * torch.pi * base_probe.kys[None, :] * py)
         probe_k_shifted = probe_k * kx_shift * ky_shift
         
         # Convert back to real space
