@@ -15,3 +15,4 @@ types={1:"B",2:"N"}
 # LOAD MD OUTPUT
 trajectory=TrajectoryLoader(dump,timestep=dt,element_names=types).load()
 
+
