@@ -124,7 +124,7 @@ class Probe:
         return self
 
 
-def PropagateTorch(probe, potential, device=None):
+def Propagate(probe, potential, device=None):
     """
     PyTorch-accelerated multislice propagation function.
     Supports both single probe and batched multi-probe processing.
