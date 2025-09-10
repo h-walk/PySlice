@@ -12,17 +12,28 @@ try:
         device = torch.device('mps')
     else:
         device = torch.device('cpu')
+
+    if device.type == 'mps': # Use float32 for MPS (doesn't support float64), float64 for CPU/CUDA
+        complex_dtype = torch.complex64
+        float_dtype = torch.float32
+    else:
+        complex_dtype = xp.complex128
+        float_dtype = xp.float64
+
+
 except ImportError:
     TORCH_AVAILABLE = False
     import numpy as np ; xp = np
     print("PyTorch not available, falling back to NumPy")
     device=None
+    complex_dtype = xp.complex128
+    float_dtype = xp.float64
     np.fft._fft=np.fft.fft
     def fft(ary,device):
         return np.fft._fft(ary)
     xp.fft.fft=fft
     np._zeros=np.zeros
-    def zeros(tup,dtype=np.float32,device=None):
+    def zeros(tup,dtype=float_dtype,device=None):
         return np._zeros(tup,dtype=dtype)
     xp.zeros=zeros
     np._sum=np.sum
@@ -59,7 +70,7 @@ def kirkland(qsq, Z):
     if isinstance(Z, str):
         Z = getZfromElementName(Z)
     Z -= 1  # Convert to 0-based indexing
-    
+
     # Grab columns for a,b,c,d parameters - already on correct device
     ABCDs = kirklandABCDs[Z, :, :]  
     a = ABCDs[:, 0]
@@ -154,7 +165,7 @@ def loadKirkland(device='cpu'):
     
     # Convert to PyTorch tensor and move to device - store per device
     if TORCH_AVAILABLE:
-        kirklandABCDs = torch.tensor(kirkland_params, dtype=torch.float32, device=device)
+        kirklandABCDs = torch.tensor(kirkland_params, dtype=torch.float64, device=device)
     else:
         kirklandABCDs = np.asarray(kirkland_params)
 
@@ -167,11 +178,11 @@ class Potential:
             self.device = device
         
             # Convert inputs to PyTorch tensors on device
-            self.xs = torch.tensor(xs, dtype=torch.float32, device=device)
-            self.ys = torch.tensor(ys, dtype=torch.float32, device=device)
-            self.zs = torch.tensor(zs, dtype=torch.float32, device=device)
+            self.xs = torch.tensor(xs, dtype=torch.float64, device=device)
+            self.ys = torch.tensor(ys, dtype=torch.float64, device=device)
+            self.zs = torch.tensor(zs, dtype=torch.float64, device=device)
         
-            positions = torch.tensor(positions, dtype=torch.float32, device=device)
+            positions = torch.tensor(positions, dtype=torch.float64, device=device)
         else:
             if device is not None:
                 raise ImportError("PyTorch not available. Please install PyTorch.")
@@ -190,13 +201,6 @@ class Potential:
         qsq = self.kxs[:, None]**2 + self.kys[None, :]**2
         
         # Initialize potential array on GPU 
-        # Use float32 for MPS (doesn't support float64), float64 for CPU/CUDA
-        if TORCH_AVAILABLE and device.type == 'mps':
-            complex_dtype = torch.complex64
-            float_dtype = torch.float32
-        else:
-            complex_dtype = xp.complex128
-            float_dtype = xp.float64
         reciprocal = xp.zeros((nx, ny, nz), dtype=complex_dtype, device=device)
         
         # Convert atom types to atomic numbers if needed
