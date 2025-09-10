@@ -136,6 +136,7 @@ class Trajectory:
 
         # Start with all atoms included
         atom_mask = np.ones(self.n_atoms, dtype=bool)
+        new_box = np.zeros( self.box_matrix.shape ) + self.box_matrix
 
         # Apply X filtering if requested
         if x_range is not None:
@@ -144,6 +145,7 @@ class Trajectory:
                 raise ValueError(f"X min_coord ({min_x}) cannot be greater than max_coord ({max_x}).")
             x_mask = (mean_pos[:, 0] >= min_x) & (mean_pos[:, 0] <= max_x)
             atom_mask &= x_mask
+            new_box[0,0] = max_x - min_x
 
         # Apply Y filtering if requested
         if y_range is not None:
@@ -152,6 +154,7 @@ class Trajectory:
                 raise ValueError(f"Y min_coord ({min_y}) cannot be greater than max_coord ({max_y}).")
             y_mask = (mean_pos[:, 1] >= min_y) & (mean_pos[:, 1] <= max_y)
             atom_mask &= y_mask
+            new_box[1,1] = max_y - min_y
 
         # Apply Z filtering if requested
         if z_range is not None:
@@ -160,6 +163,7 @@ class Trajectory:
                 raise ValueError(f"Z min_coord ({min_z}) cannot be greater than max_coord ({max_z}).")
             z_mask = (mean_pos[:, 2] >= min_z) & (mean_pos[:, 2] <= max_z)
             atom_mask &= z_mask
+            new_box[2,2] = max_z - min_z
 
         num_original_atoms = self.n_atoms
         filtered_atom_indices = np.where(atom_mask)[0]
@@ -186,7 +190,7 @@ class Trajectory:
             atom_types=new_atom_types,
             positions=new_positions,
             velocities=new_velocities,
-            box_matrix=self.box_matrix,
+            box_matrix=new_box,
             timestep=self.timestep,
 
         )

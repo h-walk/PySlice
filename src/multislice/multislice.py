@@ -22,6 +22,7 @@ except ImportError:
     xp = np
     print("PyTorch not available, falling back to NumPy")
     complex_dtype = np.complex128
+    float_dtype = np.float64
 
     np.fft._fft2=np.fft.fft2
     def fft2(ary,dim=None,axes=None): # WATCH OUT: imports apply throughout: if we alias a kwarg, then the calling function might still expect to find the unaliased kwarg
@@ -61,7 +62,7 @@ class Probe:
     Significant speedup for large grid sizes through GPU-accelerated FFT operations.
     """
     
-    def __init__(self, xs, ys, mrad, eV, device=None):
+    def __init__(self, xs, ys, mrad, eV, array=None, device=None):
         """
         Initialize GPU-accelerated probe wavefunction.
         
@@ -76,13 +77,14 @@ class Probe:
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             self.device = device
         
-            self.xs = torch.tensor(xs, dtype=torch.float32, device=device)
-            self.ys = torch.tensor(ys, dtype=torch.float32, device=device)
+            self.xs = xs # torch.tensor(xs, dtype=float_dtype, device=device)
+            self.ys = ys # torch.tensor(ys, dtype=float_dtype, device=device)
         else:
             if device is not None:
                 raise ImportError("PyTorch not available. Please install PyTorch.")
             self.xs = xs
             self.ys = ys
+            self.device = None
         
         self.mrad = mrad
         self.eV = eV
@@ -95,6 +97,10 @@ class Probe:
         
         self.kxs = xp.fft.fftfreq(nx, d=dx, device=device)
         self.kys = xp.fft.fftfreq(ny, d=dy, device=device)
+
+        if not array is None: # Allow construction of a Probe object with a passed array instead of building it below. used by create_batched_probes
+            self.array=xp.asarray(array)
+            return
                     
         if mrad == 0:
             self.array = xp.ones((nx, ny), dtype=complex_dtype, device=device)
@@ -139,6 +145,44 @@ class Probe:
         self.device = device
         return self
 
+def create_batched_probes(base_probe, probe_positions, device=None):
+    """
+    Create a batch of shifted probes for vectorized processing.
+    
+    Args:
+        base_probe: ProbeTorch object
+        probe_positions: List of (x,y) positions
+        device: PyTorch device
+        
+    Returns:
+        probe object with an array of shape (n_probes, nx, ny)
+    """
+    #if device is None:
+    #    device = base_probe.device
+        
+    n_probes = len(probe_positions)
+    probe_arrays = []
+    
+    for px, py in probe_positions:
+        # Create shifted probe using phase ramp in k-space
+        probe_k = xp.fft.fft2(base_probe.array)
+        
+        # Apply phase ramp for spatial shift
+        kx_shift = xp.exp(2j * xp.pi * base_probe.kxs[:, None] * px)
+        ky_shift = xp.exp(2j * xp.pi * base_probe.kys[None, :] * py)
+        probe_k_shifted = probe_k * kx_shift * ky_shift
+        
+        # Convert back to real space
+        shifted_probe_array = xp.fft.ifft2(probe_k_shifted)
+        probe_arrays.append(shifted_probe_array)
+    
+    # Stack into batch tensor
+    if TORCH_AVAILABLE:
+        array = torch.stack(probe_arrays, dim=0)
+    else:
+        array = xp.asarray(probe_arrays)
+
+    return Probe(base_probe.xs, base_probe.ys, base_probe.mrad, base_probe.eV, array=array, device=base_probe.device)
 
 def Propagate(probe, potential, device=None):
     """
@@ -250,116 +294,3 @@ def Propagate(probe, potential, device=None):
         return array.squeeze(0)
     return array
 
-
-def PropagateTorchToNumpy(probe, potential, device=None):
-    """
-    Convenience function that runs PyTorch-accelerated propagation and returns NumPy array.
-    
-    Args:
-        probe: Probe object (NumPy or PyTorch)
-        potential: Potential object (NumPy or PyTorch)  
-        device: PyTorch device (None for auto-detection)
-        
-    Returns:
-        numpy.ndarray: Exit wavefunction as NumPy array
-    """
-    if not TORCH_AVAILABLE:
-        # Fallback to NumPy implementation
-        from .multislice_npy import Propagate
-        return Propagate(probe, potential)
-    
-    # Run PyTorch version and convert result
-    result_torch = PropagateTorch(probe, potential, device)
-    return result_torch.cpu().numpy()
-
-
-# Compatibility aliases for drop-in replacement
-#if TORCH_AVAILABLE:
-#    # PyTorch versions (recommended)
-#    Probe = ProbeTorch
-#    Propagate = PropagateTorchToNumpy
-#else:
-#    # Fallback to NumPy versions
-#    from .multislice_npy import Probe, Propagate
-#    print("Warning: PyTorch not available, using NumPy fallback")
-
-
-def create_batched_probes(base_probe, probe_positions, device=None):
-    """
-    Create a batch of shifted probes for vectorized processing.
-    
-    Args:
-        base_probe: ProbeTorch object
-        probe_positions: List of (x,y) positions
-        device: PyTorch device
-        
-    Returns:
-        torch.Tensor: Batched probe array (n_probes, nx, ny)
-    """
-    if device is None:
-        device = base_probe.device
-        
-    n_probes = len(probe_positions)
-    probe_arrays = []
-    
-    for px, py in probe_positions:
-        # Create shifted probe using phase ramp in k-space
-        probe_k = torch.fft.fft2(base_probe.array)
-        
-        # Apply phase ramp for spatial shift
-        kx_shift = xp.exp(2j * torch.pi * base_probe.kxs[:, None] * px)
-        ky_shift = xp.exp(2j * torch.pi * base_probe.kys[None, :] * py)
-        probe_k_shifted = probe_k * kx_shift * ky_shift
-        
-        # Convert back to real space
-        shifted_probe_array = torch.fft.ifft2(probe_k_shifted)
-        probe_arrays.append(shifted_probe_array)
-    
-    # Stack into batch tensor
-    return torch.stack(probe_arrays, dim=0)
-
-
-def PropagateBatch(probes_or_positions, potential, base_probe=None, device=None):
-    """
-    Process multiple probes in vectorized fashion on GPU.
-    
-    Args:
-        probes_or_positions: Either list of probe positions [(x,y), ...] or batched tensor
-        potential: Potential object
-        base_probe: Base probe for position shifting (if using positions)
-        device: PyTorch device
-        
-    Returns:
-        torch.Tensor: Batched exit wavefunctions (n_probes, nx, ny)
-    """
-    if not TORCH_AVAILABLE:
-        # Fallback for individual processing
-        if base_probe is not None:
-            results = []
-            for px, py in probes_or_positions:
-                # Would need to implement NumPy version of shifting
-                results.append(Propagate(base_probe, potential))
-            return results
-        return [Propagate(probe, potential) for probe in probes_or_positions]
-    
-    if device is None:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    # Handle different input types
-    if isinstance(probes_or_positions[0], tuple):
-        # List of positions - create batched probes
-        if base_probe is None:
-            raise ValueError("base_probe required when using probe positions")
-        probe_batch = create_batched_probes(base_probe, probes_or_positions, device)
-    else:
-        # Assume it's already a batched tensor or list of probe objects
-        if isinstance(probes_or_positions, torch.Tensor):
-            probe_batch = probes_or_positions
-        else:
-            # List of probe arrays - stack them
-            probe_arrays = [torch.tensor(p.array) if hasattr(p, 'array') else p 
-                          for p in probes_or_positions]
-            probe_batch = torch.stack(probe_arrays, dim=0).to(device)
-    
-    # Use the vectorized propagation
-    return PropagateTorch(probe_batch, potential, device)
