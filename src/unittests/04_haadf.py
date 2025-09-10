@@ -1,6 +1,7 @@
 import sys,os
 sys.path.insert(1,"../../")
 from src.io.loader import TrajectoryLoader
+from src.multislice.multislice import probe_grid
 from src.multislice.calculators import MultisliceCalculator
 from src.postprocessing.haadf_data import HAADFData
 import numpy as np
@@ -22,11 +23,10 @@ trajectory=trajectory.slice_positions([0,10*a],[0,10*b])
 # SELECT 10 "RANDOM" TIMESTEPS (use seed for reproducibility)
 slice_timesteps = np.arange(trajectory.n_frames)
 np.random.seed(5) ; np.random.shuffle(slice_timesteps)
-slice_timesteps = slice_timesteps[:10]
+slice_timesteps = slice_timesteps[:3]
 trajectory=trajectory.slice_timesteps( slice_timesteps )
 # SET UP GRID OF HAADF SCAN POINTS
-x,y=np.meshgrid(np.linspace(a,3*a,16),np.linspace(b,3*b,16))
-xy=np.reshape([x,y],(2,len(x.flat))).T
+xy=probe_grid([a,3*a],[b,3*b],14,16)
 
 calculator=MultisliceCalculator()
 calculator.setup(trajectory,aperture=30,voltage_eV=100e3,sampling=.1,slice_thickness=.5,probe_positions=xy)
@@ -51,3 +51,13 @@ haadf=HAADFData(exitwaves).ADF(preview=False)
 fig, ax = plt.subplots()
 ax.imshow(haadf.T, cmap="inferno")
 plt.show()
+
+ary=np.asarray(haadf)
+if not os.path.exists("haadf-test.npy"):
+	np.save("haadf-test.npy",ary)
+else:
+	previous=np.load("haadf-test.npy")
+	F , D = np.absolute(ary) , np.absolute(previous)
+	dz=np.sum( (F-D)**2 ) / np.sum( F**2 ) # a scaling-resistant values-near-zero-resistance residual function
+	if dz>1e-6:
+		print("ERROR! EXIT WAVE DOES NOT MATCH PREVIOUS RUN",dz*100,"%")

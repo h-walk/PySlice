@@ -151,6 +151,11 @@ class Probe:
         self.device = device
         return self
 
+def probe_grid(xlims,ylims,n,m):
+	x,y=np.meshgrid(np.linspace(*xlims,n),np.linspace(*ylims,m))
+	return np.reshape([x,y],(2,len(x.flat))).T
+
+
 def create_batched_probes(base_probe, probe_positions, device=None):
     """
     Create a batch of shifted probes for vectorized processing.
