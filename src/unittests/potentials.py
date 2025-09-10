@@ -26,7 +26,8 @@ if not os.path.exists("potentials-test.npy"):
 	np.save("potentials-test.npy",ary)
 else:
 	previous=np.load("potentials-test.npy")
-	dz=np.nanmax( ( np.absolute(ary) - np.absolute(previous) ) / np.absolute(ary) )
+	F , D = np.absolute(ary) , np.absolute(previous)
+	dz=np.sum( (F-D)**2 ) / np.sum( F**2 ) # a scaling-resistant values-near-zero-resistance residual function
 	if dz>1e-6:
 		print("ERROR! POTENTIAL DOES NOT MATCH PREVIOUS RUN",dz*100,"%")
 
