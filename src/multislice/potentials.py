@@ -254,7 +254,7 @@ class Potential:
                 spatial_mask = (z_coords >= z_min) & (z_coords < z_max)
                 
                 if not xp.any(spatial_mask):
-                    continue  # Skip empty slices
+                   continue  # Skip empty slices
                 
                 # Get positions for atoms in this slice and type
                 type_positions = positions[type_mask]
@@ -267,8 +267,8 @@ class Potential:
                 atomsy = slice_positions[:, 1]
                 
                 # Compute structure factors - match NumPy pattern exactly
-                expx = xp.exp(-1j * 2 * xp.pi * self.kxs[None, :] * atomsx[:, None])
-                expy = xp.exp(-1j * 2 * xp.pi * self.kys[None, :] * atomsy[:, None])
+                expx = xp.exp(-1j * 2 * np.pi * self.kxs[None, :] * atomsx[:, None])
+                expy = xp.exp(-1j * 2 * np.pi * self.kys[None, :] * atomsy[:, None])
                 
                 # Einstein summation - match NumPy
                 kwarg={True:{},False:{"optimize":True}}[TORCH_AVAILABLE]
