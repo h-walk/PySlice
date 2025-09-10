@@ -26,7 +26,12 @@ atom_types=trajectory.atom_types
 potential = Potential(xs, ys, zs, positions, atom_types, kind="kirkland")
 
 # TEST PROPAGATION
-ary=np.asarray( Propagate(probe,potential) )
+# Handle device conversion properly for PyTorch tensors
+result = Propagate(probe,potential)
+if hasattr(result, 'cpu'):
+    ary = result.cpu().numpy()  # Convert PyTorch tensor to numpy
+else:
+    ary = np.asarray(result)  # Already numpy array
 
 if not os.path.exists("propagate-test.npy"):
 	np.save("propagate-test.npy",ary)

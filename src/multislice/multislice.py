@@ -79,19 +79,32 @@ class Probe:
             device: PyTorch device (None for auto-detection)
         """
         if TORCH_AVAILABLE:
+            # Auto-detect device if not specified (same logic as Potential class)
             if device is None:
-                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                if torch.cuda.is_available():
+                    device = torch.device('cuda')
+                elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                    device = torch.device('mps')
+                else:
+                    device = torch.device('cpu')
+            elif isinstance(device, str):
+                device = torch.device(device)
             self.device = device
-        
-            self.xs = xs # torch.tensor(xs, dtype=float_dtype, device=device)
-            self.ys = ys # torch.tensor(ys, dtype=float_dtype, device=device)
+            self.use_torch = True
+            
+            # Use float32 for MPS compatibility (same as Potential class)
+            self.dtype = torch.float32 if device.type == 'mps' else torch.float64
+            self.complex_dtype = torch.complex64 if device.type == 'mps' else torch.complex128
         else:
             if device is not None:
                 raise ImportError("PyTorch not available. Please install PyTorch.")
-            self.xs = xs
-            self.ys = ys
             self.device = None
+            self.use_torch = False
+            self.dtype = np.float64
+            self.complex_dtype = np.complex128
         
+        self.xs = xs
+        self.ys = ys
         self.mrad = mrad
         self.eV = eV
         self.wavelength = wavelength(eV)
@@ -101,17 +114,23 @@ class Probe:
         dx = xs[1] - xs[0]
         dy = ys[1] - ys[0]
         
-        self.kxs = xp.fft.fftfreq(nx, d=dx, device=device)
-        self.kys = xp.fft.fftfreq(ny, d=dy, device=device)
+        # Set up device kwargs for unified xp interface (same as Potential class)
+        device_kwargs = {'device': self.device} if self.use_torch else {}
+        
+        self.kxs = xp.fft.fftfreq(nx, d=dx, dtype=self.dtype, **device_kwargs)
+        self.kys = xp.fft.fftfreq(ny, d=dy, dtype=self.dtype, **device_kwargs)
 
         if not array is None: # Allow construction of a Probe object with a passed array instead of building it below. used by create_batched_probes
-            self.array=xp.asarray(array)
+            if self.use_torch and hasattr(array, 'to'):
+                self.array = array.to(device=self.device, dtype=self.complex_dtype)
+            else:
+                self.array = xp.asarray(array)
             return
                     
         if mrad == 0:
-            self.array = xp.ones((nx, ny), dtype=complex_dtype, device=device)
+            self.array = xp.ones((nx, ny), dtype=self.complex_dtype, **device_kwargs)
         else:
-            reciprocal = xp.zeros((nx, ny), dtype=complex_dtype, device=device)
+            reciprocal = xp.zeros((nx, ny), dtype=self.complex_dtype, **device_kwargs)
             radius = (mrad * 1e-3) / self.wavelength  # Convert mrad to reciprocal space units
             
             kx_grid, ky_grid = xp.meshgrid(self.kxs, self.kys, indexing='ij')
@@ -275,17 +294,19 @@ def Propagate(probe, potential, device=None):
     # Get slice thickness
     dz = potential.zs[1] - potential.zs[0] if len(potential.zs) > 1 else 0.5
     
+    # Initialize wavefunction with probe(s) - shape: (n_probes, nx, ny)
+    array = probe.array #.clone()
+    
     # Pre-compute propagation operator in k-space (Fresnel propagation)
+    # All tensors should already be on the correct device from creation
     kx_grid, ky_grid = xp.meshgrid(potential.kxs, potential.kys, indexing='ij')
     k_squared = kx_grid**2 + ky_grid**2
     P = xp.exp(-1j * xp.pi * probe.wavelength * dz * k_squared)
     
-    # Initialize wavefunction with probe(s) - shape: (n_probes, nx, ny)
-    array = probe.array #.clone()
-    
     # Vectorized multislice propagation through each slice
     for z in range(len(potential.zs)):
         # Transmission function: t = exp(iσV(x,y,z))
+        # All tensors should already be on the correct device from creation
         potential_slice = potential.array[:, :, z]
         t = xp.exp(1j * sigma * potential_slice)
         

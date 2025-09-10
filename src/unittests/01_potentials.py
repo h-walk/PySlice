@@ -20,7 +20,7 @@ positions = trajectory.positions[0]
 atom_types=trajectory.atom_types
 xs,ys,zs,lx,ly,lz=gridFromTrajectory(trajectory,sampling=0.1,slice_thickness=0.5)
 potential = Potential(xs, ys, zs, positions, atom_types, kind="kirkland")
-ary=np.asarray(potential.array)
+ary=potential.to_cpu()  # Convert to CPU numpy array properly
 
 if not os.path.exists("potentials-test.npy"):
 	np.save("potentials-test.npy",ary)

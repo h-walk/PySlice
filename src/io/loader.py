@@ -8,8 +8,8 @@ from tqdm import tqdm
 from typing import Optional
 
 
-from ..tacaw.trajectory import Trajectory
-from ..tacaw.potential import getZfromElementName
+from ..multislice.trajectory import Trajectory
+from ..multislice.potentials import getZfromElementName
 
 # Try to import OVITO, but don't fail if it's not available
 try:

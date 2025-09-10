@@ -46,7 +46,12 @@ potential = Potential(xs, ys, zs, positions, atom_types, kind="kirkland")
 #plt.show()
 
 # TEST PROPAGATION
-ary=np.asarray( Propagate(probes_many,potential) )
+# Handle device conversion properly for PyTorch tensors
+result = Propagate(probes_many,potential)
+if hasattr(result, 'cpu'):
+    ary = result.cpu().numpy()  # Convert PyTorch tensor to numpy
+else:
+    ary = np.asarray(result)  # Already numpy array
 
 if not os.path.exists("manyprobes-test.npy"):
 	np.save("manyprobes-test.npy",ary)

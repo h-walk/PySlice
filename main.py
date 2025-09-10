@@ -30,9 +30,9 @@ logger = logging.getLogger(__name__)
 # Import our TACAW modules
 try:
     from src.io.loader import TrajectoryLoader
-    from src.tacaw.ms_calculator_torch import MultisliceCalculatorTorch
-    from src.tacaw.wf_data import WFData
-    from src.tacaw.tacaw_data import TACAWData
+    from src.multislice.calculators import MultisliceCalculator
+    from src.postprocessing.wf_data import WFData
+    from src.postprocessing.tacaw_data import TACAWData
 except ImportError as e:
     logger.error(f"Failed to import TACAW modules: {e}")
     logger.error("Please ensure all dependencies are installed. Run: pip install -r requirements.txt")
@@ -40,13 +40,12 @@ except ImportError as e:
 
 
 def setup_simulation_parameters():
-    """Setup default simulation parameters for the Abtem-based test."""
+    """Setup default simulation parameters for the multislice calculator."""
     return {
         'aperture': 0.0,            # 0.0 mrad = plane wave (set >0 for convergent beam)
-        'voltage_kv': 100.0,        # 100 kV accelerating voltage
-        'pixel_size': 0.1,          # 0.1 Å/pixel
+        'voltage_eV': 100000.0,     # 100 kV accelerating voltage in eV
         'defocus': 0.0,             # No defocus
-        'slice_thickness': 0.5,     # 1 Å slice thickness
+        'slice_thickness': 0.5,     # 0.5 Å slice thickness
         'sampling': 0.1,            # Real space sampling in Å
     }
 
@@ -557,11 +556,11 @@ def main():
     
     # Initialize PyTorch calculator (required)
     logger.info("Initializing PyTorch MultisliceCalculator...")
-    calculator = MultisliceCalculatorTorch()
+    calculator = MultisliceCalculator()
     logger.info(f"PyTorch calculator ready on device: {calculator.device}")
     use_pytorch = True
     
-    # Run JACR simulation
+    # Run TACAW simulation
     logger.info("Running TACAW multislice simulation...")
     logger.info(f"Simulation parameters: {sim_params}")
     logger.info(f"Number of probe positions: {len(probe_positions)} (using single probe for testing)")
@@ -593,12 +592,17 @@ def main():
             logger.info("Running multislice simulation...")
             simulation_start = time.time()
 
-            wf_data = calculator.run_simulation(
+            # Setup calculator
+            calculator.setup(
                 trajectory=trajectory,
                 probe_positions=probe_positions,
                 cleanup_temp_files=False,
+                save_path=output_dir,
                 **sim_params
             )
+            
+            # Run the simulation
+            wf_data = calculator.run()
 
             simulation_time = time.time() - simulation_start
             logger.info(f"WF data simulation completed in {simulation_time:.2f} seconds")

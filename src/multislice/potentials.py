@@ -65,7 +65,11 @@ def kirkland(qsq, Z):
     global kirklandABCDs
 
     if len(kirklandABCDs)==0:
-        loadKirkland()
+        # Get device from qsq tensor if it's a PyTorch tensor
+        if hasattr(qsq, 'device'):
+            loadKirkland(qsq.device)
+        else:
+            loadKirkland()
 
     if isinstance(Z, str):
         Z = getZfromElementName(Z)
@@ -163,30 +167,53 @@ def loadKirkland(device='cpu'):
             # Fill with zeros if parameters not available
             kirkland_params.append([[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]])
     
-    # Convert to PyTorch tensor and move to device - store per device
+    # Convert to appropriate tensor format with device handling
     if TORCH_AVAILABLE:
-        kirklandABCDs = torch.tensor(kirkland_params, dtype=torch.float64, device=device)
+        # Use float32 for MPS compatibility (Apple Silicon doesn't support float64)
+        if isinstance(device, str):
+            device = torch.device(device)
+        dtype = torch.float32 if device.type == 'mps' else torch.float64
+        kirklandABCDs = torch.tensor(kirkland_params, dtype=dtype, device=device)
     else:
         kirklandABCDs = np.asarray(kirkland_params)
 
 class Potential:    
     def __init__(self, xs, ys, zs, positions, atomTypes, kind="kirkland", device=None):
+        # Set up device and backend first
         if TORCH_AVAILABLE:
             # Auto-detect device if not specified
             if device is None:
-                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                if torch.cuda.is_available():
+                    device = torch.device('cuda')
+                elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                    device = torch.device('mps')
+                else:
+                    device = torch.device('cpu')
+            elif isinstance(device, str):
+                device = torch.device(device)
+            
             self.device = device
-        
+            self.use_torch = True
+            
+            # Use float32 for MPS compatibility (Apple Silicon doesn't support float64)
+            self.dtype = torch.float32 if device.type == 'mps' else torch.float64
+            self.complex_dtype = torch.complex64 if device.type == 'mps' else torch.complex128
+            
             # Convert inputs to PyTorch tensors on device
-            self.xs = torch.tensor(xs, dtype=torch.float64, device=device)
-            self.ys = torch.tensor(ys, dtype=torch.float64, device=device)
-            self.zs = torch.tensor(zs, dtype=torch.float64, device=device)
-        
-            positions = torch.tensor(positions, dtype=torch.float64, device=device)
+            self.xs = torch.tensor(xs, dtype=self.dtype, device=device)
+            self.ys = torch.tensor(ys, dtype=self.dtype, device=device)
+            self.zs = torch.tensor(zs, dtype=self.dtype, device=device)
+            positions = torch.tensor(positions, dtype=self.dtype, device=device)
         else:
             if device is not None:
                 raise ImportError("PyTorch not available. Please install PyTorch.")
-            self.xs = xs ; self.ys = ys ; self.zs = zs
+            self.device = None
+            self.use_torch = False
+            self.dtype = np.float64
+            self.complex_dtype = np.complex128
+            self.xs = xs
+            self.ys = ys 
+            self.zs = zs
 
         nx = len(xs)
         ny = len(ys)
@@ -195,13 +222,16 @@ class Potential:
         dy = ys[1] - ys[0] 
         dz = zs[1] - zs[0] if nz > 1 else 0.5
         
-        # Set up k-space frequencies on GPU
-        self.kxs = xp.fft.fftfreq(nx, d=dx, device=device)
-        self.kys = xp.fft.fftfreq(ny, d=dy, device=device)
+        # Set up device kwargs for unified xp interface
+        device_kwargs = {'device': self.device} if self.use_torch else {}
+        
+        # Set up k-space frequencies using xp with conditional device
+        self.kxs = xp.fft.fftfreq(nx, d=dx, dtype=self.dtype, **device_kwargs)
+        self.kys = xp.fft.fftfreq(ny, d=dy, dtype=self.dtype, **device_kwargs)
         qsq = self.kxs[:, None]**2 + self.kys[None, :]**2
         
-        # Initialize potential array on GPU 
-        reciprocal = xp.zeros((nx, ny, nz), dtype=complex_dtype, device=device)
+        # Initialize potential array using xp with conditional device
+        reciprocal = xp.zeros((nx, ny, nz), dtype=self.complex_dtype, **device_kwargs)
         
         # Convert atom types to atomic numbers if needed
         unique_atom_types = set(atomTypes)
@@ -295,7 +325,10 @@ class Potential:
         
     def to_cpu(self):
         """Convert tensors back to CPU NumPy arrays."""
-        return self.array
+        if self.use_torch:
+            return self.array.cpu().numpy()
+        else:
+            return self.array
     
     def to_device(self, device):
         """Move tensor data to specified device."""
