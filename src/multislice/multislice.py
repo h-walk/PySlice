@@ -115,10 +115,10 @@ class Probe:
         dy = ys[1] - ys[0]
         
         # Set up device kwargs for unified xp interface (same as Potential class)
-        device_kwargs = {'device': self.device} if self.use_torch else {}
+        device_kwargs = {'device': self.device, 'dtype': self.dtype} if self.use_torch else {}
         
-        self.kxs = xp.fft.fftfreq(nx, d=dx, dtype=self.dtype, **device_kwargs)
-        self.kys = xp.fft.fftfreq(ny, d=dy, dtype=self.dtype, **device_kwargs)
+        self.kxs = xp.fft.fftfreq(nx, d=dx, **device_kwargs)
+        self.kys = xp.fft.fftfreq(ny, d=dy, **device_kwargs)
 
         if not array is None: # Allow construction of a Probe object with a passed array instead of building it below. used by create_batched_probes
             if self.use_torch and hasattr(array, 'to'):

@@ -223,11 +223,11 @@ class Potential:
         dz = zs[1] - zs[0] if nz > 1 else 0.5
         
         # Set up device kwargs for unified xp interface
-        device_kwargs = {'device': self.device} if self.use_torch else {}
+        device_kwargs = {'device': self.device, 'dtype': self.dtype} if self.use_torch else {}
         
         # Set up k-space frequencies using xp with conditional device
-        self.kxs = xp.fft.fftfreq(nx, d=dx, dtype=self.dtype, **device_kwargs)
-        self.kys = xp.fft.fftfreq(ny, d=dy, dtype=self.dtype, **device_kwargs)
+        self.kxs = xp.fft.fftfreq(nx, d=dx, **device_kwargs)
+        self.kys = xp.fft.fftfreq(ny, d=dy, **device_kwargs)
         qsq = self.kxs[:, None]**2 + self.kys[None, :]**2
         
         # Initialize potential array using xp with conditional device

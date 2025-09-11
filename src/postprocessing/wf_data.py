@@ -27,53 +27,6 @@ class WFData:
     wavefunction_data: np.ndarray  # Complex wavefunction array (probe_positions, time, kx, ky, layer)
     probe: Probe
 
-    def fft_to_tacaw_data(self, layer_index: int = None):
-        """
-        Perform FFT along the time axis for a specific layer to convert to TACAW data.
-        This implements the JACR method: Ψ(t,q,r) → |Ψ(ω,q,r)|² via FFT.
-
-        Args:
-            layer_index: Index of the layer to compute FFT for (default: last layer)
-
-        Returns:
-            TACAWData object with intensity data |Ψ(ω,q)|² for the specified layer
-        """
-        from .tacaw_data import TACAWData
-
-        # Default to last layer if not specified
-        if layer_index is None:
-            layer_index = len(self.layer) - 1
-
-        # Validate layer index
-        if layer_index < 0 or layer_index >= len(self.layer):
-            raise ValueError(f"layer_index {layer_index} out of range [0, {len(self.layer)-1}]")
-
-        # Compute frequencies from time sampling
-        n_freq = len(self.time)
-        dt = self.time[1] - self.time[0] 
-        frequencies_thz = np.fft.fftfreq(n_freq, d=dt)
-        frequencies_thz = np.fft.fftshift(frequencies_thz)
-
-        # Extract wavefunction data for the specified layer
-        # Shape: (probe_positions, time, kx, ky, layer)
-        wf_layer = self.wavefunction_data[:, :, :, :, layer_index]
-        
-        # Perform FFT along time axis (axis=1) for each probe position and k-point
-        # Following abeels.py approach: subtract mean to avoid high zero-frequency peak
-        wf_mean = np.mean(wf_layer, axis=1, keepdims=True)
-        wf_fft = np.fft.fft(wf_layer - wf_mean, axis=1)
-        wf_fft = np.fft.fftshift(wf_fft, axes=1)
-        
-        # Compute intensity |Ψ(ω,q)|² from the frequency-domain wavefunction
-        intensity = np.abs(wf_fft)**2
-
-        return TACAWData(
-            probe_positions=self.probe_positions,
-            frequency=frequencies_thz,
-            kx=self.kxs,
-            ky=self.kys,
-            intensity=intensity  # Store the intensity data |Ψ(ω,q)|²
-        )
 
 
 # Example usage (for testing within this file)
