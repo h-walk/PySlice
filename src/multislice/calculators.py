@@ -243,10 +243,7 @@ class MultisliceCalculator:
         else:
             logger.info(f"Cache files saved in: {self.output_dir}")
         
-        # Save if requested
-        if self.save_path is not None:
-            wf_data.save(self.save_path)
-            logger.info(f"Wave function data saved to {self.save_path}")
+        # Save if requested - psi files already saved during processing
         
         return wf_data
     

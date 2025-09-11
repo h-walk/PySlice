@@ -11,7 +11,10 @@ mrads=[1,3,5,15,30]
 ary=np.zeros((5,501,491),dtype=complex)
 for i,mrad in enumerate(mrads):
 	probe=Probe(xs,ys,mrad=mrad,eV=100e3)
-	ary[i]=np.asarray(probe.array)
+	if hasattr(probe, 'to_cpu'):
+		ary[i] = probe.to_cpu()
+	else:
+		ary[i] = np.asarray(probe.array)
 ary=np.reshape(ary,(501*5,491))
 
 if not os.path.exists("probe-test.npy"):

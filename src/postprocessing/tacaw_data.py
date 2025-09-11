@@ -6,8 +6,6 @@ import numpy as np
 from typing import Optional, Tuple, Dict, Any, List, Union
 from pathlib import Path
 import logging
-import pickle
-import hashlib
 from .wf_data import WFData
 
 logger = logging.getLogger(__name__)
@@ -116,7 +114,11 @@ class TACAWData(WFData):
 
         # Sum intensity data over all k-space for this probe position
         probe_intensity = self.intensity[probe_index]  # Shape: (frequency, kx, ky)
-        spectrum = np.sum(probe_intensity, axis=(1, 2))  # Sum over kx, ky
+        spectrum = xp.sum(probe_intensity, axis=(1, 2))  # Sum over kx, ky
+        
+        # Convert to numpy if PyTorch tensor
+        if TORCH_AVAILABLE and hasattr(spectrum, 'cpu'):
+            spectrum = spectrum.cpu().numpy()
         return spectrum
 
     def spectrum_image(self, frequency: float, probe_indices: Optional[List[int]] = None) -> np.ndarray:
@@ -163,7 +165,11 @@ class TACAWData(WFData):
 
         # Sum intensity data over all frequencies for this probe position
         probe_intensity = self.intensity[probe_index]  # Shape: (frequency, kx, ky)
-        diffraction_pattern = np.sum(probe_intensity, axis=0)  # Sum over frequencies
+        diffraction_pattern = xp.sum(probe_intensity, axis=0)  # Sum over frequencies
+        
+        # Convert to numpy if PyTorch tensor
+        if TORCH_AVAILABLE and hasattr(diffraction_pattern, 'cpu'):
+            diffraction_pattern = diffraction_pattern.cpu().numpy()
         return diffraction_pattern
 
     def spectral_diffraction(self, frequency: float, probe_index: int = 0) -> np.ndarray:
@@ -181,10 +187,14 @@ class TACAWData(WFData):
             raise ValueError(f"Probe index {probe_index} out of range")
 
         # Find closest frequency index
-        freq_idx = np.argmin(np.abs(self.frequency - frequency))
+        freq_idx = np.argmin(np.abs(self.frequencies - frequency))
 
         # Extract intensity data at this frequency and probe position
         spectral_diffraction = self.intensity[probe_index, freq_idx, :, :]
+        
+        # Convert to numpy if PyTorch tensor
+        if TORCH_AVAILABLE and hasattr(spectral_diffraction, 'cpu'):
+            spectral_diffraction = spectral_diffraction.cpu().numpy()
         return spectral_diffraction
 
     def masked_spectrum(self, mask: np.ndarray, probe_index: int = 0) -> np.ndarray:
@@ -231,90 +241,6 @@ class TACAWData(WFData):
 
         return omega
 
-    def save(self, filepath: Union[str, Path], auto_generate_filename: bool = False,
-             trajectory=None, sim_params: dict = None, probe_positions: list = None) -> bool:
-        """
-        Save TACAWData object to disk using pickle.
-
-        Args:
-            filepath: Path where to save the file (or directory if auto_generate_filename=True)
-            auto_generate_filename: If True, generate a unique filename based on simulation parameters
-            trajectory: Trajectory object (required if auto_generate_filename=True)
-            sim_params: Simulation parameters dict (required if auto_generate_filename=True)
-            probe_positions: List of probe positions (required if auto_generate_filename=True)
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        try:
-            filepath = Path(filepath)
-
-            # Auto-generate filename if requested
-            if auto_generate_filename:
-                if trajectory is None or sim_params is None or probe_positions is None:
-                    logger.error("trajectory, sim_params, and probe_positions required for auto filename generation")
-                    return False
-
-                # Generate unique filename based on simulation parameters
-                param_string = f"{trajectory.n_frames}_{trajectory.n_atoms}_{len(probe_positions)}"
-                param_string += f"_{sim_params.get('aperture', 0.0)}_{sim_params.get('voltage_kv', 100.0)}"
-                param_string += f"_{sim_params.get('sampling', 0.1)}_{sim_params.get('slice_thickness', 0.5)}"
-                param_string += f"_{trajectory.timestep}"
-
-                # Add probe positions to the hash
-                for pos in probe_positions:
-                    param_string += f"_{pos[0]:.3f}_{pos[1]:.3f}"
-
-                # Create hash for unique identification
-                param_hash = hashlib.md5(param_string.encode()).hexdigest()[:8]
-                filename = f"tacaw_data_{trajectory.n_frames}f_{len(probe_positions)}p_{param_hash}.pkl"
-                filepath = filepath / filename
-
-            # Ensure parent directory exists
-            filepath.parent.mkdir(parents=True, exist_ok=True)
-
-            with open(filepath, 'wb') as f:
-                pickle.dump(self, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-            logger.info(f"TACAWData saved to: {filepath}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to save TACAWData to {filepath}: {e}")
-            return False
-
-    @classmethod
-    def load(cls, filepath: Union[str, Path]) -> Optional['TACAWData']:
-        """
-        Load TACAWData object from disk using pickle.
-
-        Args:
-            filepath: Path to the file to load
-
-        Returns:
-            TACAWData object if successful, None otherwise
-        """
-        try:
-            filepath = Path(filepath)
-
-            if not filepath.exists():
-                logger.error(f"File does not exist: {filepath}")
-                return None
-
-            with open(filepath, 'rb') as f:
-                obj = pickle.load(f)
-
-            # Validate that we loaded the correct type
-            if not isinstance(obj, cls):
-                logger.error(f"Loaded object is not a {cls.__name__} instance")
-                return None
-
-            logger.info(f"TACAWData loaded from: {filepath}")
-            return obj
-
-        except Exception as e:
-            logger.error(f"Failed to load TACAWData from {filepath}: {e}")
-            return None
 
 # Example usage (for testing within this file)
 if __name__ == '__main__':

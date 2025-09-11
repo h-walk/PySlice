@@ -64,7 +64,14 @@ else:
 		print("ERROR! EXIT WAVE DOES NOT MATCH PREVIOUS RUN",dz*100,"%")
 
 # ASSEMBLE HAADF IMAGE
-q=np.sqrt(potential.kxs[:,None]**2+potential.kys[None,:]**2)
+# Convert PyTorch tensors to numpy arrays for k-space calculations
+if hasattr(potential.kxs, 'cpu'):
+    kxs = potential.kxs.cpu().numpy()
+    kys = potential.kys.cpu().numpy()
+else:
+    kxs = np.asarray(potential.kxs)
+    kys = np.asarray(potential.kys)
+q=np.sqrt(kxs[:,None]**2+kys[None,:]**2)
 fig, ax = plt.subplots()
 fft=np.fft.fft2(ary,axes=(1,2)) ; fft[:,q<2]=0 # mask in reciprocal space (keep only high scattering angles)
 #ax.imshow(np.absolute(np.fft.fftshift(fft[0]))**.1, cmap="inferno")
