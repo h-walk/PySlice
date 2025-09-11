@@ -127,10 +127,11 @@ class Probe:
                 self.array = xp.asarray(array)
             return
                     
+        device_kwargs = {'device': self.device, 'dtype': self.dtype} if self.use_torch else {}
         if mrad == 0:
-            self.array = xp.ones((nx, ny), dtype=self.complex_dtype, **device_kwargs)
+            self.array = xp.ones((nx, ny), **device_kwargs)
         else:
-            reciprocal = xp.zeros((nx, ny), dtype=self.complex_dtype, **device_kwargs)
+            reciprocal = xp.zeros((nx, ny), **device_kwargs)
             radius = (mrad * 1e-3) / self.wavelength  # Convert mrad to reciprocal space units
             
             kx_grid, ky_grid = xp.meshgrid(self.kxs, self.kys, indexing='ij')

@@ -231,6 +231,7 @@ class Potential:
         qsq = self.kxs[:, None]**2 + self.kys[None, :]**2
         
         # Initialize potential array using xp with conditional device
+        device_kwargs = {'device': self.device } if self.use_torch else {}
         reciprocal = xp.zeros((nx, ny, nz), dtype=self.complex_dtype, **device_kwargs)
         
         # Convert atom types to atomic numbers if needed
