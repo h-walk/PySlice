@@ -283,8 +283,9 @@ def _process_frame_worker_torch(args):
     exit_waves_batch = Propagate(batched_probes, potential, worker_device)
         
     # Convert all exit waves to k-space
-    exit_waves_k = xp.fft.fft2(exit_waves_batch, dim=(-2, -1))
-    diffraction_patterns = xp.fft.fftshift(exit_waves_k, dim=(-2, -1))
+    kwarg = {"dim":(-2,-1)} if TORCH_AVAILABLE else {"axes":(-2,-1)}
+    exit_waves_k = xp.fft.fft2(exit_waves_batch, **kwarg)
+    diffraction_patterns = xp.fft.fftshift(exit_waves_k, **kwarg)
         
      # Store results
     frame_data[:, :, :, 0, 0] = diffraction_patterns #.cpu().numpy()

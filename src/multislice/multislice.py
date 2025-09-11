@@ -24,26 +24,26 @@ except ImportError:
     complex_dtype = np.complex128
     float_dtype = np.float64
 
-    np.fft._fft2=np.fft.fft2
-    def fft2(ary,dim=None,axes=None): # WATCH OUT: imports apply throughout: if we alias a kwarg, then the calling function might still expect to find the unaliased kwarg
-        if axes is not None:
-            return np.fft._fft2(ary,axes=axes)
-        return np.fft._fft2(ary,axes=dim)
-    np.fft.fft2=fft2
+    #np.fft._fft2=np.fft.fft2
+    #def fft2(ary,dim=None,axes=None): # WATCH OUT: imports apply throughout: if we alias a kwarg, then the calling function might still expect to find the unaliased kwarg
+    #    if axes is not None:
+    #        return np.fft._fft2(ary,axes=axes)
+    #    return np.fft._fft2(ary,axes=dim)
+    #np.fft.fft2=fft2
 
-    np.fft._ifft2=np.fft.ifft2
-    def ifft2(ary,dim=None,axes=None): # WATCH OUT: imports apply throughout: if we alias a kwarg, then the calling function might still expect to find the unaliased kwarg
-        if axes is not None:
-            return np.fft._ifft2(ary,axes=axes)
-        return np.fft._ifft2(ary,axes=dim)
-    np.fft.ifft2=ifft2
+    #np.fft._ifft2=np.fft.ifft2
+    #def ifft2(ary,dim=None,axes=None): # WATCH OUT: imports apply throughout: if we alias a kwarg, then the calling function might still expect to find the unaliased kwarg
+    #    if axes is not None:
+    #        return np.fft._ifft2(ary,axes=axes)
+    #    return np.fft._ifft2(ary,axes=dim)
+    #np.fft.ifft2=ifft2
 
-    np.fft._fftshift=np.fft.fftshift
-    def fftshift(ary,dim=None,axes=None): # WATCH OUT: imports apply throughout: if we alias a kwarg, then the calling function might still expect to find the unaliased kwarg
-        if axes is not None:
-            return np.fft._fftshift(ary,axes=axes)
-        return np.fft._fftshift(ary,axes=dim)
-    np.fft.fftshift=fftshift
+    #np.fft._fftshift=np.fft.fftshift
+    #def fftshift(ary,dim=None,axes=None): # WATCH OUT: imports apply throughout: if we alias a kwarg, then the calling function might still expect to find the unaliased kwarg
+    #    if axes is not None:
+    #        return np.fft._fftshift(ary,axes=axes)
+    #    return np.fft._fftshift(ary,axes=dim)
+    #np.fft.fftshift=fftshift
 
 logger = logging.getLogger(__name__)
 
@@ -318,9 +318,10 @@ def Propagate(probe, potential, device=None):
         # Fresnel propagation to next slice (except for last slice)
         if z < len(potential.zs) - 1:
             # Vectorized FFT over spatial dimensions for all probes
-            fft_array = xp.fft.fft2(array, dim=(-2, -1))
+            kwarg = {"dim":(-2,-1)} if TORCH_AVAILABLE else {"axes":(-2,-1)}
+            fft_array = xp.fft.fft2(array, **kwarg)
             propagated_fft = P[None, :, :] * fft_array
-            array = xp.fft.ifft2(propagated_fft, dim=(-2, -1))
+            array = xp.fft.ifft2(propagated_fft, **kwarg)
     
     # Return single probe result if input was single, otherwise return batch
     if array.shape[0] == 1:

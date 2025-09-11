@@ -28,13 +28,12 @@ exitwaves = calculator.run()
 
 tacaw = TACAWData(exitwaves)
 print(tacaw.frequencies)
-ary=tacaw.intensity[0,65,:,:]**.1
+ary=np.asarray( tacaw.intensity[0,65,:,:]**.1 )
 
 fig, ax = plt.subplots()
 ax.imshow(ary.T, cmap="inferno")
 plt.show()
 
-ary=np.asarray(haadf)
 if not os.path.exists("tacaw-test.npy"):
 	np.save("tacaw-test.npy",ary)
 else:
