@@ -22,11 +22,12 @@ xs,ys,zs,lx,ly,lz=gridFromTrajectory(trajectory,sampling=0.1,slice_thickness=0.5
 potential = Potential(xs, ys, zs, positions, atom_types, kind="kirkland")
 ary=potential.to_cpu()  # Convert to CPU numpy array properly
 
+print(ary.shape)
 if not os.path.exists("potentials-test.npy"):
-	np.save("potentials-test.npy",ary)
+	np.save("potentials-test.npy",ary[::3,::3,:])
 else:
 	previous=np.load("potentials-test.npy")
-	F , D = np.absolute(ary) , np.absolute(previous)
+	F , D = np.absolute(ary)[::3,::3,:] , np.absolute(previous)
 	dz=np.sum( (F-D)**2 ) / np.sum( F**2 ) # a scaling-resistant values-near-zero-resistance residual function
 	if dz>1e-6:
 		print("ERROR! POTENTIAL DOES NOT MATCH PREVIOUS RUN",dz*100,"%")

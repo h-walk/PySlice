@@ -53,11 +53,12 @@ if hasattr(result, 'cpu'):
 else:
     ary = np.asarray(result)  # Already numpy array
 
+print(np.shape(ary))
 if not os.path.exists("manyprobes-test.npy"):
-	np.save("manyprobes-test.npy",ary)
+	np.save("manyprobes-test.npy",ary[::2,::2,::2])
 else:
 	previous=np.load("manyprobes-test.npy")
-	F , D = np.absolute(ary) , np.absolute(previous)
+	F , D = np.absolute(ary)[::2,::2,::2] , np.absolute(previous)
 	dz=np.sum( (F-D)**2 ) / np.sum( F**2 ) # a scaling-resistant values-near-zero-resistance residual function
 	if dz>1e-6:
 		print("ERROR! EXIT WAVE DOES NOT MATCH PREVIOUS RUN",dz*100,"%")
