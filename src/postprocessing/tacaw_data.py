@@ -8,11 +8,42 @@ from pathlib import Path
 import logging
 import pickle
 import hashlib
+from .wf_data import WFData
 
 logger = logging.getLogger(__name__)
 
+try:
+    import torch ; xp = torch
+    TORCH_AVAILABLE = True
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+    elif torch.backends.mps.is_available():
+        device = torch.device('mps')
+    else:
+        device = torch.device('cpu')
+    if device.type == 'mps':
+        complex_dtype = torch.complex64
+        float_dtype = torch.float32
+    else:
+        complex_dtype = torch.complex128
+        float_dtype = torch.float64
+except ImportError:
+    TORCH_AVAILABLE = False
+    xp = np
+    print("PyTorch not available, falling back to NumPy")
+    complex_dtype = np.complex128
+    float_dtype = np.float64
+
 @dataclass
-class TACAWData:
+class TACAWData(WFData):
+    # inherit all attributes from parent object
+    def __init__(self, WFData, layer_index: int = None) -> object:
+        self.__class__ = type(WFData.__class__.__name__,
+                              (self.__class__, WFData.__class__),
+                              {})
+        self.__dict__ = WFData.__dict__
+        self.fft_from_wf_data(layer_index)
+
     """
     Data structure for storing TACAW EELS results with format: probe_positions, frequency, kx, ky.
 
@@ -28,6 +59,47 @@ class TACAWData:
     kx: np.ndarray  # kx sampling vectors
     ky: np.ndarray  # ky sampling vectors
     intensity: np.ndarray  # Intensity array |Ψ(ω,q)|² (probe_positions, frequency, kx, ky)
+
+    def fft_from_wf_data(self, layer_index: int = None):
+        """
+        Perform FFT along the time axis for a specific layer to convert to TACAW data.
+        This implements the JACR method: Ψ(t,q,r) → |Ψ(ω,q,r)|² via FFT.
+
+        Args:
+            layer_index: Index of the layer to compute FFT for (default: last layer)
+
+        Returns:
+            TACAWData object with intensity data |Ψ(ω,q)|² for the specified layer
+        """
+
+        # Default to last layer if not specified
+        if layer_index is None:
+            layer_index = len(self.layer) - 1
+
+        # Validate layer index
+        if layer_index < 0 or layer_index >= len(self.layer):
+            raise ValueError(f"layer_index {layer_index} out of range [0, {len(self.layer)-1}]")
+
+        # Compute frequencies from time sampling
+        n_freq = len(self.time)
+        dt = self.time[1] - self.time[0] 
+        self.frequencies = np.fft.fftfreq(n_freq, d=dt)
+        self.frequencies = np.fft.fftshift(self.frequencies)
+
+        # Extract wavefunction data for the specified layer
+        # Shape: (probe_positions, time, kx, ky, layer)
+        wf_layer = self.wavefunction_data[:, :, :, :, layer_index]
+        
+        # Perform FFT along time axis (axis=1) for each probe position and k-point
+        # Following abeels.py approach: subtract mean to avoid high zero-frequency peak
+        wf_mean = xp.mean(wf_layer, axis=1)
+        wf_fft = xp.fft.fft(wf_layer - wf_mean[:,None,:,:], axis=1)
+        kwarg = {"dim":1} if TORCH_AVAILABLE  else {"axes":1} # trialing kwargs instead of aliasing functions like we do elsewhere
+        wf_fft = xp.fft.fftshift(wf_fft, **kwarg)
+        
+        # Compute intensity |Ψ(ω,q)|² from the frequency-domain wavefunction
+        self.intensity = xp.abs(wf_fft)**2
+
 
     def spectrum(self, probe_index: int = 0) -> np.ndarray:
         """

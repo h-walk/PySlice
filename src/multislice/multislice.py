@@ -24,26 +24,26 @@ except ImportError:
     complex_dtype = np.complex128
     float_dtype = np.float64
 
-    np.fft._fft2=np.fft.fft2
-    def fft2(ary,dim=None,axes=None): # WATCH OUT: imports apply throughout: if we alias a kwarg, then the calling function might still expect to find the unaliased kwarg
-        if axes is not None:
-            return np.fft._fft2(ary,axes=axes)
-        return np.fft._fft2(ary,axes=dim)
-    np.fft.fft2=fft2
+    #np.fft._fft2=np.fft.fft2
+    #def fft2(ary,dim=None,axes=None): # WATCH OUT: imports apply throughout: if we alias a kwarg, then the calling function might still expect to find the unaliased kwarg
+    #    if axes is not None:
+    #        return np.fft._fft2(ary,axes=axes)
+    #    return np.fft._fft2(ary,axes=dim)
+    #np.fft.fft2=fft2
 
-    np.fft._ifft2=np.fft.ifft2
-    def ifft2(ary,dim=None,axes=None): # WATCH OUT: imports apply throughout: if we alias a kwarg, then the calling function might still expect to find the unaliased kwarg
-        if axes is not None:
-            return np.fft._ifft2(ary,axes=axes)
-        return np.fft._ifft2(ary,axes=dim)
-    np.fft.ifft2=ifft2
+    #np.fft._ifft2=np.fft.ifft2
+    #def ifft2(ary,dim=None,axes=None): # WATCH OUT: imports apply throughout: if we alias a kwarg, then the calling function might still expect to find the unaliased kwarg
+    #    if axes is not None:
+    #        return np.fft._ifft2(ary,axes=axes)
+    #    return np.fft._ifft2(ary,axes=dim)
+    #np.fft.ifft2=ifft2
 
-    np.fft._fftshift=np.fft.fftshift
-    def fftshift(ary,dim=None,axes=None): # WATCH OUT: imports apply throughout: if we alias a kwarg, then the calling function might still expect to find the unaliased kwarg
-        if axes is not None:
-            return np.fft._fftshift(ary,axes=axes)
-        return np.fft._fftshift(ary,axes=dim)
-    np.fft.fftshift=fftshift
+    #np.fft._fftshift=np.fft.fftshift
+    #def fftshift(ary,dim=None,axes=None): # WATCH OUT: imports apply throughout: if we alias a kwarg, then the calling function might still expect to find the unaliased kwarg
+    #    if axes is not None:
+    #        return np.fft._fftshift(ary,axes=axes)
+    #    return np.fft._fftshift(ary,axes=dim)
+    #np.fft.fftshift=fftshift
 
 logger = logging.getLogger(__name__)
 
@@ -115,10 +115,10 @@ class Probe:
         dy = ys[1] - ys[0]
         
         # Set up device kwargs for unified xp interface (same as Potential class)
-        device_kwargs = {'device': self.device} if self.use_torch else {}
+        device_kwargs = {'device': self.device, 'dtype': self.dtype} if self.use_torch else {}
         
-        self.kxs = xp.fft.fftfreq(nx, d=dx, dtype=self.dtype, **device_kwargs)
-        self.kys = xp.fft.fftfreq(ny, d=dy, dtype=self.dtype, **device_kwargs)
+        self.kxs = xp.fft.fftfreq(nx, d=dx, **device_kwargs)
+        self.kys = xp.fft.fftfreq(ny, d=dy, **device_kwargs)
 
         if not array is None: # Allow construction of a Probe object with a passed array instead of building it below. used by create_batched_probes
             if self.use_torch and hasattr(array, 'to'):
@@ -127,10 +127,11 @@ class Probe:
                 self.array = xp.asarray(array)
             return
                     
+        device_kwargs = {'device': self.device, 'dtype': self.dtype} if self.use_torch else {}
         if mrad == 0:
-            self.array = xp.ones((nx, ny), dtype=self.complex_dtype, **device_kwargs)
+            self.array = xp.ones((nx, ny), **device_kwargs)
         else:
-            reciprocal = xp.zeros((nx, ny), dtype=self.complex_dtype, **device_kwargs)
+            reciprocal = xp.zeros((nx, ny), **device_kwargs)
             radius = (mrad * 1e-3) / self.wavelength  # Convert mrad to reciprocal space units
             
             kx_grid, ky_grid = xp.meshgrid(self.kxs, self.kys, indexing='ij')
@@ -317,9 +318,10 @@ def Propagate(probe, potential, device=None):
         # Fresnel propagation to next slice (except for last slice)
         if z < len(potential.zs) - 1:
             # Vectorized FFT over spatial dimensions for all probes
-            fft_array = xp.fft.fft2(array, dim=(-2, -1))
+            kwarg = {"dim":(-2,-1)} if TORCH_AVAILABLE else {"axes":(-2,-1)}
+            fft_array = xp.fft.fft2(array, **kwarg)
             propagated_fft = P[None, :, :] * fft_array
-            array = xp.fft.ifft2(propagated_fft, dim=(-2, -1))
+            array = xp.fft.ifft2(propagated_fft, **kwarg)
     
     # Return single probe result if input was single, otherwise return batch
     if array.shape[0] == 1:

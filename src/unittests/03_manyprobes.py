@@ -53,11 +53,12 @@ if hasattr(result, 'cpu'):
 else:
     ary = np.asarray(result)  # Already numpy array
 
+print(np.shape(ary))
 if not os.path.exists("manyprobes-test.npy"):
-	np.save("manyprobes-test.npy",ary)
+	np.save("manyprobes-test.npy",ary[::2,::2,::2])
 else:
 	previous=np.load("manyprobes-test.npy")
-	F , D = np.absolute(ary) , np.absolute(previous)
+	F , D = np.absolute(ary)[::2,::2,::2] , np.absolute(previous)
 	dz=np.sum( (F-D)**2 ) / np.sum( F**2 ) # a scaling-resistant values-near-zero-resistance residual function
 	if dz>1e-6:
 		print("ERROR! EXIT WAVE DOES NOT MATCH PREVIOUS RUN",dz*100,"%")
@@ -66,8 +67,8 @@ else:
 q=np.sqrt(potential.kxs[:,None]**2+potential.kys[None,:]**2)
 fig, ax = plt.subplots()
 fft=np.fft.fft2(ary,axes=(1,2)) ; fft[:,q<2]=0 # mask in reciprocal space (keep only high scattering angles)
-ax.imshow(np.absolute(np.fft.fftshift(fft[0]))**.1, cmap="inferno")
-plt.show()
-#HAADF=np.sum(np.absolute(fft),axis=(1,2)).reshape((len(x),len(y)))
-#ax.imshow(HAADF, cmap="inferno")
+#ax.imshow(np.absolute(np.fft.fftshift(fft[0]))**.1, cmap="inferno")
 #plt.show()
+HAADF=np.sum(np.absolute(fft),axis=(1,2)).reshape((len(x),len(y)))
+ax.imshow(HAADF, cmap="inferno")
+plt.show()

@@ -28,20 +28,20 @@ except ImportError:
     device=None
     complex_dtype = xp.complex128
     float_dtype = xp.float64
-    np.fft._fft=np.fft.fft
-    def fft(ary,device):
-        return np.fft._fft(ary)
-    xp.fft.fft=fft
-    np._zeros=np.zeros
-    def zeros(tup,dtype=float_dtype,device=None):
-        return np._zeros(tup,dtype=dtype)
-    xp.zeros=zeros
-    np._sum=np.sum
-    def sum(ary,dim=None,axis=None): # WATCH OUT: imports apply throughout: if we alias a kwarg, then the calling function might still expect to find the unaliased kwarg
-        if axis is not None:
-            return np._sum(ary,axis=axis)
-        return np._sum(ary,axis=dim)
-    np.sum=sum
+    #np.fft._fft=np.fft.fft # ALIASING IS TERRIBLE. THIS BLOCK, FOR EXAMPLE, THROWS A PSYCHO "postprocessing/tacaw_data.py", line 96, in fft_from_wf_data \n wf_fft = xp.fft.fft(wf_layer - wf_mean[:,None,:,:], axis=1) \n TypeError: fft() got an unexpected keyword argument 'axis'" BECAUSE WHEN WE ALIASED THE FUNCTION WE FAILED TO PREDICT ALL THE KWARGS WE MIGHT USE ELSEWHERE IN THE CODE
+    #def fft(ary,device):
+    #    return np.fft._fft(ary)
+    #xp.fft.fft=fft
+    #np._zeros=np.zeros
+    #def zeros(tup,dtype=float_dtype,device=None):
+    #    return np._zeros(tup,dtype=dtype)
+    #xp.zeros=zeros
+    #np._sum=np.sum
+    #def sum(ary,dim=None,axis=None): # WATCH OUT: imports apply throughout: if we alias a kwarg, then the calling function might still expect to find the unaliased kwarg
+    #    if axis is not None:
+    #        return np._sum(ary,axis=axis)
+    #    return np._sum(ary,axis=dim)
+    #np.sum=sum
 
 logger = logging.getLogger(__name__)
 
@@ -89,8 +89,9 @@ def kirkland(qsq, Z):
     d_expanded = d[:, None, None]
     qsq_expanded = qsq[None, :, :]
     
-    term1 = xp.sum(a_expanded / (qsq_expanded + b_expanded), dim=0)
-    term2 = xp.sum(c_expanded * xp.exp(-d_expanded * qsq_expanded), dim=0)
+    kwarg = {"dim":0} if TORCH_AVAILABLE else {"axis":0}
+    term1 = xp.sum(a_expanded / (qsq_expanded + b_expanded), **kwarg)
+    term2 = xp.sum(c_expanded * xp.exp(-d_expanded * qsq_expanded), **kwarg)
     
     return term1 + term2
 
@@ -223,14 +224,15 @@ class Potential:
         dz = zs[1] - zs[0] if nz > 1 else 0.5
         
         # Set up device kwargs for unified xp interface
-        device_kwargs = {'device': self.device} if self.use_torch else {}
+        device_kwargs = {'device': self.device, 'dtype': self.dtype} if self.use_torch else {}
         
         # Set up k-space frequencies using xp with conditional device
-        self.kxs = xp.fft.fftfreq(nx, d=dx, dtype=self.dtype, **device_kwargs)
-        self.kys = xp.fft.fftfreq(ny, d=dy, dtype=self.dtype, **device_kwargs)
+        self.kxs = xp.fft.fftfreq(nx, d=dx, **device_kwargs)
+        self.kys = xp.fft.fftfreq(ny, d=dy, **device_kwargs)
         qsq = self.kxs[:, None]**2 + self.kys[None, :]**2
         
         # Initialize potential array using xp with conditional device
+        device_kwargs = {'device': self.device } if self.use_torch else {}
         reciprocal = xp.zeros((nx, ny, nz), dtype=self.complex_dtype, **device_kwargs)
         
         # Convert atom types to atomic numbers if needed
