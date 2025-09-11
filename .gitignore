@@ -18,6 +18,7 @@ examples/
 test_results/
 *.pkl
 *.npy
+!-test.npy
 *.png
 *.jpg
 *.jpeg
