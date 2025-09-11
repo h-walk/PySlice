@@ -147,13 +147,13 @@ class MultisliceCalculator:
         self.dx = xs[1]-xs[0] ; self.dy = ys[1]-ys[0] ; self.dy = ys[1]-ys[0]
 
         # Set up default probe position if not provided
-        if probe_positions is None:
-            probe_positions = [(lx/2, ly/2)]  # Center probe
+        if self.probe_positions is None:
+            self.probe_positions = [(lx/2, ly/2)]  # Center probe
         self.base_probe = Probe(xs, ys, self.aperture, self.voltage_eV)
 
         # Initialize storage for results
         self.n_frames = trajectory.n_frames
-        self.n_probes = len(probe_positions)
+        self.n_probes = len(self.probe_positions)
         
         # Storage: [probe, frame, x, y, layer] - matches WFData expected format
         self.wavefunction_data = xp.zeros((self.n_probes, self.n_frames, nx, ny, 1), dtype=complex_dtype)
