@@ -105,6 +105,7 @@ class MultisliceCalculator:
         batch_size: int = 10,
         save_path: Optional[Path] = None,
         cleanup_temp_files: bool = False,
+        slice_axis: int = 2,
     ):
         """
         Set up multislice simulation using PyTorch acceleration.
@@ -131,6 +132,7 @@ class MultisliceCalculator:
         self.probe_positions = probe_positions
         self.save_path = save_path
         self.cleanup_temp_files = cleanup_temp_files
+        self.slice_axis = slice_axis
 
         # Generate cache key and setup output directory
         cache_key = self._generate_cache_key(trajectory, aperture, voltage_eV,
@@ -174,7 +176,7 @@ class MultisliceCalculator:
                 
                 args = (frame_idx, positions, atom_types, self.xs, self.ys, self.zs, 
                        self.aperture, self.voltage_eV, self.base_probe, self.probe_positions, self.element_map, 
-                       cache_file)
+                       cache_file, self.slice_axis)
                 
                 # Process frame
                 frame_idx_result, frame_data, was_cached = _process_frame_worker_torch(args)
@@ -252,7 +254,7 @@ class MultisliceCalculator:
 
 
 def _process_frame_worker_torch(args):
-    frame_idx, positions, atom_types, xs, ys, zs, aperture, eV, probe, probe_positions, element_map, cache_file = args
+    frame_idx, positions, atom_types, xs, ys, zs, aperture, eV, probe, probe_positions, element_map, cache_file, slice_axis = args
     
     if cache_file.exists():
         return frame_idx, xp.asarray(np.load(cache_file)), True # if always saving as numpy, then must cast to torch array if re-reading cache file back in
@@ -270,7 +272,7 @@ def _process_frame_worker_torch(args):
             atom_type_names.append(atom_type)
     
     #try:
-    potential = Potential(xs, ys, zs, positions, atom_type_names, kind="kirkland", device=worker_device)
+    potential = Potential(xs, ys, zs, positions, atom_type_names, kind="kirkland", device=worker_device, slice_axis=slice_axis)
 
     n_probes = len(probe_positions)
     nx, ny = len(xs), len(ys)
