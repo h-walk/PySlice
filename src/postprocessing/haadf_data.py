@@ -41,16 +41,16 @@ class HAADFData(WFData):
         self.__dict__ = WFData.__dict__
 
     def ADF(self, collection_angle: float = 45, preview: bool = False) -> np.ndarray:
-        xs=xp.asarray(sorted(list(set(self.probe_positions[:,0]))))
-        ys=xp.asarray(sorted(list(set(self.probe_positions[:,1]))))
-        adf=xp.zeros((len(xs),len(ys)))
+        self.xs=xp.asarray(sorted(list(set(self.probe_positions[:,0]))))
+        self.ys=xp.asarray(sorted(list(set(self.probe_positions[:,1]))))
+        adf=xp.zeros((len(self.xs),len(self.ys)))
         q=xp.sqrt(self.kxs[:,None]**2+self.kys[None,:]**2)
         #print(np.shape(self.wavefunction_data),np.shape(q))
         radius = (collection_angle * 1e-3) / self.probe.wavelength * 2 * np.pi
         mask=xp.zeros(q.shape) ; mask[q>radius]=1
         probe_positions=xp.asarray(self.probe_positions)
-        for i,x in enumerate(xs):
-            for j,y in enumerate(ys):
+        for i,x in enumerate(self.xs):
+            for j,y in enumerate(self.ys):
                 dxy=xp.sqrt( xp.sum( (probe_positions-xp.asarray([x,y])[None,:])**2,axis=1 ) )
                 p=xp.argmin(dxy)
                 exits=self.wavefunction_data[p,:,:,:,-1] # which probe position, all frames, kx, ky, last layer

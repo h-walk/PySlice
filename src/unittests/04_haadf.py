@@ -46,10 +46,12 @@ exitwaves = calculator.run()
 #ax.imshow(HAADF, cmap="inferno")
 #plt.show()
 
-haadf=HAADFData(exitwaves).ADF(preview=False)
+haadf=HAADFData(exitwaves)
+ary=haadf.ADF(preview=False)
+xs=haadf.xs ; ys=haadf.ys
 
 fig, ax = plt.subplots()
-ax.imshow(haadf.T, cmap="inferno")
+ax.imshow(ary.T, cmap="inferno")
 plt.show()
 
 ary=np.asarray(haadf)

@@ -27,5 +27,3 @@ class WFData:
     wavefunction_data: np.ndarray  # Complex wavefunction array (probe_positions, time, kx, ky, layer)
     probe: Probe
 
-
-
