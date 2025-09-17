@@ -217,38 +217,3 @@ class Trajectory:
 
         )
 
-    def rotate_positions(self, rotation_matrix: np.ndarray) -> 'Trajectory':
-        """
-        Rotate all positions, velocities, and box matrix by the given rotation matrix.
-
-        Args:
-            rotation_matrix: 3x3 rotation matrix
-
-        Returns:
-            New Trajectory with rotated positions, velocities, and box matrix
-        """
-        if rotation_matrix.shape != (3, 3):
-            raise ValueError("Rotation matrix must be 3x3")
-
-        # Apply rotation to positions
-        rotated_positions = np.zeros_like(self.positions)
-        for frame_idx in range(self.n_frames):
-            for atom_idx in range(self.n_atoms):
-                rotated_positions[frame_idx, atom_idx] = rotation_matrix @ self.positions[frame_idx, atom_idx]
-
-        # Rotate velocities by the same matrix
-        rotated_velocities = np.zeros_like(self.velocities)
-        for frame_idx in range(self.n_frames):
-            for atom_idx in range(self.n_atoms):
-                rotated_velocities[frame_idx, atom_idx] = rotation_matrix @ self.velocities[frame_idx, atom_idx]
-
-        # Rotate box matrix to maintain system consistency
-        rotated_box_matrix = rotation_matrix @ self.box_matrix
-
-        return Trajectory(
-            atom_types=self.atom_types,
-            positions=rotated_positions,
-            velocities=rotated_velocities,
-            box_matrix=rotated_box_matrix,  # Rotate box matrix
-            timestep=self.timestep
-        ) 

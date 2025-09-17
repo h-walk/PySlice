@@ -24,26 +24,29 @@ logger = logging.getLogger(__name__)
 
 class TrajectoryLoader:
     def __init__(self, filename: str, 
-				timestep: float = 1.0, 
+				timestep: Optional[float] = None, 
 				atomic_numbers: Optional[dict[int, int]] = None, 
 				element_names: Optional[dict[str,int]] = None):
         """
-        Initialize trajectory loader for LAMMPS dump files.
+        Initialize trajectory loader for various trajectory file formats.
+        OVITO will auto-detect the format (LAMMPS dump, VASP XDATCAR, XYZ, etc.).
+        Works with both single-frame structures and multi-frame trajectories.
 
         Args:
-            filename: Path to LAMMPS dump file
-            timestep: Timestep in picoseconds (LAMMPS files only contain frame numbers,
-                not timestep values, so this must be provided)
-            atomic_numbers: Optional dictionary mapping LAMMPS atom types to actual atomic numbers.
-                If provided, LAMMPS atom types will be converted to actual atomic numbers.
-                Example: {1: 6, 2: 8} maps LAMMPS type 1 to carbon (6) and type 2 to oxygen (8)
+            filename: Path to trajectory/structure file
+            timestep: Timestep in picoseconds. Optional - defaults to 1.0 ps.
+                For single-frame structures (e.g., XYZ files), this value is not critical.
+            atomic_numbers: Optional dictionary mapping atom types to actual atomic numbers.
+                If provided, atom types will be converted to actual atomic numbers.
+                Example: {1: 6, 2: 8} maps type 1 to carbon (6) and type 2 to oxygen (8)
+            element_names: Optional dictionary mapping element names to atomic numbers
         """
-        if timestep <= 0:
-            raise ValueError("timestep must be positive.")
+        if timestep is not None and timestep <= 0:
+            raise ValueError("timestep must be positive if specified.")
         self.filepath = Path(filename)
         if not self.filepath.exists():
             raise FileNotFoundError(f"Trajectory file not found: {filename}")
-        self.timestep = timestep
+        self.timestep = timestep if timestep is not None else 1.0  # Default to 1.0 ps
         self.atomic_numbers = atomic_numbers
 
         if not element_names is None:
@@ -133,15 +136,20 @@ class TrajectoryLoader:
         return trajectory
 
     def _load_via_ovito(self) -> Trajectory:
-        """Load trajectory via OVITO from LAMMPS dump format."""
+        """Load trajectory via OVITO with automatic format detection."""
         if not OVITO_AVAILABLE:
             raise ImportError("OVITO is not available. Please install OVITO Python to load trajectory files.")
 
-        logger.info(f"Loading '{self.filepath.name}' with OVITO (LAMMPS dump format).")
+        logger.info(f"Loading '{self.filepath.name}' with OVITO (auto-detecting format).")
 
         try:
-            pipeline = import_file(str(self.filepath), input_format='lammps/dump')
-            pipeline.modifiers.append(UnwrapTrajectoriesModifier())
+            # Let OVITO auto-detect the file format
+            pipeline = import_file(str(self.filepath))
+            # Only add unwrap modifier for non-VASP formats (LAMMPS typically needs it)
+            # We can check the data source type to determine if unwrapping is appropriate
+            if hasattr(pipeline.source, 'data') and pipeline.source.data:
+                # UnwrapTrajectoriesModifier is mainly for LAMMPS wrapped coordinates
+                pipeline.modifiers.append(UnwrapTrajectoriesModifier())
         except Exception as e:
             logger.error(f"OVITO failed to load file '{self.filepath.name}': {e}")
             raise RuntimeError(f"OVITO import failed: {e}")
@@ -211,7 +219,10 @@ class TrajectoryLoader:
         # Apply atomic number mapping if provided
         atom_types_arr = self._apply_atomic_number_mapping(atom_types_arr)
 
-        logger.info(f"Trajectory '{self.filepath.name}' loaded via OVITO: {n_frames} frames, {n_atoms} atoms.")
+        if n_frames == 1:
+            logger.info(f"Structure '{self.filepath.name}' loaded via OVITO: {n_atoms} atoms (single frame).")
+        else:
+            logger.info(f"Trajectory '{self.filepath.name}' loaded via OVITO: {n_frames} frames, {n_atoms} atoms.")
 
         return Trajectory(
             atom_types=atom_types_arr,

@@ -111,7 +111,13 @@ def getZfromElementName(element):
     return elements.index(element) + 1
 
 def gridFromTrajectory(trajectory,sampling=0.1,slice_thickness=0.5):
-    lx, ly, lz = trajectory.box_matrix[0,0], trajectory.box_matrix[1,1], trajectory.box_matrix[2,2]
+    # Use box matrix diagonal elements for orthogonal simulation cells
+    box_matrix = trajectory.box_matrix
+    
+    # Extract box dimensions from diagonal elements (assuming orthogonal box)
+    lx = box_matrix[0, 0]  # X dimension
+    ly = box_matrix[1, 1]  # Y dimension  
+    lz = box_matrix[2, 2]  # Z dimension
     
     # Create grids based on sampling
     nx = int(lx / sampling) + 1
@@ -179,7 +185,7 @@ def loadKirkland(device='cpu'):
         kirklandABCDs = np.asarray(kirkland_params)
 
 class Potential:    
-    def __init__(self, xs, ys, zs, positions, atomTypes, kind="kirkland", device=None):
+    def __init__(self, xs, ys, zs, positions, atomTypes, kind="kirkland", device=None, slice_axis=2):
         # Set up device and backend first
         if TORCH_AVAILABLE:
             # Auto-detect device if not specified
@@ -223,6 +229,21 @@ class Potential:
         dy = ys[1] - ys[0] 
         dz = zs[1] - zs[0] if nz > 1 else 0.5
         
+        # Store slice axis for later use
+        self.slice_axis = slice_axis
+        
+        # Determine in-plane axes based on slice axis
+        all_axes = [0, 1, 2]
+        all_axes.remove(slice_axis)
+        self.inplane_axis1, self.inplane_axis2 = all_axes
+        
+        # Store coordinate arrays and spacing for the slice axis
+        coord_arrays = [xs, ys, zs]
+        spacings = [dx, dy, dz]
+        self.slice_coords = coord_arrays[slice_axis]
+        self.slice_spacing = spacings[slice_axis]
+        self.n_slices = len(self.slice_coords)
+        
         # Set up device kwargs for unified xp interface
         device_kwargs = {'device': self.device, 'dtype': self.dtype} if self.use_torch else {}
         
@@ -233,7 +254,7 @@ class Potential:
         
         # Initialize potential array using xp with conditional device
         device_kwargs = {'device': self.device } if self.use_torch else {}
-        reciprocal = xp.zeros((nx, ny, nz), dtype=self.complex_dtype, **device_kwargs)
+        reciprocal = xp.zeros((nx, ny, self.n_slices), dtype=self.complex_dtype, **device_kwargs)
         
         # Convert atom types to atomic numbers if needed
         unique_atom_types = set(atomTypes)
@@ -271,19 +292,19 @@ class Potential:
             else:
                 type_mask = (atomic_numbers == at)
             
-            # OPTIMIZATION 3: Batch process all z-slices for this atom type
-            # Create z-slice masks for all slices at once
-            z_coords = positions[type_mask, 2]  # Get z-coordinates for this atom type
+            # OPTIMIZATION 3: Batch process all slices for this atom type along the specified axis
+            # Create slice masks for all slices at once
+            slice_coords = positions[type_mask, slice_axis]  # Get coordinates along slice axis for this atom type
             
-            if len(z_coords) == 0:
+            if len(slice_coords) == 0:
                 continue
                 
-            for z in range(nz):
-                # Vectorized spatial masking on GPU
-                z_min = self.zs[z] - dz/2 if z > 0 else 0
-                z_max = self.zs[z] + dz/2 if z < nz-1 else self.zs[-1] + dz
+            for slice_idx in range(self.n_slices):
+                # Vectorized spatial masking using correct slice coordinates
+                slice_min = self.slice_coords[slice_idx] - self.slice_spacing/2 if slice_idx > 0 else 0
+                slice_max = self.slice_coords[slice_idx] + self.slice_spacing/2 if slice_idx < self.n_slices-1 else self.slice_coords[-1] + self.slice_spacing
                 
-                spatial_mask = (z_coords >= z_min) & (z_coords < z_max)
+                spatial_mask = (slice_coords >= slice_min) & (slice_coords < slice_max)
                 
                 if not xp.any(spatial_mask):
                    continue  # Skip empty slices
@@ -295,8 +316,8 @@ class Potential:
                 if len(slice_positions) == 0:
                     continue
                 
-                atomsx = slice_positions[:, 0]
-                atomsy = slice_positions[:, 1]
+                atomsx = slice_positions[:, self.inplane_axis1]
+                atomsy = slice_positions[:, self.inplane_axis2]
                 
                 # Compute structure factors - match NumPy pattern exactly
                 expx = xp.exp(-1j * 2 * np.pi * self.kxs[None, :] * atomsx[:, None])
@@ -306,13 +327,13 @@ class Potential:
                 kwarg={True:{},False:{"optimize":True}}[TORCH_AVAILABLE]
                 shape_factor = xp.einsum('ax,ay->xy', expx, expy, **kwarg)
                 
-                reciprocal[:, :, z] += shape_factor * form_factor
+                reciprocal[:, :, slice_idx] += shape_factor * form_factor
         
         # Slice-by-slice IFFT to match NumPy implementation exactly
-        potential_real = xp.zeros((nx, ny, nz), dtype=float_dtype, device=device)
-        for z in range(nz):
-            potential_slice = xp.fft.ifft2(reciprocal[:, :, z])
-            potential_real[:, :, z] = xp.real(potential_slice)
+        potential_real = xp.zeros((nx, ny, self.n_slices), dtype=float_dtype, device=device)
+        for slice_idx in range(self.n_slices):
+            potential_slice = xp.fft.ifft2(reciprocal[:, :, slice_idx])
+            potential_real[:, :, slice_idx] = xp.real(potential_slice)
         
         # Apply proper normalization factor (dx²×dy²) to match reference implementation
         dx = self.xs[1] - self.xs[0]
