@@ -90,35 +90,56 @@ class TACAWData(WFData):
         
         # Perform FFT along time axis (axis=1) for each probe position and k-point
         # Following abeels.py approach: subtract mean to avoid high zero-frequency peak
-        wf_mean = xp.mean(wf_layer, axis=1)
-        wf_fft = xp.fft.fft(wf_layer - wf_mean[:,None,:,:], axis=1)
-        kwarg = {"dim":1} if TORCH_AVAILABLE  else {"axes":1} # trialing kwargs instead of aliasing functions like we do elsewhere
-        wf_fft = xp.fft.fftshift(wf_fft, **kwarg)
+        if TORCH_AVAILABLE and hasattr(wf_layer, 'dim'):  # Check if it's a torch tensor
+            wf_mean = torch.mean(wf_layer, dim=1, keepdim=True)
+            wf_fft = torch.fft.fft(wf_layer - wf_mean, dim=1)
+            wf_fft = torch.fft.fftshift(wf_fft, dim=1)
+        else:
+            wf_mean = np.mean(wf_layer, axis=1, keepdims=True)
+            wf_fft = np.fft.fft(wf_layer - wf_mean, axis=1)
+            wf_fft = np.fft.fftshift(wf_fft, axes=1)
         
         # Compute intensity |Ψ(ω,q)|² from the frequency-domain wavefunction
-        self.intensity = xp.abs(wf_fft)**2
+        if TORCH_AVAILABLE and hasattr(wf_fft, 'dim'):  # Check if it's a torch tensor
+            self.intensity = torch.abs(wf_fft)**2
+        else:
+            self.intensity = np.abs(wf_fft)**2
 
 
-    def spectrum(self, probe_index: int = 0) -> np.ndarray:
+    def spectrum(self, probe_index: int = None) -> np.ndarray:
         """
         Extract spectrum for a specific probe position by summing over all k-space.
 
         Args:
-            probe_index: Index of probe position (default: 0)
+            probe_index: Index of probe position (default: 0). If None, averages over all probes.
 
         Returns:
             Spectrum array (frequency intensity)
         """
-        if probe_index >= len(self.probe_positions):
-            raise ValueError(f"Probe index {probe_index} out of range")
+        if probe_index is None:
+            # Average over all probe positions
+            all_spectra = []
+            for i in range(len(self.probe_positions)):
+                probe_intensity = self.intensity[i]  # Shape: (frequency, kx, ky)
+                spectrum = xp.sum(probe_intensity, axis=(1, 2))  # Sum over kx, ky
+                all_spectra.append(spectrum)
+            
+            # Average all spectra
+            if TORCH_AVAILABLE and hasattr(all_spectra[0], 'cpu'):
+                all_spectra = [s.cpu().numpy() for s in all_spectra]
+            spectrum = np.mean(all_spectra, axis=0)
+        else:
+            if probe_index >= len(self.probe_positions):
+                raise ValueError(f"Probe index {probe_index} out of range")
 
-        # Sum intensity data over all k-space for this probe position
-        probe_intensity = self.intensity[probe_index]  # Shape: (frequency, kx, ky)
-        spectrum = xp.sum(probe_intensity, axis=(1, 2))  # Sum over kx, ky
+            # Sum intensity data over all k-space for this probe position
+            probe_intensity = self.intensity[probe_index]  # Shape: (frequency, kx, ky)
+            spectrum = xp.sum(probe_intensity, axis=(1, 2))  # Sum over kx, ky
+            
+            # Convert to numpy if PyTorch tensor
+            if TORCH_AVAILABLE and hasattr(spectrum, 'cpu'):
+                spectrum = spectrum.cpu().numpy()
         
-        # Convert to numpy if PyTorch tensor
-        if TORCH_AVAILABLE and hasattr(spectrum, 'cpu'):
-            spectrum = spectrum.cpu().numpy()
         return spectrum
 
     def spectrum_image(self, frequency: float, probe_indices: Optional[List[int]] = None) -> np.ndarray:
@@ -133,7 +154,7 @@ class TACAWData(WFData):
             Spectrum intensity for each probe position (real space map)
         """
         # Find closest frequency index
-        freq_idx = np.argmin(np.abs(self.frequency - frequency))
+        freq_idx = np.argmin(np.abs(self.frequencies - frequency))
 
         # Use all probes if none specified
         if probe_indices is None:
@@ -143,103 +164,193 @@ class TACAWData(WFData):
         spectrum_intensities = []
         for probe_idx in probe_indices:
             # Sum intensity data over all k-space for this probe at this frequency
-            probe_intensity = np.sum(self.intensity[probe_idx, freq_idx, :, :])
-            spectrum_intensities.append(probe_intensity)
+            probe_intensity = self.intensity[probe_idx, freq_idx, :, :]
+            
+            # Sum over k-space using appropriate method
+            if TORCH_AVAILABLE and hasattr(probe_intensity, 'sum'):
+                probe_intensity_sum = probe_intensity.sum()
+                if hasattr(probe_intensity_sum, 'cpu'):
+                    probe_intensity_sum = probe_intensity_sum.cpu().numpy()
+            else:
+                probe_intensity_sum = np.sum(probe_intensity)
+                
+            spectrum_intensities.append(probe_intensity_sum)
         
         return np.array(spectrum_intensities)
 
 
 
-    def diffraction(self, probe_index: int = 0) -> np.ndarray:
+    def diffraction(self, probe_index: int = None) -> np.ndarray:
         """
         Extract diffraction pattern for a specific probe position by summing over all frequencies.
         
         Args:
-            probe_index: Index of probe position (default: 0)
+            probe_index: Index of probe position (default: 0). If None, averages over all probes.
             
         Returns:
             Diffraction pattern (kx, ky) - intensity summed over all frequencies
         """
-        if probe_index >= len(self.probe_positions):
-            raise ValueError(f"Probe index {probe_index} out of range")
+        if probe_index is None:
+            # Average over all probe positions
+            all_diffractions = []
+            for i in range(len(self.probe_positions)):
+                probe_intensity = self.intensity[i]  # Shape: (frequency, kx, ky)
+                diffraction_pattern = xp.sum(probe_intensity, axis=0)  # Sum over frequencies
+                all_diffractions.append(diffraction_pattern)
+            
+            # Average all diffraction patterns
+            if TORCH_AVAILABLE and hasattr(all_diffractions[0], 'cpu'):
+                all_diffractions = [d.cpu().numpy() for d in all_diffractions]
+            diffraction_pattern = np.mean(all_diffractions, axis=0)
+        else:
+            if probe_index >= len(self.probe_positions):
+                raise ValueError(f"Probe index {probe_index} out of range")
 
-        # Sum intensity data over all frequencies for this probe position
-        probe_intensity = self.intensity[probe_index]  # Shape: (frequency, kx, ky)
-        diffraction_pattern = xp.sum(probe_intensity, axis=0)  # Sum over frequencies
+            # Sum intensity data over all frequencies for this probe position
+            probe_intensity = self.intensity[probe_index]  # Shape: (frequency, kx, ky)
+            diffraction_pattern = xp.sum(probe_intensity, axis=0)  # Sum over frequencies
+            
+            # Convert to numpy if PyTorch tensor
+            if TORCH_AVAILABLE and hasattr(diffraction_pattern, 'cpu'):
+                diffraction_pattern = diffraction_pattern.cpu().numpy()
         
-        # Convert to numpy if PyTorch tensor
-        if TORCH_AVAILABLE and hasattr(diffraction_pattern, 'cpu'):
-            diffraction_pattern = diffraction_pattern.cpu().numpy()
         return diffraction_pattern
 
-    def spectral_diffraction(self, frequency: float, probe_index: int = 0) -> np.ndarray:
+    def spectral_diffraction(self, frequency: float, probe_index: int = None) -> np.ndarray:
         """
         Extract spectral diffraction pattern at a specific frequency.
 
         Args:
             frequency: Frequency value in THz
-            probe_index: Index of probe position (default: 0)
+            probe_index: Index of probe position (default: None). If None, averages over all probes.
 
         Returns:
             Spectral diffraction pattern (kx, ky) at the specified frequency
         """
-        if probe_index >= len(self.probe_positions):
-            raise ValueError(f"Probe index {probe_index} out of range")
-
         # Find closest frequency index
         freq_idx = np.argmin(np.abs(self.frequencies - frequency))
 
-        # Extract intensity data at this frequency and probe position
-        spectral_diffraction = self.intensity[probe_index, freq_idx, :, :]
+        if probe_index is None:
+            # Average over all probe positions
+            all_spectral_diffractions = []
+            for i in range(len(self.probe_positions)):
+                spectral_diffraction = self.intensity[i, freq_idx, :, :]
+                all_spectral_diffractions.append(spectral_diffraction)
+            
+            # Average all spectral diffraction patterns
+            if TORCH_AVAILABLE and hasattr(all_spectral_diffractions[0], 'cpu'):
+                all_spectral_diffractions = [sd.cpu().numpy() for sd in all_spectral_diffractions]
+            spectral_diffraction = np.mean(all_spectral_diffractions, axis=0)
+        else:
+            if probe_index >= len(self.probe_positions):
+                raise ValueError(f"Probe index {probe_index} out of range")
+
+            # Extract intensity data at this frequency and probe position
+            spectral_diffraction = self.intensity[probe_index, freq_idx, :, :]
+            
+            # Convert to numpy if PyTorch tensor
+            if TORCH_AVAILABLE and hasattr(spectral_diffraction, 'cpu'):
+                spectral_diffraction = spectral_diffraction.cpu().numpy()
         
-        # Convert to numpy if PyTorch tensor
-        if TORCH_AVAILABLE and hasattr(spectral_diffraction, 'cpu'):
-            spectral_diffraction = spectral_diffraction.cpu().numpy()
         return spectral_diffraction
 
-    def masked_spectrum(self, mask: np.ndarray, probe_index: int = 0) -> np.ndarray:
+    def masked_spectrum(self, mask: np.ndarray, probe_index: int = None) -> np.ndarray:
         """
         Extract spectrum with spatial masking in k-space.
 
         Args:
             mask: Spatial mask array with shape (kx, ky)
-            probe_index: Index of probe position (default: 0)
+            probe_index: Index of probe position (default: None). If None, averages over all probes.
 
         Returns:
             Masked spectrum (frequency intensity) with k-space mask applied
         """
-        if probe_index >= len(self.probe_positions):
-            raise ValueError(f"Probe index {probe_index} out of range")
-
-        # Extract intensity data for this probe
-        probe_intensity = self.intensity[probe_index]  # Shape: (frequency, kx, ky)
-        
-        # Apply spatial mask in k-space
-        if mask.shape == (len(self.kx), len(self.ky)):
-            masked_intensity = probe_intensity * mask[None, :, :]  # Broadcast mask to all frequencies
-            masked_spectrum = np.sum(masked_intensity, axis=(1, 2))  # Sum over masked k-space
-        else:
+        if mask.shape != (len(self.kx), len(self.ky)):
             raise ValueError(f"Mask shape {mask.shape} doesn't match k-space shape ({len(self.kx)}, {len(self.ky)})")
+
+        if probe_index is None:
+            # Average over all probe positions
+            all_masked_spectra = []
+            for i in range(len(self.probe_positions)):
+                probe_intensity = self.intensity[i]  # Shape: (frequency, kx, ky)
+                masked_intensity = probe_intensity * mask[None, :, :]  # Broadcast mask to all frequencies
+                masked_spectrum = xp.sum(masked_intensity, axis=(1, 2))  # Sum over masked k-space
+                all_masked_spectra.append(masked_spectrum)
+            
+            # Average all masked spectra
+            if TORCH_AVAILABLE and hasattr(all_masked_spectra[0], 'cpu'):
+                all_masked_spectra = [ms.cpu().numpy() for ms in all_masked_spectra]
+            masked_spectrum = np.mean(all_masked_spectra, axis=0)
+        else:
+            if probe_index >= len(self.probe_positions):
+                raise ValueError(f"Probe index {probe_index} out of range")
+
+            # Extract intensity data for this probe
+            probe_intensity = self.intensity[probe_index]  # Shape: (frequency, kx, ky)
+            
+            # Apply spatial mask in k-space
+            masked_intensity = probe_intensity * mask[None, :, :]  # Broadcast mask to all frequencies
+            masked_spectrum = xp.sum(masked_intensity, axis=(1, 2))  # Sum over masked k-space
+            
+            # Convert to numpy if PyTorch tensor
+            if TORCH_AVAILABLE and hasattr(masked_spectrum, 'cpu'):
+                masked_spectrum = masked_spectrum.cpu().numpy()
 
         return masked_spectrum
 
-    def dispersion(self) -> np.ndarray:
+    def dispersion(self, kx_path: np.ndarray, ky_path: np.ndarray, probe_index: int = None) -> np.ndarray:
         """
-        Calculate phonon dispersion from TACAW data.
-
+        Extract dispersion relation from actual TACAW intensity data.
+        
+        Args:
+            kx_path: kx values for dispersion calculation
+            ky_path: ky values for dispersion calculation  
+            probe_index: Index of probe position (default: None). If None, averages over all probes.
+            
         Returns:
-            Dispersion relation array
+            Dispersion relation array with shape (n_frequencies, n_k_points)
+            Real intensity data from TACAW simulation
         """
-        # For now, return a simple dispersion calculation
-        # In a real implementation, this would compute phonon dispersion
-        kx_mesh, ky_mesh = np.meshgrid(self.kx, self.ky)
-        k_magnitude = np.sqrt(kx_mesh**2 + ky_mesh**2)
-
-        # Simple linear dispersion example: ω = v * |k|
-        sound_velocity = 5000  # m/s (example)
-        omega = sound_velocity * k_magnitude * 1e-12  # Convert to THz
-
-        return omega
+        # Find closest indices in our kxs/kys arrays for the requested paths
+        kx_indices = []
+        for kx_val in kx_path:
+            idx = np.argmin(np.abs(self.kxs - kx_val))
+            kx_indices.append(idx)
+        kx_indices = np.array(kx_indices)
+            
+        ky_indices = []
+        for ky_val in ky_path:
+            idx = np.argmin(np.abs(self.kys - ky_val))
+            ky_indices.append(idx)
+        ky_indices = np.array(ky_indices)
+        
+        # Create dispersion array
+        n_frequencies = len(self.frequencies)
+        n_k_points = len(kx_indices)
+        dispersion = np.zeros((n_frequencies, n_k_points))
+        
+        if probe_index is None:
+            # Average over all probe positions
+            for i, (kx_idx, ky_idx) in enumerate(zip(kx_indices, ky_indices)):
+                all_probe_intensities = []
+                for probe_idx in range(len(self.probe_positions)):
+                    intensity_at_k = self.intensity[probe_idx, :, kx_idx, ky_idx]
+                    if TORCH_AVAILABLE and hasattr(intensity_at_k, 'cpu'):
+                        intensity_at_k = intensity_at_k.cpu().numpy()
+                    all_probe_intensities.append(intensity_at_k)
+                dispersion[:, i] = np.mean(all_probe_intensities, axis=0)
+        else:
+            if probe_index >= len(self.probe_positions):
+                raise ValueError(f"Probe index {probe_index} out of range")
+                
+            # Extract dispersion for specific probe
+            for i, (kx_idx, ky_idx) in enumerate(zip(kx_indices, ky_indices)):
+                intensity_at_k = self.intensity[probe_index, :, kx_idx, ky_idx]
+                if TORCH_AVAILABLE and hasattr(intensity_at_k, 'cpu'):
+                    intensity_at_k = intensity_at_k.cpu().numpy()
+                dispersion[:, i] = intensity_at_k
+        
+        return dispersion
 
 
 # Example usage (for testing within this file)
