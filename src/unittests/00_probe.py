@@ -11,6 +11,7 @@ mrads=[1,3,5,15,30]
 ary=np.zeros((5,501,491),dtype=complex)
 for i,mrad in enumerate(mrads):
 	probe=Probe(xs,ys,mrad=mrad,eV=100e3)
+	probe.plot()
 	if hasattr(probe, 'to_cpu'):
 		ary[i] = probe.to_cpu()
 	else:
@@ -25,6 +26,8 @@ else:
 	dz=np.sum( (F-D)**2 ) / np.sum( F**2 ) # a scaling-resistant values-near-zero-resistance residual function
 	if dz>1e-6:
 		print("ERROR! POTENTIAL DOES NOT MATCH PREVIOUS RUN",dz*100,"%")
+
+
 
 import matplotlib.pyplot as plt
 fig, ax = plt.subplots()

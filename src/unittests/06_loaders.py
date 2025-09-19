@@ -16,7 +16,9 @@ for filename in testFiles:
 	xs,ys,zs,lx,ly,lz=gridFromTrajectory(trajectory,sampling=0.1,slice_thickness=0.5)
 	potential = Potential(xs, ys, zs, positions, atom_types, kind="kirkland")
 
-	ary=potential.to_cpu()
-	fig, ax = plt.subplots()
-	ax.imshow(np.sum(ary,axis=2), cmap="inferno")
-	plt.show()
+	#ary=potential.to_cpu()
+	#fig, ax = plt.subplots()
+	#ax.imshow(np.sum(ary,axis=2), cmap="inferno")
+	#plt.show()
+
+	potential.plot()

@@ -47,12 +47,13 @@ exitwaves = calculator.run()
 #plt.show()
 
 haadf=HAADFData(exitwaves)
-ary=haadf.ADF(preview=False)
+ary=haadf.calculateADF(preview=False)
 xs=haadf.xs ; ys=haadf.ys
 
-fig, ax = plt.subplots()
-ax.imshow(ary.T, cmap="inferno")
-plt.show()
+#fig, ax = plt.subplots()
+#ax.imshow(ary.T, cmap="inferno")
+#plt.show()
+haadf.plot()
 
 ary=np.asarray(ary)
 if not os.path.exists("haadf-test.npy"):

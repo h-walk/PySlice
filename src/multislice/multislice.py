@@ -154,6 +154,15 @@ class Probe:
         self.device = device
         return self
 
+    def plot(self):
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots()
+        array = self.array.T # imshow convention: y,x. our convention: x,y
+        extent = ( np.amin(self.xs) , np.amax(self.xs) , np.amin(self.ys) , np.amax(self.ys) )
+        ax.imshow(xp.absolute(array)**.25, cmap="inferno",extent=extent)
+        plt.show()
+
+
 def probe_grid(xlims,ylims,n,m):
 	x,y=np.meshgrid(np.linspace(*xlims,n),np.linspace(*ylims,m))
 	return np.reshape([x,y],(2,len(x.flat))).T

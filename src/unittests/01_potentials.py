@@ -32,7 +32,9 @@ else:
 	if dz>1e-6:
 		print("ERROR! POTENTIAL DOES NOT MATCH PREVIOUS RUN",dz*100,"%")
 
-import matplotlib.pyplot as plt
-fig, ax = plt.subplots()
-ax.imshow(np.sum(ary,axis=2), cmap="inferno")
-plt.show()
+potential.plot()
+
+#import matplotlib.pyplot as plt
+#fig, ax = plt.subplots()
+#ax.imshow(np.sum(ary,axis=2), cmap="inferno")
+#plt.show()

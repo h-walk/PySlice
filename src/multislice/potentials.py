@@ -359,3 +359,12 @@ class Potential:
             self.array_torch = self.array_torch.to(device)
         self.device = device
         return self
+
+    def plot(self):
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots()
+        array = xp.sum(xp.absolute(self.array),axis=2).T # imshow convention: y,x. our convention: x,y
+        extent = ( xp.amin(self.xs) , xp.amax(self.xs) , xp.amin(self.ys) , xp.amax(self.ys) )
+        ax.imshow(array, cmap="inferno",extent=extent)
+        plt.show()
+

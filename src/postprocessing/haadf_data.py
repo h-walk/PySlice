@@ -40,10 +40,10 @@ class HAADFData(WFData):
                               {})
         self.__dict__ = WFData.__dict__
 
-    def ADF(self, collection_angle: float = 45, preview: bool = False) -> np.ndarray:
+    def calculateADF(self, collection_angle: float = 45, preview: bool = False) -> np.ndarray:
         self.xs=xp.asarray(sorted(list(set(self.probe_positions[:,0]))))
         self.ys=xp.asarray(sorted(list(set(self.probe_positions[:,1]))))
-        adf=xp.zeros((len(self.xs),len(self.ys)))
+        self.adf=xp.zeros((len(self.xs),len(self.ys)))
         q=xp.sqrt(self.kxs[:,None]**2+self.kys[None,:]**2)
         #print(np.shape(self.wavefunction_data),np.shape(q))
         radius = (collection_angle * 1e-3) / self.probe.wavelength
@@ -61,5 +61,13 @@ class HAADFData(WFData):
                     plt.show()
                 #print(np.shape(exits),p,np.sum(np.absolute(exits)))
                 collected = xp.mean(xp.sum( xp.absolute(exits*mask[None,:,:]),axis=(1,2)))
-                adf[i,j]=collected #; print(collected)
-        return adf
+                self.adf[i,j]=collected #; print(collected)
+        return self.adf
+
+    def plot(self):
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots()
+        array = self.adf.T # imshow convention: y,x. our convention: x,y
+        extent = ( xp.amin(self.xs) , xp.amax(self.xs) , xp.amin(self.ys) , xp.amax(self.ys) )
+        ax.imshow(array, cmap="inferno",extent=extent)
+        plt.show()
