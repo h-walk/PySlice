@@ -162,6 +162,15 @@ class Probe:
         ax.imshow(xp.absolute(array)**.25, cmap="inferno",extent=extent)
         plt.show()
 
+    def defocus(self,dz): # POSITIVE DEFOCUS PUTS BEAM WAIST ABOVE SAMPLE, UNITS OF ANGSTROM
+        kx_grid, ky_grid = xp.meshgrid(self.kxs, self.kys, indexing='ij')
+        k_squared = kx_grid**2 + ky_grid**2
+        P = xp.exp(-1j * xp.pi * self.wavelength * dz * k_squared)
+        if dz>0:
+            self.array = xp.fft.ifft2( P * xp.fft.fft2( self.array ) )
+        if dz<0:
+            self.array = xp.fft.ifft2( xp.fft.fft2( self.array ) / P )
+
 
 def probe_grid(xlims,ylims,n,m):
 	x,y=np.meshgrid(np.linspace(*xlims,n),np.linspace(*ylims,m))
