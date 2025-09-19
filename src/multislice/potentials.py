@@ -330,7 +330,8 @@ class Potential:
                 reciprocal[:, :, slice_idx] += shape_factor * form_factor
         
         # Slice-by-slice IFFT to match NumPy implementation exactly
-        potential_real = xp.zeros((nx, ny, self.n_slices), dtype=float_dtype, device=device)
+        device_kwargs = {'device': device} if self.use_torch else {}
+        potential_real = xp.zeros((nx, ny, self.n_slices), dtype=float_dtype, **device_kwargs)
         for slice_idx in range(self.n_slices):
             potential_slice = xp.fft.ifft2(reciprocal[:, :, slice_idx])
             potential_real[:, :, slice_idx] = xp.real(potential_slice)
