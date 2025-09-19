@@ -158,8 +158,26 @@ class Probe:
         import matplotlib.pyplot as plt
         fig, ax = plt.subplots()
         array = self.array.T # imshow convention: y,x. our convention: x,y
-        extent = ( np.amin(self.xs) , np.amax(self.xs) , np.amin(self.ys) , np.amax(self.ys) )
-        ax.imshow(xp.absolute(array)**.25, cmap="inferno",extent=extent)
+
+        # Convert array to CPU if on GPU/MPS device
+        plot_array = xp.absolute(array)**.25
+        if hasattr(plot_array, 'cpu'):
+            plot_array = plot_array.cpu()
+
+        # Convert extent values to CPU if needed
+        xs_min = np.amin(self.xs)
+        xs_max = np.amax(self.xs)
+        ys_min = np.amin(self.ys)
+        ys_max = np.amax(self.ys)
+
+        if hasattr(xs_min, 'cpu'):
+            xs_min = xs_min.cpu()
+            xs_max = xs_max.cpu()
+            ys_min = ys_min.cpu()
+            ys_max = ys_max.cpu()
+
+        extent = (xs_min, xs_max, ys_min, ys_max)
+        ax.imshow(plot_array, cmap="inferno",extent=extent)
         plt.show()
 
     def defocus(self,dz): # POSITIVE DEFOCUS PUTS BEAM WAIST ABOVE SAMPLE, UNITS OF ANGSTROM

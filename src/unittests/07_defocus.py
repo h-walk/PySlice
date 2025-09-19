@@ -37,6 +37,11 @@ result = Propagate(probe,potential)
 
 import matplotlib.pyplot as plt
 fig, ax = plt.subplots()
-ax.imshow(np.absolute(result), cmap="inferno")
+# Convert result to CPU if on GPU/MPS device
+if hasattr(result, 'cpu'):
+    plot_result = np.absolute(result.cpu())
+else:
+    plot_result = np.absolute(result)
+ax.imshow(plot_result, cmap="inferno")
 plt.show()
 

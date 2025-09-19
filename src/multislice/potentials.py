@@ -364,7 +364,23 @@ class Potential:
         import matplotlib.pyplot as plt
         fig, ax = plt.subplots()
         array = xp.sum(xp.absolute(self.array),axis=2).T # imshow convention: y,x. our convention: x,y
-        extent = ( xp.amin(self.xs) , xp.amax(self.xs) , xp.amin(self.ys) , xp.amax(self.ys) )
+        # Convert to CPU if on GPU/MPS device
+        if hasattr(array, 'cpu'):
+            array = array.cpu()
+
+        # Convert extent values to CPU if needed
+        xs_min = xp.amin(self.xs)
+        xs_max = xp.amax(self.xs)
+        ys_min = xp.amin(self.ys)
+        ys_max = xp.amax(self.ys)
+
+        if hasattr(xs_min, 'cpu'):
+            xs_min = xs_min.cpu()
+            xs_max = xs_max.cpu()
+            ys_min = ys_min.cpu()
+            ys_max = ys_max.cpu()
+
+        extent = (xs_min, xs_max, ys_min, ys_max)
         ax.imshow(array, cmap="inferno",extent=extent)
         plt.show()
 
