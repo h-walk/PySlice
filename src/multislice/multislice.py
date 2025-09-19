@@ -142,7 +142,9 @@ class Probe:
     
     def to_cpu(self):
         """Convert probe array to CPU NumPy array."""
-        return self.array.cpu().numpy()
+        if hasattr(self.array, 'cpu'):
+            return self.array.cpu().numpy()
+        return self.array
     
     def to_device(self, device):
         """Move probe to specified device."""

@@ -54,7 +54,7 @@ fig, ax = plt.subplots()
 ax.imshow(ary.T, cmap="inferno")
 plt.show()
 
-ary=np.asarray(haadf)
+ary=np.asarray(ary)
 if not os.path.exists("haadf-test.npy"):
 	np.save("haadf-test.npy",ary)
 else:

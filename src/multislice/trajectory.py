@@ -222,3 +222,16 @@ class Trajectory:
             box_matrix=self.box_matrix,
             timestep=self.timestep
         )
+
+    def generate_random_displacements(self,n_displacements,sigma):
+        na=len(self.positions[0])
+        dxyz=np.random.random(size=(n_displacements,na,3))*sigma
+        positions = self.positions[0]+dxyz
+
+        return Trajectory(
+            atom_types=self.atom_types,
+            positions=positions,
+            velocities=np.ones(n_displacements)[:,None,None]*self.velocities[0, :, :],
+            box_matrix=self.box_matrix,
+            timestep=self.timestep
+        )

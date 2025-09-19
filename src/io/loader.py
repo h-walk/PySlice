@@ -163,9 +163,13 @@ class TrajectoryLoader:
         if trajectory is not None:
             return trajectory
 
-        # Load via OVITO
-        logger.info(f"Loading {self.filepath.name} via OVITO")
-        trajectory = self._load_via_ovito()
+        # Load via OVITO or ASE
+        if self.filepath.suffix in [".cif"]:
+            logger.info(f"Loading {self.filepath.name} via ASE")
+            trajectory = self._load_via_ase()
+        else:
+            logger.info(f"Loading {self.filepath.name} via OVITO")
+            trajectory = self._load_via_ovito()
 
         # Save to cache
         self._save_to_cache(trajectory)
@@ -263,5 +267,21 @@ class TrajectoryLoader:
             positions=positions,
             velocities=velocities,
             box_matrix=h_matrix,
+            timestep=self.timestep
+        )
+
+    def _load_via_ase(self) -> Trajectory:
+        from ase.io import read as aseread
+        atoms = aseread(str(self.filepath))
+        return self.ase2Trajectory(atoms)
+
+    def ase2Trajectory(self,atoms):
+        pos=np.asarray([atoms.get_positions()])
+        vel=np.asarray([atoms.get_velocities()])
+        return Trajectory(
+            atom_types=np.asarray( atoms.get_chemical_symbols() ),
+            positions=pos,
+            velocities=vel,
+            box_matrix=atoms.get_cell(),
             timestep=self.timestep
         )
