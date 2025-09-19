@@ -173,9 +173,9 @@ from src.multislice.calculators import MultisliceCalculator
 from src.postprocessing.tacaw_data import TACAWData
 
 # 1. Load trajectory with element name mapping
-element_names = {1: "B", 2: "N"}  # LAMMPS type 1→Boron, 2→Nitrogen
-loader = TrajectoryLoader("trajectory.lammpstrj", timestep=0.005, 
-                         element_names=element_names)
+atom_mapping = {1: "B", 2: "N"}  # LAMMPS type 1→Boron, 2→Nitrogen
+loader = TrajectoryLoader("trajectory.lammpstrj", timestep=0.005,
+                         atom_mapping=atom_mapping)
 trajectory = loader.load()
 
 # 2. Setup and run multislice simulation
@@ -289,7 +289,7 @@ The calculator automatically selects the best available device:
 ## API Reference
 
 ### Core Classes
-- `TrajectoryLoader(filename, timestep, element_names=None)`
+- `TrajectoryLoader(filename, timestep, atom_mapping=None)`
 - `MultisliceCalculator()` - Unified calculator with auto backend selection
 - `TACAWData(wfdata)` - Constructor takes WFData, performs FFT automatically
 

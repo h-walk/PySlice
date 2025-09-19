@@ -13,7 +13,7 @@ dt=.005
 types={1:"B",2:"N"}
 
 # LOAD MD OUTPUT
-trajectory=TrajectoryLoader(dump,timestep=dt,element_names=types).load()
+trajectory=TrajectoryLoader(dump,timestep=dt,atom_mapping=types).load()
 
 # TEST GENERATION OF THE POTENTIAL
 positions = trajectory.positions[0]

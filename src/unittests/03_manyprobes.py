@@ -16,7 +16,7 @@ types={1:"B",2:"N"}
 a,b=2.4907733333333337,2.1570729817355123
 
 # LOAD MD OUTPUT
-trajectory=TrajectoryLoader(dump,timestep=dt,element_names=types).load()
+trajectory=TrajectoryLoader(dump,timestep=dt,atom_mapping=types).load()
 trajectory=trajectory.slice_positions([0,10*a],[0,10*b])
 xs,ys,zs,lx,ly,lz=gridFromTrajectory(trajectory,sampling=0.1,slice_thickness=0.5)
 

@@ -17,7 +17,7 @@ types={1:"B",2:"N"}
 a,b=2.4907733333333337,2.1570729817355123
 
 # LOAD TRAJECTORY
-trajectory=TrajectoryLoader(dump,timestep=dt,element_names=types).load()
+trajectory=TrajectoryLoader(dump,timestep=dt,atom_mapping=types).load()
 # TRIM TO 10x10 UC
 trajectory=trajectory.slice_positions([0,10*a],[0,10*b])
 # SELECT 10 "RANDOM" TIMESTEPS (use seed for reproducibility)

@@ -25,7 +25,7 @@ def main():
     types = {1: "B", 2: "N"}  # Element mapping
     
     print("Loading trajectory...")
-    trajectory = TrajectoryLoader(dump, timestep=dt, element_names=types).load()
+    trajectory = TrajectoryLoader(dump, timestep=dt, atom_mapping=types).load()
     print(f"Loaded: {trajectory.n_frames} frames, {trajectory.n_atoms} atoms")
     
     # Limit frames for testing

@@ -14,7 +14,7 @@ dt=.005
 types={1:"B",2:"N"}
 
 # LOAD MD OUTPUT
-trajectory=TrajectoryLoader(dump,timestep=dt,element_names=types).load()
+trajectory=TrajectoryLoader(dump,timestep=dt,atom_mapping=types).load()
 xs,ys,zs,lx,ly,lz=gridFromTrajectory(trajectory,sampling=0.1,slice_thickness=0.5)
 
 # GENERATE PROBE (ENSURE 00_PROBE.PY PASSES BEFORE RUNNING)

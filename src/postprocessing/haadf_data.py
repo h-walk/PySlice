@@ -46,7 +46,7 @@ class HAADFData(WFData):
         adf=xp.zeros((len(self.xs),len(self.ys)))
         q=xp.sqrt(self.kxs[:,None]**2+self.kys[None,:]**2)
         #print(np.shape(self.wavefunction_data),np.shape(q))
-        radius = (collection_angle * 1e-3) / self.probe.wavelength * 2 * np.pi
+        radius = (collection_angle * 1e-3) / self.probe.wavelength
         mask=xp.zeros(q.shape) ; mask[q>radius]=1
         probe_positions=xp.asarray(self.probe_positions)
         for i,x in enumerate(self.xs):

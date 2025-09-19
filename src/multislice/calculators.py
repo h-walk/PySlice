@@ -215,8 +215,8 @@ class MultisliceCalculator:
         # TWP: If we're not going to also provide a shifted/etc reciprocal_array, we shouldn't shift the kxs
         #kxs = xp.fft.fftfreq(self.nx, d=self.dx)
         #kys = xp.fft.fftfreq(self.ny, d=self.dy)
-        kxs = xp.fft.fftshift(xp.fft.fftfreq(self.nx, self.sampling) * 2 * xp.pi)  # k-space in Å⁻¹
-        kys = xp.fft.fftshift(xp.fft.fftfreq(self.ny, self.sampling) * 2 * xp.pi)  # k-space in Å⁻¹
+        kxs = xp.fft.fftshift(xp.fft.fftfreq(self.nx, self.sampling))  # k-space in 1/Å
+        kys = xp.fft.fftshift(xp.fft.fftfreq(self.ny, self.sampling))  # k-space in 1/Å
         time_array = np.arange(self.n_frames) * self.trajectory.timestep  # Time array in ps
         layer_array = np.array([0])  # Single layer for now
         
