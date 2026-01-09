@@ -228,6 +228,8 @@ class MultisliceCalculator:
         with tqdm(total=self.n_frames, desc="Processing frames", unit="frame") as pbar:
             for frame_idx in range(self.n_frames):
                 cache_file = self.output_dir / f"frame_{frame_idx}.npy"
+                # Show detailed progress for single-frame runs
+                show_progress = (frame_idx == 0 and self.n_frames == 1)
 
                 positions = self.trajectory.positions[frame_idx]
                 atom_types = self.trajectory.atom_types
@@ -242,10 +244,9 @@ class MultisliceCalculator:
                 cache_exists,frame_data = checkCache(cache_file,self.cache_levels)
 
                 if cache_exists:
-                    #print(frame_data.shape)
-                    pass
+                    frames_cached += 1
                 else:
-                    potential = Potential(self.xs, self.ys, self.zs, positions, atom_type_names, kind="kirkland", device=self.device, slice_axis=self.slice_axis, progress=(frame_idx==-1), cache_dir=cache_file.parent if "potentials" in self.cache_levels else None, frame_idx = frame_idx)
+                    potential = Potential(self.xs, self.ys, self.zs, positions, atom_type_names, kind="kirkland", device=self.device, slice_axis=self.slice_axis, progress=show_progress, cache_dir=cache_file.parent if "potentials" in self.cache_levels else None, frame_idx = frame_idx)
 
                     n_probes = len(self.probe_positions)
                     nx, ny = len(self.xs), len(self.ys)
@@ -253,7 +254,7 @@ class MultisliceCalculator:
 
                     batched_probes = create_batched_probes(self.base_probe, self.probe_positions, self.device)
                     # Propagate returns: [l,p,x,y] where l,p are both optional (if store_all_slices=True, and if n_probes>1)
-                    exit_waves_batch = Propagate(batched_probes, potential, self.device, progress=(frame_idx==-1), onthefly=True, store_all_slices = ("slices" in self.cache_levels) )
+                    exit_waves_batch = Propagate(batched_probes, potential, self.device, progress=show_progress, onthefly=True, store_all_slices = ("slices" in self.cache_levels) )
                     #print(exit_waves_batch.shape)
                     if n_probes==1 and "slices" not in self.cache_levels:
                         exit_waves_batch = expand_dims(exit_waves_batch,0)
@@ -278,6 +279,7 @@ class MultisliceCalculator:
 
                     if "exitwaves" in self.cache_levels or "slices" in self.cache_levels:
                         np.save(cache_file, frame_data_cpu)
+                    frames_computed += 1
 
                 self.wavefunction_data[:, frame_idx, :, :, :] = frame_data[:, :, :, :, 0] # load p,x,y,l,1 --> p,t,x,y,l indices
                 # Update progress bar for this frame
