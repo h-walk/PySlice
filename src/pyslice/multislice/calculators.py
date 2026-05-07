@@ -300,7 +300,7 @@ class MultisliceCalculator:
         self.output_dir = Path("psi_data/" + ("torch" if TORCH_AVAILABLE else "numpy") + "_"+cache_key)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # ── Resolve which layers to store ────────────────────────────────────
+        # ── Resolve which layers to store ──
         # NEW: if cache_layer_indices is set, only those layers are FFT'd and
         # written to disk; the propagation itself still runs through all nz
         # slices (physically required).  cache_layer_indices=None keeps the
@@ -334,7 +334,7 @@ class MultisliceCalculator:
             _active_layers = list(range(self.nz)) if "slices" in self.cache_levels else [0]
 
         self._active_layers = _active_layers  # expose for inspection / post-processing
-        # ─────────────────────────────────────────────────────────────────────
+
 
         # if probes are over vacuum (e.g. nanoparticles), we don't need to propagate them?
         self.probe_indices = xp.arange(len(self.probe_positions))
@@ -720,3 +720,4 @@ class SEDCalculator:
             plt.savefig(filename)
         else:
             plt.show()
+
