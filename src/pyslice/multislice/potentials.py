@@ -255,6 +255,37 @@ class Potential:
         self.slice_coords = coord_arrays[slice_axis]
         self.slice_spacing = spacings[slice_axis]
         self.n_slices = len(self.slice_coords)
+        slice_coords_np = np.asarray(self.slice_coords, dtype=np.float64)
+        slice_edges_np = np.empty(self.n_slices + 1, dtype=np.float64)
+        slice_edges_np[0] = 0.0
+        if self.n_slices > 1:
+            slice_edges_np[1:-1] = 0.5 * (slice_coords_np[:-1] + slice_coords_np[1:])
+            slice_edges_np[-1] = slice_coords_np[-1] + 0.5 * self.slice_spacing
+        else:
+            slice_edges_np[-1] = slice_coords_np[-1] + 0.5 * self.slice_spacing
+        self.slice_edges = (
+            xp.tensor(slice_edges_np, dtype=self.dtype, device=self.device)
+            if TORCH_AVAILABLE
+            else slice_edges_np
+        )
+
+        def slice_membership_mask(coords, slice_idx):
+            if TORCH_AVAILABLE and isinstance(coords, torch.Tensor):
+                slice_indices = torch.bucketize(coords.contiguous(), self.slice_edges, right=True) - 1
+            else:
+                slice_indices = np.searchsorted(self.slice_edges, coords, side="right") - 1
+            return slice_indices == slice_idx
+
+        if positions is not None:
+            cell_lengths_np = np.array([self.nx * self.dx, self.ny * self.dy, slice_edges_np[-1]])
+            cell_lengths = (
+                xp.tensor(cell_lengths_np, dtype=self.dtype, device=self.device)
+                if TORCH_AVAILABLE
+                else cell_lengths_np
+            )
+            positions = positions.clone() if TORCH_AVAILABLE else positions.copy()
+            for ax in range(3):
+                positions[:, ax] = positions[:, ax] % cell_lengths[ax]
         
         # Set up device kwargs for unified xp interface
         device_kwargs = {'device': self.device, 'dtype': self.dtype} if self.use_torch else {}
@@ -328,11 +359,7 @@ class Potential:
                 if len(slice_coords) == 0:
                     continue
             
-                # Vectorized spatial masking using correct slice coordinates
-                slice_min = self.slice_coords[slice_idx] - self.slice_spacing/2 if slice_idx > 0 else 0
-                slice_max = self.slice_coords[slice_idx] + self.slice_spacing/2 if slice_idx < self.n_slices-1 else self.slice_coords[-1] + self.slice_spacing
-                
-                spatial_mask = (slice_coords >= slice_min) & (slice_coords < slice_max)
+                spatial_mask = slice_membership_mask(slice_coords, slice_idx)
                 
                 if not xp.any(spatial_mask):
                     continue #return xp.zeros((len(self.kxs),len(self.kys)))
@@ -459,4 +486,3 @@ class Potential:
             plt.savefig(filename)
         else:
             plt.show()
-
