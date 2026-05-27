@@ -775,6 +775,7 @@ def Propagate(
     onthefly=True,
     store_all_slices=False,
     propagate_exit=False,
+    stored_slice_indices=None,
 ):
     """
     PyTorch-accelerated multislice propagation function.
@@ -788,10 +789,11 @@ def Propagate(
         onthefly: If True, calculate potential slices on the fly. If False, build full array
         store_all_slices: If True, return wavefunction at each slice instead of just exit wave
         propagate_exit: If True, apply a final free-space propagation after the last slice
+        stored_slice_indices: Optional 0-based slice indices to return when store_all_slices=True
 
     Returns:
         torch.Tensor: Exit wavefunction(s) after multislice propagation
-                     If store_all_slices=True, shape is (n_slices, n_probes, nx, ny)
+                     If store_all_slices=True, shape is (stored_slices, n_probes, nx, ny)
                      Otherwise, shape is (n_probes, nx, ny) or (nx, ny) for single probe
     """
     if device is not None and not TORCH_AVAILABLE:
@@ -848,7 +850,15 @@ def Propagate(
     if not onthefly:
         potential.build()
 
-    # More elegant approach: use list to accumulate slices if needed
+    if store_all_slices and stored_slice_indices is not None:
+        stored_slice_indices = set(int(i) for i in stored_slice_indices)
+        invalid_slices = [i for i in stored_slice_indices if i < 0 or i >= len(potential.zs)]
+        if invalid_slices:
+            raise ValueError(
+                f"stored_slice_indices contains out-of-range slices {sorted(invalid_slices)}; "
+                f"valid range is [0, {len(potential.zs) - 1}]"
+            )
+
     slice_wavefunctions = [] if store_all_slices else None
 
     # Vectorized multislice propagation through each slice
@@ -899,7 +909,9 @@ def Propagate(
         array = t * array
 
         # Store wavefunction at this slice if requested (after transmission)
-        if store_all_slices:
+        if store_all_slices and (
+            stored_slice_indices is None or z in stored_slice_indices
+        ):
             # Clone/copy to avoid reference issues
             slice_wavefunctions.append(clone(array))
 
