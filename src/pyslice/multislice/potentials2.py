@@ -161,6 +161,28 @@ class Potential:
         self.slice_coords = coord_arrays[slice_axis]
         self.slice_spacing = spacings[slice_axis]
         self.n_slices = len(self.slice_coords)
+        slice_coords_np = np.asarray(self.slice_coords, dtype=np.float64)
+        slice_edges_np = np.empty(self.n_slices + 1, dtype=np.float64)
+        slice_edges_np[0] = 0.0
+        if self.n_slices > 1:
+            slice_edges_np[1:-1] = 0.5 * (slice_coords_np[:-1] + slice_coords_np[1:])
+            slice_edges_np[-1] = slice_coords_np[-1] + 0.5 * self.slice_spacing
+        else:
+            slice_edges_np[-1] = slice_coords_np[-1] + 0.5 * self.slice_spacing
+        self.slice_edges = backend.asarray(slice_edges_np, dtype=self.float_dtype, device=self.device)
+
+        def slice_membership_mask(coords, slice_idx):
+            if hasattr(backend.xp, "bucketize"):
+                slice_indices = backend.xp.bucketize(coords.contiguous(), self.slice_edges, right=True) - 1
+            else:
+                slice_indices = np.searchsorted(self.slice_edges, coords, side="right") - 1
+            return slice_indices == slice_idx
+
+        cell_lengths_np = np.array([self.nx * self.dx, self.ny * self.dy, slice_edges_np[-1]])
+        cell_lengths = backend.asarray(cell_lengths_np, dtype=self.float_dtype, device=self.device)
+        positions = positions.clone() if hasattr(positions, "clone") else positions.copy()
+        for ax in range(3):
+            positions[:, ax] = positions[:, ax] % cell_lengths[ax]
         
         # Set up k-space frequencies
         self.kxs = backend.fftfreq(self.nx, d=self.dx, dtype=float_dtype, device=device)
@@ -221,11 +243,7 @@ class Potential:
                 if len(slice_coords) == 0:
                     continue
             
-                # Vectorized spatial masking using correct slice coordinates
-                slice_min = self.slice_coords[slice_idx] - self.slice_spacing/2 if slice_idx > 0 else 0
-                slice_max = self.slice_coords[slice_idx] + self.slice_spacing/2 if slice_idx < self.n_slices-1 else self.slice_coords[-1] + self.slice_spacing
-                
-                spatial_mask = (slice_coords >= slice_min) & (slice_coords < slice_max)
+                spatial_mask = slice_membership_mask(slice_coords, slice_idx)
                 
                 if not backend.any(spatial_mask):
                     continue
@@ -343,4 +361,3 @@ class Potential:
             plt.savefig(filename)
         else:
             plt.show()
-

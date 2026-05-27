@@ -14,6 +14,21 @@ from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
+K_B_EV_PER_K = 8.617333262145e-5
+THZ_TO_EV = 4.135667696e-3
+
+
+def bose_correction_factor(frequencies_THz, temperature_K: float) -> np.ndarray:
+    """Return beta E / (1 - exp(-beta E)) for TACAW gain/loss balance."""
+    frequencies = np.asarray(to_cpu(frequencies_THz), dtype=np.float64)
+    beta_E = frequencies * THZ_TO_EV / (K_B_EV_PER_K * temperature_K)
+    beta_E = np.clip(beta_E, -500.0, 500.0)
+    factor = np.ones_like(beta_E, dtype=np.float64)
+    nonzero = np.abs(beta_E) > 1e-12
+    factor[nonzero] = beta_E[nonzero] / (1.0 - np.exp(-beta_E[nonzero]))
+    return factor
+
+
 try:
     import torch ; xp = torch
     TORCH_AVAILABLE = True
@@ -63,7 +78,15 @@ class TACAWData(PySliceSerial, Signal):
         'force_datasets': ['_array', 'probe_positions', '_kxs', '_kys', '_xs', '_ys', '_time', '_layer', '_frequencies'],
     }
 
-    def __init__(self, wf_data: WFData, layer_index: int = None, keep_complex: bool = False, chunkFFT: bool = False) -> None:
+    def __init__(
+        self,
+        wf_data: WFData,
+        layer_index: int = None,
+        keep_complex: bool = False,
+        chunkFFT: bool = False,
+        temperature_K: float = None,
+        apply_bose: bool = False,
+    ) -> None:
         """
         Initialize TACAWData from WFData by performing FFT.
 
@@ -71,6 +94,8 @@ class TACAWData(PySliceSerial, Signal):
             wf_data: WFData object containing wavefunction data
             layer_index: Index of the layer to compute FFT for (default: last layer)
             keep_complex: If True, keep complex FFT result instead of intensity
+            temperature_K: Sample temperature used for optional Bose correction
+            apply_bose: If True, apply beta E / (1 - exp(-beta E)) after FFT
         """
         # Copy needed attributes from WFData (raw tensors for GPU ops)
         self.probe_positions = wf_data.probe_positions
@@ -84,6 +109,8 @@ class TACAWData(PySliceSerial, Signal):
         self.cache_dir = wf_data.cache_dir
         self.keep_complex = keep_complex
         self.chunkFFT = chunkFFT
+        self.temperature_K = temperature_K
+        self.apply_bose = apply_bose
         self.use_memmap = isinstance(wf_data._array,np.memmap)
 
         # Store reference to source WFData array for FFT computation
@@ -96,6 +123,8 @@ class TACAWData(PySliceSerial, Signal):
 
         # Perform FFT to compute intensity
         self._fft_from_wf_data(layer_index)
+        if self.apply_bose:
+            self.apply_bose_correction(self.temperature_K)
 
         # Save computed values before super().__init__
         computed_array = self._array
@@ -136,6 +165,8 @@ class TACAWData(PySliceSerial, Signal):
                     'wavelength_A': float(self.probe.wavelength),
                     'aperture_mrad': float(self.probe.mrad),
                     'probe_positions': [list(p) for p in self.probe_positions],
+                    'temperature_K': None if self.temperature_K is None else float(self.temperature_K),
+                    'bose_corrected': bool(self.apply_bose),
                 }
             }
             self.metadata = Metadata(metadata_dict)
@@ -181,6 +212,21 @@ class TACAWData(PySliceSerial, Signal):
     def array(self):
         """Alias for intensity (backward compatibility with WFData interface)."""
         return to_cpu(self._array)
+
+    def apply_bose_correction(self, temperature_K: float):
+        """Apply the detailed-balance Bose factor to an intensity TACAW array."""
+        if temperature_K is None:
+            raise ValueError("temperature_K must be provided when apply_bose=True")
+        if self.keep_complex:
+            raise ValueError("Bose correction expects intensity data; set keep_complex=False")
+
+        factor = bose_correction_factor(self._frequencies, temperature_K)
+        if TORCH_AVAILABLE and hasattr(self._array, "device"):
+            factor = torch.as_tensor(factor, dtype=self._array.dtype, device=self._array.device)
+        self._array = self._array * factor[None, :, None, None]
+        self.temperature_K = temperature_K
+        self.apply_bose = True
+        return self
 
     def _fft_from_wf_data(self, layer_index: int = None):
         """

@@ -767,7 +767,15 @@ class PrismProbe:
 # transmission function t = exp(i σ O) where O is our object (or potential slice), Eq 6.59
 # ψ₂ = ℱ⁻¹[ P * ℱ[ t * ψ₁ ] ], Eq 6.67, noting the relationship: 𝒞[ f(x),g(x) ] = ℱ⁻¹[ ℱ[f(x)] * ℱ[g(x)] ] = ℱ⁻¹[ f(k) * g(k) ]
 # or as code: array = t * array ; fft_array = fft(array) ; propagated_fft = P * fft_array ; array = ifft(propagated_fft)
-def Propagate(probe, potential, device=None, progress=False, onthefly=True, store_all_slices=False):
+def Propagate(
+    probe,
+    potential,
+    device=None,
+    progress=False,
+    onthefly=True,
+    store_all_slices=False,
+    propagate_exit=False,
+):
     """
     PyTorch-accelerated multislice propagation function.
     Supports both single probe and batched multi-probe processing.
@@ -779,6 +787,7 @@ def Propagate(probe, potential, device=None, progress=False, onthefly=True, stor
         progress: Show progress bar
         onthefly: If True, calculate potential slices on the fly. If False, build full array
         store_all_slices: If True, return wavefunction at each slice instead of just exit wave
+        propagate_exit: If True, apply a final free-space propagation after the last slice
 
     Returns:
         torch.Tensor: Exit wavefunction(s) after multislice propagation
@@ -793,9 +802,9 @@ def Propagate(probe, potential, device=None, progress=False, onthefly=True, stor
     # Initialize wavefunction with probe(s) - shape: (n_probes, nx, ny)
     nc,npt,nx,ny = probe._array.shape #; print("nc,npt,nx,ny",nc,npt,nx,ny)
     array = probe._array.reshape((nc*npt,nx,ny)) # "flatten" first two indices
-    probe_wavelengths = probe.wavelengths[:,None]*ones(npt, device=device)[None,:] # also expand wavelengths and eVs arrays to cover all probe positions npt
+    probe_wavelengths = probe.wavelengths[:,None]*ones(npt, dtype=probe.dtype, device=device)[None,:] # also expand wavelengths and eVs arrays to cover all probe positions npt
     probe_wavelengths = probe_wavelengths.reshape(nc*npt)
-    probe_eVs = probe.eVs[:,None]*ones(npt, device=device)[None,:]
+    probe_eVs = probe.eVs[:,None]*ones(npt, dtype=probe.dtype, device=device)[None,:]
     probe_eVs = probe_eVs.reshape(nc*npt)
 
     # Calculate interaction parameter (Kirkland Eq 5.6)
@@ -820,7 +829,7 @@ def Propagate(probe, potential, device=None, progress=False, onthefly=True, stor
     kx_grid, ky_grid = xp.meshgrid(kx, ky, indexing='ij')
     k_squared = kx_grid**2 + ky_grid**2
 
-    # Precompute 2/3 Nyquist anti-aliasing aperture for bandwidth-limiting transmission functions
+    # Precompute 2/3 Nyquist anti-aliasing aperture for the propagated wavefunction
     aa_aperture = antialias_aperture(kx, ky)
 
     # Fold anti-aliasing aperture into propagator to bandwidth-limit wavefunction at every slice
@@ -895,7 +904,7 @@ def Propagate(probe, potential, device=None, progress=False, onthefly=True, stor
             slice_wavefunctions.append(clone(array))
 
         # Fresnel propagation to next slice (except for last slice)
-        if z < len(potential.zs) - 1:
+        if z < len(potential.zs) - 1 or propagate_exit:
             # Vectorized FFT over spatial dimensions for all probes
             kwarg = {"dim":(-2,-1)} if TORCH_AVAILABLE else {"axes":(-2,-1)}
             #print(kwarg,array.dtype,array.shape)
@@ -983,6 +992,3 @@ def calculateObject(probe,exitwave,guessedObject,weighting=.5,dz=0.5,damping=.01
     delta*=xp.absolute(psi1)/(xp.absolute(psi1)+damping*xp.amax(xp.absolute(psi1)))
 
     return delta*weighting
-
-
-
