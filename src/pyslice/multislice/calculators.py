@@ -83,7 +83,7 @@ class MultisliceCalculator:
     def _generate_cache_key(self, trajectory, aperture, voltage_eV,
                            slice_thickness, sampling, probe_positions,
                            spatial_decoherence, temporal_decoherence,
-                           probe_array=None):
+                           probe_array=None, stored_layer_indices=None):
         """Generate unique cache key for simulation parameters."""
         firstNAtoms = [ str(np.round(v,4)) for v in trajectory.positions[0,:100,0] ] # first timestep's first 10 atom's x positions
         params = {
@@ -99,6 +99,8 @@ class MultisliceCalculator:
             'probe_positions': probe_positions,
             'backend': 'pytorch' if TORCH_AVAILABLE else 'numpy',
         }
+        if stored_layer_indices is not None:
+            params['stored_layer_indices'] = tuple(stored_layer_indices)
         if spatial_decoherence is not None:
             params['spatial_decoherence'] = spatial_decoherence
         if temporal_decoherence is not None:
@@ -108,6 +110,31 @@ class MultisliceCalculator:
             params['probe_hash'] = hashlib.md5(probe_np.tobytes()).hexdigest()
         param_str = str(sorted(params.items()))
         return hashlib.md5(param_str.encode()).hexdigest()[:12]
+
+    def _resolve_active_layers(self):
+        if "slices" not in self.cache_levels:
+            return [0]
+
+        if self.cache_layer_indices is None:
+            return list(range(self.nz))
+
+        active_layers = sorted(set(int(i) for i in self.cache_layer_indices))
+        invalid_layers = [i for i in active_layers if i < 0 or i >= self.nz]
+        if invalid_layers:
+            raise ValueError(
+                f"cache_layer_indices contains out-of-range layers {invalid_layers}; "
+                f"valid range is [0, {self.nz - 1}]"
+            )
+        if not active_layers:
+            raise ValueError("cache_layer_indices must contain at least one layer index")
+        return active_layers
+
+    def _cache_key_layers(self, active_layers):
+        if "slices" not in self.cache_levels:
+            return None
+        if list(active_layers) == list(range(self.nz)):
+            return None
+        return tuple(active_layers)
     
     def setup(
         self,
@@ -125,6 +152,7 @@ class MultisliceCalculator:
         cleanup_temp_files: bool = False,
         slice_axis: int = 2,
         cache_levels: list = ["exitwaves"], # options include: exitwaves, slices, potentials (this replaces store_all_slices)
+        cache_layer_indices: Optional[List[int]] = None,
         max_kx = np.inf,
         max_ky = np.inf,
         use_memmap = False,
@@ -151,6 +179,11 @@ class MultisliceCalculator:
             save_path: Optional path to save wave function data
             cleanup_temp_files: Whether to delete temp files after loading
             store_all_slices: If True, store wavefunction at each slice for 3D visualization
+            cache_layer_indices: Optional list of 0-based slice-layer indices to record when
+                cache_levels includes "slices". If None (default), all nz layers are stored.
+                Specifying a small subset (e.g. the 6 depths needed for EELS thickness series)
+                can reduce disk usage by >98% without affecting propagation accuracy.
+                Example: cache_layer_indices=[43, 87, 175, 263, 351, 439]
         """
 
         self.trajectory = trajectory
@@ -166,6 +199,7 @@ class MultisliceCalculator:
         self.cleanup_temp_files = cleanup_temp_files
         self.slice_axis = slice_axis
         self.cache_levels = cache_levels
+        self.cache_layer_indices = cache_layer_indices
         self.max_kx = max_kx
         self.max_ky = max_ky
         self.use_memmap = use_memmap   # bool: frame_data (p,x,y,l,1) and wavefunction_data (p,t,x,y,l) will be memmapped instead of held in RAM
@@ -184,6 +218,7 @@ class MultisliceCalculator:
         self.lx = lx ; self.ly = ly ; self.lz = lz
         self.nx = nx ; self.ny = ny ; self.nz = nz
         self.dx = xs[1]-xs[0] ; self.dy = ys[1]-ys[0] ; self.dy = ys[1]-ys[0]
+        self._active_layers = self._resolve_active_layers()
 
         self.probe_cropping = 0
         if self.min_dk > 0: # dk = 1/L = 1/(nx*sampling)
@@ -249,7 +284,8 @@ class MultisliceCalculator:
         self.cache_key = self._generate_cache_key(self.trajectory, self.aperture, self.voltage_eV,
                                            self.slice_thickness, self.sampling, self.probe_positions,
                                            self.base_probe.spatial_decoherence, self.base_probe.temporal_decoherence,
-                                           self.base_probe._array)
+                                           self.base_probe._array,
+                                           self._cache_key_layers(self._active_layers))
         #print(cache_key)
         self.output_dir = Path("psi_data/" + ("torch" if TORCH_AVAILABLE else "numpy") + "_"+self.cache_key)
         #self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -283,16 +319,18 @@ class MultisliceCalculator:
 
         # cache key is calculated TWICE: once during setup (so the user only needs to setup to infer where their cache folder will go), and again during run (just in case the user does something funky)
         # Generate cache key and setup output directory
+        _active_layers = self._resolve_active_layers()
+        self._active_layers = _active_layers
         cache_key = self._generate_cache_key(self.trajectory, self.aperture, self.voltage_eV,
                                            self.slice_thickness, self.sampling, self.probe_positions,
                                            self.base_probe.spatial_decoherence, self.base_probe.temporal_decoherence,
-                                           self.base_probe._array)
+                                           self.base_probe._array,
+                                           self._cache_key_layers(_active_layers))
         if self.cache_key != cache_key:
             self.cache_key = cache_key
         #print(cache_key)
         self.output_dir = Path("psi_data/" + ("torch" if TORCH_AVAILABLE else "numpy") + "_"+cache_key)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-
 
         # if probes are over vacuum (e.g. nanoparticles), we don't need to propagate them?
         self.probe_indices = xp.arange(len(self.probe_positions))
@@ -315,7 +353,7 @@ class MultisliceCalculator:
         nc,npt,nx,ny = self.base_probe._array.shape
         self.n_probes = nc*len(self.probe_positions)
         # Storage: [probe, frame, x, y, layer] - matches WFData expected format
-        self.n_layers = self.nz if "slices" in self.cache_levels else 1
+        self.n_layers = len(_active_layers)
         if self.store_full:
             fd_nx = self.nx ; fd_ny = self.ny ; fd_npt = self.n_probes
             #if self.base_probe.cropping:
@@ -377,7 +415,11 @@ class MultisliceCalculator:
                         atom_type_names.append(atom_type)
 
                 # frame_data should always be shaped: n_probes,nkx,nky,n_layers,1 (idk why there's a trailing 1)
-                cache_exists,frame_data = checkCache(cache_file,self.cache_levels)
+                cache_exists,frame_data = checkCache(
+                    cache_file,
+                    self.cache_levels,
+                    expected_n_layers=self.n_layers,
+                )
                 if cache_exists and not self.prism and self.ADF:
                     intensities = einsum('pxyln,xy->p',absolute(frame_data)**2,self.ADFmask)
                     self.ADF._array += intensities[self.ADFindex]
@@ -447,15 +489,20 @@ class MultisliceCalculator:
                         probe.applyShifts()
                         # propagate single probe
                         #print("propagate") ; start = time.time()
-                        exit_waves_single = Propagate(probe, potential, self.device, progress=show_progress, onthefly=True, store_all_slices = ("slices" in self.cache_levels) ) # [l],p,x,y indices
+                        exit_waves_single = Propagate(
+                            probe, potential, self.device, progress=show_progress, onthefly=True,
+                            store_all_slices=("slices" in self.cache_levels),
+                            stored_slice_indices=_active_layers if "slices" in self.cache_levels else None,
+                        ) # [l],p,x,y indices
                         #print("(done)",time.time()-start)
 
                         # expand out to fixed l,p,x,y indices
                         exit_waves_single = expand_dims(exit_waves_single,0) if len(exit_waves_single.shape)==3 else exit_waves_single
                         # FFT and load into frame_data
                         kwarg = {"dim":(-2,-1)} if TORCH_AVAILABLE else {"axes":(-2,-1)}
-                        for layer_idx in range(self.n_layers):
-                            exit_waves_k = xp.fft.fft2(exit_waves_single[layer_idx,:,:,:], **kwarg) # l,p,x,y --> p,x,y
+
+                        for out_idx, _ in enumerate(_active_layers):
+                            exit_waves_k = xp.fft.fft2(exit_waves_single[out_idx,:,:,:], **kwarg) # l,p,x,y --> p,x,y
                             diffraction_patterns = xp.fft.fftshift(exit_waves_k, **kwarg)
                             #if not self.prism:
                             diffraction_patterns = diffraction_patterns[:,self.keep_kxs_indices,:][:,:,self.keep_kys_indices]*self.kth**2
@@ -463,7 +510,7 @@ class MultisliceCalculator:
                                 diffraction_patterns = to_cpu(diffraction_patterns)
                                 selected = to_cpu(selected)
                             if self.store_full or self.prism:
-                                frame_data[selected,:,:,layer_idx,0] = diffraction_patterns # load p,x,y --> p,x,y,l,1 indices
+                                frame_data[selected,:,:,out_idx,0] = diffraction_patterns # load p,x,y --> p,x,y,l,1 indices
                             if self.ADF and not self.prism:
                                 #print(self.ADF._wf_array[0,:,:,0,0,0,0])
                                 intensities = einsum('pxy,xy->p',absolute(diffraction_patterns[:,:,:])**2,self.ADFmask)
@@ -550,7 +597,8 @@ class MultisliceCalculator:
         #kxs = xp.fft.fftshift(xp.fft.fftfreq(self.nx, self.sampling))  # k-space in 1/Å MOVING TO INIT SO WE CAN CROP ON-THE-FLY
         #kys = xp.fft.fftshift(xp.fft.fftfreq(self.ny, self.sampling))  # k-space in 1/Å
         time_array = np.arange(self.n_frames) * self.trajectory.timestep  # Time array in ps
-        layer_array = np.arange(self.nz) if "slices" in self.cache_levels else np.array([0])  # Layer indices
+
+        layer_array = np.array(_active_layers) if "slices" in self.cache_levels else np.array([0])  # Layer indices
         
         # Package results
         array = zeros((self.n_probes,1,1,1,1),dtype=self.complex_dtype)
@@ -595,14 +643,23 @@ class MultisliceCalculator:
         return wf_data
 
 logging_tracker=[]
-def checkCache(cache_file,cache_levels):
+def checkCache(cache_file,cache_levels,expected_n_layers=None):
     global logging_tracker
     if cache_file.exists() and ( "exitwaves" in cache_levels or "slices" in cache_levels ):
+        frame_data = np.load(cache_file)
+        if expected_n_layers is not None and frame_data.shape[-2] != expected_n_layers:
+            logging.warning(
+                "Ignoring cache with %d layers at %s; expected %d",
+                frame_data.shape[-2],
+                cache_file,
+                expected_n_layers,
+            )
+            return False,0
         parent = str(cache_file.parent)
         if "cache_exists-"+parent not in logging_tracker:
             logging_tracker.append("cache_exists-"+parent)
             logging.warning("One or more frames reloaded from cache: "+str(cache_file.parent))
-        return True,xp.asarray(np.load(cache_file)) # if always saving as numpy, then must cast to torch array if re-reading cache file back in
+        return True,xp.asarray(frame_data) # if always saving as numpy, then must cast to torch array if re-reading cache file back in
     return False,0
 
 
@@ -666,5 +723,3 @@ class SEDCalculator:
             plt.savefig(filename)
         else:
             plt.show()
-
-
