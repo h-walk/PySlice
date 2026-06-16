@@ -13,12 +13,11 @@ try:
     import sys
     sys.path.insert(1,"../../")
     from pySEA.sea_eco.architecture.base_structure_numpy import Signal, Dimensions, Dimension, Metadata, safe_decode
-except Exception as e:
+except Exception:
     class Signal:
         def to_sea(self,*args,**kwargs):
-            print("ERROR: pySEA import failed, this functionality is not available")
+            raise ImportError("pySEA is required for .to_sea() serialization")
     Dimensions,Dimension,Metadata = None,None,None
-    print("failed to import pySEA:",e)
 
 def _to_numpy(x):
     """Convert tensor or array-like to numpy array."""

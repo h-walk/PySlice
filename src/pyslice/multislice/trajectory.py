@@ -68,6 +68,54 @@ class Trajectory:
         ])
         return corners.max(axis=0) - corners.min(axis=0)
 
+    def fold_positions_to_orthogonal_box(
+        self,
+        axes: Tuple[int, ...] = (0, 1, 2),
+        lengths: Optional[Tuple[float, float, float]] = None,
+    ) -> 'Trajectory':
+        """
+        Fold periodic coordinates into a diagonal orthogonal simulation box.
+
+        This is useful for trajectories loaded from tilted cells when the atom
+        coordinates already describe the desired periodic sheet, but some atoms
+        appear on negative Cartesian sides of the box. The returned trajectory
+        keeps all atoms and frames, wraps selected Cartesian axes into
+        ``[0, length)``, and replaces the cell with ``diag(lengths)``.
+
+        Args:
+            axes: Cartesian axes to wrap, using 0=x, 1=y, 2=z.
+            lengths: Orthogonal box lengths. Defaults to ``diag(box_matrix)``.
+
+        Returns:
+            New Trajectory with folded positions and a diagonal box matrix.
+        """
+        lengths_array = (
+            np.diag(self.box_matrix).astype(self.positions.dtype)
+            if lengths is None
+            else np.asarray(lengths, dtype=self.positions.dtype)
+        )
+        if lengths_array.shape != (3,):
+            raise ValueError(f"lengths must contain three box lengths, got shape {lengths_array.shape}")
+        if np.any(lengths_array <= 0):
+            raise ValueError(f"Cannot build an orthogonal box from lengths {lengths_array}")
+
+        axes_tuple = tuple(axes)
+        invalid_axes = [axis for axis in axes_tuple if axis not in (0, 1, 2)]
+        if invalid_axes:
+            raise ValueError(f"axes must contain only 0, 1, or 2; got {invalid_axes}")
+
+        positions = self.positions.copy()
+        for axis in axes_tuple:
+            positions[:, :, axis] = np.mod(positions[:, :, axis], lengths_array[axis])
+
+        return Trajectory(
+            atom_types=self.atom_types.copy(),
+            positions=positions,
+            velocities=self.velocities.copy(),
+            box_matrix=np.diag(lengths_array),
+            timestep=self.timestep
+        )
+
     def get_mean_positions(self) -> np.ndarray: # TODO: THIS DOES NOT INCLUDE WRAPPING (what if an atom drifts out of the bbox and comes back in through PBC?)
         """Calculate the mean position for each atom over all frames."""
         if self.n_frames == 0:
@@ -494,8 +542,8 @@ class Trajectory:
         rotated_positions = rotated_positions_flat.reshape(n_frames, n_atoms, 3)
         rotated_velocities = rotated_velocities_flat.reshape(n_frames, n_atoms, 3)
 
-        # Rotate the box_matrix as well
-        rotated_box_matrix = rotation_matrix @ self.box_matrix
+        # Rotate the box_matrix as well (row convention: rows are lattice vectors)
+        rotated_box_matrix = self.box_matrix @ rotation_matrix.T
 
         return Trajectory(
             atom_types=self.atom_types,
@@ -507,5 +555,4 @@ class Trajectory:
 
     # returns an ase object
     def to_ase(self):
-        return Atoms(''.join(self.atom_types), positions=self.positions[0], cell=np.diag(self.box_matrix),pbc=True)
-
+        return Atoms(''.join(self.atom_types), positions=self.positions[0], cell=self.box_matrix, pbc=True)

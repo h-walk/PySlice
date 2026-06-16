@@ -195,7 +195,7 @@ class WFData(PySliceSerial, Signal):
 
         raw = self._array[:,:,:,:,-1] # probe, time, kx, ky, layer --> p,t,kx,ky
         npt,nt,nkx,nky = raw.shape
-        array = zeros((nkx,nky))
+        array = zeros((nkx,nky), type_match=raw)
         if isinstance(whichProbe,str) and whichProbe=="mean":
             whichProbe = np.arange(npt)
         elif isinstance(whichProbe,int):
@@ -207,8 +207,6 @@ class WFData(PySliceSerial, Signal):
         for p in whichProbe:
             for t in whichTimestep:
                 layer = absolute(raw[p,t,:,:])
-                if isinstance(raw,np.memmap):
-                    layer = asarray(layer)
                 array+=layer
         array/=(len(whichTimestep)*len(whichProbe))
         #array=abs(raw) # don't do this, it pulls memmaps into ram! 

@@ -508,8 +508,13 @@ class TACAWData(PySliceSerial, Signal):
                 mask = np.zeros((len(kxs),len(kys)))
                 mask[radii<=r]=1
 
-        elif mask.shape != (len(kxs), len(kys)):
-            raise ValueError(f"Mask shape {mask.shape} doesn't match k-space shape ({len(kxs)}, {len(kys)})")
+        else:
+            mask = np.asarray(to_cpu(mask))
+            if mask.shape != (len(kxs), len(kys)):
+                raise ValueError(f"Mask shape {mask.shape} doesn't match k-space shape ({len(kxs)}, {len(kys)})")
+
+        if TORCH_AVAILABLE and hasattr(self._array, "device") and not isinstance(self._array, (np.ndarray, np.memmap)):
+            mask = xp.as_tensor(mask, dtype=self._array.dtype, device=self._array.device)
 
         if probe_index is None:
             probe_index = np.arange(len(self.probe_positions))
@@ -569,7 +574,7 @@ class TACAWData(PySliceSerial, Signal):
         # Create dispersion array
         n_frequencies = len(self.frequencies)
         n_k_points = len(kx_indices)
-        dispersion = np.zeros((n_frequencies, n_k_points),dtype=complex)
+        dispersion = np.zeros((n_frequencies, n_k_points), dtype=complex)
 
         if probe_index is None:
             probe_index = np.arange(len(self.probe_positions))
@@ -599,6 +604,7 @@ class TACAWData(PySliceSerial, Signal):
         fig, ax = plt.subplots()
         array = np.absolute(to_cpu(intensities)) # imshow convention: y,x. our convention: x,y
         aspect = None
+        use_coordinate_mesh = False
 
         if isinstance(xvals,str):
             if xvals in ["kx","k"]:
@@ -613,6 +619,7 @@ class TACAWData(PySliceSerial, Signal):
         if isinstance(yvals,str):
             if yvals == "omega":
                 aspect = "auto"
+                use_coordinate_mesh = True
             if yvals == "kx":
                 ylabel = "kx ($\\AA^{-1}$)" ; yvals = to_cpu(self.kxs)
             elif yvals in ["ky","k"]:
@@ -626,7 +633,13 @@ class TACAWData(PySliceSerial, Signal):
 
         if extent is None:
             extent = ( np.amin(xvals) , np.amax(xvals) , np.amin(yvals) , np.amax(yvals) )
-        ax.imshow(array, cmap="inferno",extent=extent,aspect=aspect)
+        if use_coordinate_mesh:
+            image = ax.pcolormesh(xvals, yvals, array, shading="auto", cmap="inferno")
+            ax.set_xlim(np.amin(xvals), np.amax(xvals))
+            ax.set_ylim(np.amin(yvals), np.amax(yvals))
+            fig.colorbar(image, ax=ax)
+        else:
+            ax.imshow(array, cmap="inferno",extent=extent,aspect=aspect)
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
         if title is not None:

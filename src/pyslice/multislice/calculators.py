@@ -380,8 +380,12 @@ class MultisliceCalculator:
             if not isinstance(self.ADF,bool):
                 kwargs["inner_mrad"],kwargs["outer_mrad"] = self.ADF
             from ..postprocessing.haadf_data import HAADFData
-            array = zeros((self.n_probes,1,1,1,1),dtype=self.complex_dtype)
-            array += xp.arange(self.n_probes)[:,None,None,None,None] # we'll use this as an index to map nth probe to the ADF grid coordinates i,j
+            array = zeros((self.n_probes,1,1,1,1), dtype=self.complex_dtype, device=self.device)
+            if TORCH_AVAILABLE:
+                probe_ids = xp.arange(self.n_probes, device=self.device)
+            else:
+                probe_ids = xp.arange(self.n_probes)
+            array += probe_ids[:,None,None,None,None] # we'll use this as an index to map nth probe to the ADF grid coordinates i,j
             wf = WFData(probe_positions=self.probe_positions,probe_xs=self.probe_xs,probe_ys=self.probe_ys,
                 time=None,kxs=self.kxs[self.keep_kxs_indices],kys=self.kys[self.keep_kys_indices],xs=self.xs,ys=self.ys,
                 layer=None,array=array,probe=self.base_probe,cache_dir=self.output_dir)
@@ -465,13 +469,9 @@ class MultisliceCalculator:
                     chunks = []
                     if self.loop_probes:
                         chunksize = self.loop_probes if isinstance(self.loop_probes,int) else 1
-                        for i in range(10000000):
-                            chunk = xp.arange(i*chunksize,(i+1)*chunksize)
-                            #chunk = chunk[chunk<npt]
-                            # only keep chunk indices if they're also in probe_indices
+                        for start in range(0, npt, chunksize):
+                            chunk = xp.arange(start, min(start + chunksize, npt))
                             chunk = chunk[xp.any(self.probe_indices[None,:]==chunk[:,None],axis=1)]
-                            if (i+1)*chunksize>npt:
-                                break
                             if len(chunk)==0:
                                 continue
                             chunks.append(chunk)
@@ -517,7 +517,7 @@ class MultisliceCalculator:
                                 for i,pp in zip(intensities,selected):
                                     self.ADF._array[self.ADFindex==pp] += i
                         if pbar2 is not None:
-                            pbar2.update(int(max(selected))-pbar2.n)
+                            pbar2.update(len(selected))
 #                    else:
 #                        # simultaneously propagate all probes at once, [l],p,x,y
 #                        exit_waves_batch = Propagate(self.base_probe, potential, self.device, progress=show_progress, onthefly=True, store_all_slices = ("slices" in self.cache_levels) )
@@ -601,7 +601,7 @@ class MultisliceCalculator:
         layer_array = np.array(_active_layers) if "slices" in self.cache_levels else np.array([0])  # Layer indices
         
         # Package results
-        array = zeros((self.n_probes,1,1,1,1),dtype=self.complex_dtype)
+        array = zeros((self.n_probes,1,1,1,1), dtype=self.complex_dtype, device=self.device)
         if self.store_full:
             array = self.wavefunction_data
         #print(array.shape,self.kxs.shape,self.kys.shape)

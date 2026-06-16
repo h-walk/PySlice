@@ -19,7 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 fast = ["torch","torchvision"]
-test = ["abtem>=1.0.6"]
+test = []
 md = ["orb-models>=0.6.0"]
 
 [project.urls]

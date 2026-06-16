@@ -16,6 +16,8 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 from ase.md.langevin import Langevin
 from ase.md.nvtberendsen import NVTBerendsen
 from ase.md.npt import NPT
+from ase.optimize import BFGS, FIRE, LBFGS
+from ase.filters import FrechetCellFilter
 from ase import units
 from ase.io import write, Trajectory as ASETrajectory
 from ase import Atoms
@@ -162,6 +164,114 @@ class MDCalculator:
             "Use ORBMDCalculator or FAIRChemMDCalculator instead of MDCalculator directly."
         )
 
+    def _ensure_calculator(self):
+        """Load the backend calculator if it has not already been initialized."""
+        if self.calculator is None:
+            if not self._setup_calculator():
+                raise RuntimeError(f"Failed to setup calculator ({self.model_name})")
+        return self.calculator
+
+    def relax_structure(
+        self,
+        atoms: Atoms,
+        fmax: float = 0.05,
+        steps: int = 200,
+        optimizer: str = 'FIRE',
+        output_dir: Optional[Path] = None,
+        trajectory_file: Optional[str] = 'relaxation.traj',
+        logfile: Optional[str] = 'relaxation.log',
+        final_file: Optional[str] = 'relaxed_structure.xyz',
+        relax_cell: bool = False,
+        cell_filter_kwargs: Optional[Dict] = None,
+    ) -> Atoms:
+        """
+        Relax atomic positions with the backend force field before running MD.
+
+        This is a zero-temperature geometry optimization. It does not initialize
+        velocities and does not change the MD timestep or ensemble settings.
+        By default, the simulation cell is held fixed. Set ``relax_cell=True``
+        to optimize the cell with ASE's FrechetCellFilter.
+
+        Args:
+            atoms: ASE Atoms object to relax in place
+            fmax: Maximum force convergence criterion in eV/Angstrom
+            steps: Maximum optimizer steps
+            optimizer: ASE optimizer name: 'FIRE', 'BFGS', or 'LBFGS'
+            output_dir: Directory for optimizer outputs
+            trajectory_file: Optional optimizer trajectory filename
+            logfile: Optional optimizer log filename
+            final_file: Optional final relaxed structure filename
+            relax_cell: If True, relax both atomic positions and the cell
+            cell_filter_kwargs: Optional keyword arguments passed to
+                                ase.filters.FrechetCellFilter
+
+        Returns:
+            The same ASE Atoms object, after relaxation.
+        """
+        self._ensure_calculator()
+        atoms.calc = self.calculator
+
+        output_path = Path(output_dir) if output_dir is not None else Path.cwd()
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        optimizer_classes = {
+            'fire': FIRE,
+            'bfgs': BFGS,
+            'lbfgs': LBFGS,
+        }
+        optimizer_cls = optimizer_classes.get(optimizer.lower())
+        if optimizer_cls is None:
+            raise ValueError(
+                f"Unknown optimizer {optimizer!r}. Use one of: FIRE, BFGS, LBFGS."
+            )
+
+        trajectory_path = None if trajectory_file is None else output_path / trajectory_file
+        logfile_path = None if logfile is None else output_path / logfile
+
+        initial_energy = atoms.get_potential_energy()
+        initial_cell = atoms.cell.array.copy()
+        relaxation_target = atoms
+        if relax_cell:
+            try:
+                atoms.get_stress()
+            except Exception as exc:
+                raise RuntimeError(
+                    "relax_cell=True requires a calculator that provides stress. "
+                    f"{self.model_name} did not return stress for this structure."
+                ) from exc
+            filter_kwargs = {} if cell_filter_kwargs is None else dict(cell_filter_kwargs)
+            relaxation_target = FrechetCellFilter(atoms, **filter_kwargs)
+
+        logger.info("="*70)
+        logger.info("STRUCTURAL RELAXATION")
+        logger.info("="*70)
+        logger.info(f"Optimizer: {optimizer_cls.__name__}")
+        logger.info(f"Relax cell: {relax_cell}")
+        logger.info(f"Convergence: fmax <= {fmax} eV/Angstrom")
+        logger.info(f"Maximum steps: {steps}")
+        logger.info(f"Initial potential energy: {initial_energy:.6f} eV")
+
+        dyn = optimizer_cls(
+            relaxation_target,
+            trajectory=None if trajectory_path is None else str(trajectory_path),
+            logfile=None if logfile_path is None else str(logfile_path),
+        )
+        dyn.run(fmax=fmax, steps=steps)
+
+        final_energy = atoms.get_potential_energy()
+        logger.info(f"Final potential energy: {final_energy:.6f} eV")
+        logger.info(f"Energy change: {final_energy - initial_energy:.6f} eV")
+        if relax_cell:
+            cell_delta = np.linalg.norm(atoms.cell.array - initial_cell)
+            logger.info(f"Cell change Frobenius norm: {cell_delta:.6f} Angstrom")
+
+        if final_file is not None:
+            final_path = output_path / final_file
+            write(str(final_path), atoms)
+            logger.info(f"Saved relaxed structure: {final_path}")
+
+        return atoms
+
     def setup(
         self,
         atoms: Atoms,
@@ -238,11 +348,7 @@ class MDCalculator:
             rng = np.random.default_rng()
         self.rng = rng
 
-        # Set up calculator
-        if not self._setup_calculator():
-            raise RuntimeError(f"Failed to setup calculator ({self.model_name})")
-
-        self.atoms.calc = self.calculator
+        self.atoms.calc = self._ensure_calculator()
 
         # Initialize velocities
         logger.info(f"Initializing velocities for T = {temperature} K")
