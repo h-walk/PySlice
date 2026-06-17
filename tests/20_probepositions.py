@@ -41,10 +41,10 @@ potential.plot()
 calculator=MultisliceCalculator()
 # SET UP GRID OF HAADF SCAN POINTS
 #xy=probe_grid([a,3*a],[b,3*b],14,16)
-#calculator.setup(trajectory,aperture=30,voltage_eV=100e3,sampling=.1,slice_thickness=.5,probe_positions=xy,cache=False)
+#calculator.setup(trajectory,aperture=30,voltage_eV=100e3,sampling=.1,slice_thickness=.5,probe_positions=xy,cache_wavefunctions=False)
 probe_xs = np.linspace(a/2,2.5*a,14)
 probe_ys = np.linspace(b/2,2.5*b,16)
-calculator.setup(trajectory,aperture=30,voltage_eV=100e3,sampling=.1,slice_thickness=.5,probe_xs=probe_xs,probe_ys=probe_ys,cache=False)
+calculator.setup(trajectory,aperture=30,voltage_eV=100e3,sampling=.1,slice_thickness=.5,probe_xs=probe_xs,probe_ys=probe_ys,cache_wavefunctions=False)
 # RUN MULTISLICE
 exitwaves = calculator.run()
 

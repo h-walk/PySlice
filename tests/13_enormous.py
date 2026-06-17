@@ -42,7 +42,7 @@ trajectory = trajectory.tile_positions([5,5,1])
 
 # CONVERGENT BEAM, DEFOCUSED
 calculator=MultisliceCalculator()
-calculator.setup(trajectory,aperture=5,voltage_eV=100e3,sampling=.1,slice_thickness=.5,cache=False,cache_potentials=True)
+calculator.setup(trajectory,aperture=5,voltage_eV=100e3,sampling=.1,slice_thickness=.5,cache_wavefunctions=False,cache_potentials=True)
 
 calculator.base_probe.defocus(-defocus)
 

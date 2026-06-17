@@ -1,8 +1,10 @@
+"""Small regression-test utilities used by numbered example scripts."""
 import os
 import numpy as np
 from pyslice.backend import to_cpu
 
 def differ(ary,filename,label):
+	"""Compare an array against a saved ``.npy`` baseline and report residual."""
 	# Convert GPU tensors to numpy
 	ary = to_cpu(ary)
 	if not os.path.exists(filename):

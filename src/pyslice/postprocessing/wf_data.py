@@ -44,7 +44,7 @@ class WFData(PySliceSerial, Signal):
         kys: ky sampling vectors.
         xs: x real-space coordinates.
         ys: y real-space coordinates.
-        layer: Layer indices for multi-layer calculations.
+        layer: Layer indices included in the wavefunction array.
         array: Complex wavefunction array with shape (probe_positions, time, kx, ky, layer).
         probe: Probe object with beam parameters.
         cache_dir: Path to cache directory.
@@ -156,7 +156,7 @@ class WFData(PySliceSerial, Signal):
     def reshaped(self): # where self._array is indices probe,time,kx,ky,layer, we reshape to probe_x,probe_y,time,kx,ky,layer
         nc,nptp,nx,ny = self.probe._array.shape # recall: decoherence creates duplicate probes: num_copies,num_positions,x,y indices
         nptp = len(self.probe_positions)
-        npta,nt,nkx,nky,nl = self._array.shape # recall, Propagate flattens the first two, and adds time,layers: nc*npt,num_frames,x,y,nl indice
+        npta,nt,nkx,nky,nl = self._array.shape # recall, Propagate flattens the first two, and adds time,layer: nc*npt,num_frames,x,y,nl indices
         intermediate = reshape(self._array,(nc,nptp,nt,nkx,nky,nl))
         nx,ny = len(self.probe_xs),len(self.probe_ys)
         return reshape(intermediate,(nc,ny,nx,nt,nkx,nky,nl)).swapaxes(1,2)

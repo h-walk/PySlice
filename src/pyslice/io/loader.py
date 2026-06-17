@@ -1,6 +1,4 @@
-"""
-Trajectory loading module for LAMMPS dump files.
-"""
+"""Load structures and trajectories into PySlice ``Trajectory`` objects."""
 import numpy as np
 from pathlib import Path
 import json
@@ -18,6 +16,13 @@ from ..multislice.potentials import getZfromElementName
 logger = logging.getLogger(__name__)
 
 class Loader:
+    """Load a file or ASE object into the internal ``Trajectory`` representation.
+
+    Supported paths include LAMMPS-style files handled by OVITO and CIF/ASE
+    inputs handled through ASE.  Loaded arrays are cached next to the source
+    file as ``*.npy`` files so repeated loads avoid parser overhead.
+    """
+
     def __init__(self,
                  filename: Optional[str] = None,
                  timestep: Optional[float] = None,
@@ -28,17 +33,18 @@ class Loader:
                  ovitokwargs: Optional[Dict[str,str]] = None,
                  atoms = None ):
         """
-        Initialize loader for various structure/trajectory file formats or ASE Atoms objects.
+        Initialize a trajectory loader.
 
         Args:
-            filename: Path to structure/trajectory file (optional if atoms is provided)
+            filename: Path to structure/trajectory file (optional if atoms is provided).
             timestep: Timestep in picoseconds. Defaults to 1.0 ps.
             atom_mapping: Dictionary mapping atom types to either:
                 - Atomic numbers (int): {1: 6, 2: 8} for carbon and oxygen
                 - Element names (str): {1: "C", 2: "O"} for carbon and oxygen
-            atomic_numbers: (Deprecated) Use atom_mapping instead
-            element_names: (Deprecated) Use atom_mapping instead
-            atoms: ASE Atoms object or trajectory (optional, if provided will use instead of loading from file)
+            atomic_numbers: Deprecated; use atom_mapping instead.
+            element_names: Deprecated; use atom_mapping instead.
+            ovitokwargs: Additional keyword arguments forwarded to OVITO import.
+            atoms: ASE Atoms object or trajectory. If provided, file loading is skipped.
         """
         if timestep is not None and timestep <= 0:
             raise ValueError("timestep must be positive if specified.")
@@ -225,6 +231,7 @@ from ovito.modifiers import UnwrapTrajectoriesModifier
 
 
 def validate_frame_data(frame_data, frame_num=0):
+    """Validate the subset of OVITO frame data required by PySlice."""
     if not frame_data:
         raise ValueError(f"No data for frame {frame_num}")
     if not (hasattr(frame_data, "cell") and frame_data.cell):

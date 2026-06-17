@@ -1,3 +1,9 @@
+"""Public package namespace for PySlice.
+
+PySlice exposes trajectory loading, multislice propagation, potential
+generation, and postprocessing helpers from this top-level package for
+interactive notebook use.
+"""
 # here we read out the version info set in pyproject.toml
 try:
     from importlib.metadata import version

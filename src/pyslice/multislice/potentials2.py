@@ -1,3 +1,9 @@
+"""Backend-facade variant of projected potential generation.
+
+This module is retained as an alternate implementation covered by
+``tests/01_potentials2.py``.  New calculator code currently imports
+``pyslice.multislice.potentials``.
+"""
 import pyslice.backend as backend
 import numpy as np
 from pathlib import Path
@@ -14,17 +20,7 @@ logger = logging.getLogger(__name__)
 kirklandABCDs = None
 
 def kirkland(qsq, Z):
-    """
-    GPU-accelerated Kirkland structure factor calculation using PyTorch.
-    
-    Args:
-        qsq:      |q|² tensor in units of (1/Angstrom)²
-        Z:        Atomic number (or element name string)
-        device:   PyTorch device ('cpu' or 'cuda')
-        
-    Returns:
-        Form factor tensor with same shape as qsq
-    """
+    """Evaluate Kirkland electron scattering factors for one element."""
     global kirklandABCDs
 
     if kirklandABCDs is None:
@@ -77,6 +73,7 @@ def getZfromElementName(element):
     return elements.index(element) + 1
 
 def gridFromTrajectory(trajectory,sampling=0.1,slice_thickness=0.5):
+    """Build orthogonal real-space and slice grids from a trajectory cell."""
     # Use box matrix diagonal elements for orthogonal simulation cells
     box_matrix = trajectory.box_matrix
     
@@ -126,7 +123,10 @@ def loadKirkland(device='cpu'):
 
 
 class Potential:    
+    """Alternate on-demand projected potential generator."""
+
     def __init__(self, xs, ys, zs, positions, atomTypes, kind="kirkland", device=None, slice_axis=2, progress=False, cache_dir=None, frame_idx=None):
+        """Create a potential generator for one atom configuration."""
         # Set up device and backend first
         device, float_dtype, complex_dtype = backend.device_and_precision(device)
 

@@ -290,7 +290,7 @@ class TACAWData(PySliceSerial, Signal):
                 self._array = xp.zeros(wf_layer.shape, dtype = dtype)
 
             for i in tqdm(range(len(self._kxs))):
-                wf_mean = mean(wf_layer[:,:,i,:], axis=1, keepdims=True) # p,t,x,y,[l] indices
+                wf_mean = mean(wf_layer[:,:,i,:], axis=1, keepdims=True) # p,t,x,y indices
                 wf_fft = fft(wf_layer[:,:,i,:] - wf_mean, axis=1)
                 wf_fft = fftshift(wf_fft, axes=1)
 
@@ -328,7 +328,7 @@ class TACAWData(PySliceSerial, Signal):
 
     # Keep fft_from_wf_data as public alias for backward compatibility
     def fft_from_wf_data(self, layer_index: int = None):
-        """Public alias for _fft_from_wf_data (backward compatibility)."""
+        """Recompute TACAW data from the selected layer."""
         self._fft_from_wf_data(layer_index)
 
     def spectrum(self, probe_index: int = None) -> np.ndarray:

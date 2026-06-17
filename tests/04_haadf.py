@@ -28,10 +28,10 @@ trajectory=trajectory.get_random_timesteps(3,seed=5)
 calculator=MultisliceCalculator()
 # SET UP GRID OF HAADF SCAN POINTS
 #xy=probe_grid([a,3*a],[b,3*b],14,16)
-#calculator.setup(trajectory,aperture=30,voltage_eV=100e3,sampling=.1,slice_thickness=.5,probe_positions=xy,cache=False)
+#calculator.setup(trajectory,aperture=30,voltage_eV=100e3,sampling=.1,slice_thickness=.5,probe_positions=xy,cache_wavefunctions=False)
 probe_xs = np.linspace(10*a-a,10*a-3*a,14)
 probe_ys = np.linspace(10*b-b,10*b-3*b,16)
-calculator.setup(trajectory,aperture=30,voltage_eV=100e3,sampling=.1,slice_thickness=.5,probe_xs=probe_xs,probe_ys=probe_ys)#,kth=4)#,cache=False)
+calculator.setup(trajectory,aperture=30,voltage_eV=100e3,sampling=.1,slice_thickness=.5,probe_xs=probe_xs,probe_ys=probe_ys)#,kth=4)#,cache_wavefunctions=False)
 # RUN MULTISLICE
 exitwaves = calculator.run()
 

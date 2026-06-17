@@ -1,3 +1,9 @@
+"""Spectral energy density helpers for phonon-dispersion analysis.
+
+The implementation follows the pySED-style formulation, projecting atomic
+displacements onto reciprocal-space phase factors and Fourier transforming the
+time axis.
+"""
 # Spectral Energy Density: phonon dispersions: borrowed from pySED: https://github.com/tpchuckles/pySED
 # avg - average positions [a,xyz]
 # displacements - time-dependent atom displacements [t,a,xyz]
@@ -8,6 +14,19 @@
 import numpy as np
 
 def SED(avg,displacements,kvec,v_xyz=0,bs=''):
+	"""Calculate spectral energy density on a grid of reciprocal vectors.
+
+	Args:
+		avg: Mean atomic positions with shape ``(n_atoms, 3)``.
+		displacements: Time-dependent displacements with shape
+			``(n_frames, n_atoms, 3)``.
+		kvec: Reciprocal-vector grid with shape ``(..., 3)``.
+		v_xyz: Polarization axis as 0/1/2 or an arbitrary 3-vector.
+		bs: Optional atom indices to include.
+
+	Returns:
+		``(intensity, frequencies)`` where intensity is ``|FFT|^2`` over time.
+	"""
 
 	# THE MATH: 
 	#    Φ(k,ω) = Σb | ∫ Σn u°(n,b,t) exp( i k r̄(n,0) - i ω t ) dt |²

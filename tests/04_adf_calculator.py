@@ -27,13 +27,14 @@ def test_on_the_fly_adf_returns_image_without_full_wavefunction_stack():
         max_kx=1.0,
         max_ky=1.0,
         loop_probes=2,
-        cache=False,
+        cache_wavefunctions=False,
         ADF=(5, 40),
-        keep_wavefunctions=False,
+        return_layers=None,
     )
     wf_data, haadf = calculator.run()
 
-    assert tuple(wf_data.array.shape) == (9, 1, 1, 1, 1)
+    assert wf_data.layer.tolist() == []
+    assert wf_data.array.shape[-1] == 0
     assert haadf.array.shape == (3, 3)
     assert np.isfinite(haadf.array).all()
     assert haadf.array[-1, -1] > 0

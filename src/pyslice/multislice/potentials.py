@@ -1,3 +1,4 @@
+"""Projected electrostatic potential generation for multislice propagation."""
 import numpy as np
 from pathlib import Path
 import logging,os
@@ -48,19 +49,14 @@ logger = logging.getLogger(__name__)
 # Global storage for Kirkland parameters on GPU - store per device
 kirklandABCDs = []
 def kirkland(qsq, Z):
-    """
-    GPU-accelerated Kirkland structure factor calculation using PyTorch.
-    
+    """Evaluate Kirkland electron scattering factors for one element.
+
     Args:
-                if device is not None and not TORCH_AVAILABLE:
-            raise ImportError("PyTorch not available. Please install PyTorch.")
-        
-: |q|² tensor in units of (1/Angstrom)²
-        Z: Atomic number (or element name string)
-        device: PyTorch device ('cpu' or 'cuda')
-        
+        qsq: Squared reciprocal-space radius ``|q|^2`` in 1/Angstrom^2.
+        Z: Atomic number or element symbol.
+
     Returns:
-        Form factor tensor with same shape as qsq
+        Backend array of form factors with the same spatial shape as ``qsq``.
     """
     global kirklandABCDs
 
@@ -116,6 +112,16 @@ def getZfromElementName(element):
     return elements.index(element) + 1
 
 def gridFromTrajectory(trajectory,sampling=0.1,slice_thickness=0.5):
+    """Build orthogonal real-space and slice grids from a trajectory cell.
+
+    Args:
+        trajectory: ``Trajectory`` whose diagonal cell lengths define the grid.
+        sampling: In-plane pixel size in Angstroms.
+        slice_thickness: Slice thickness along z in Angstroms.
+
+    Returns:
+        ``(xs, ys, zs, lx, ly, lz)`` coordinate vectors and box lengths.
+    """
     # Use box matrix diagonal elements for orthogonal simulation cells
     box_matrix = trajectory.box_matrix
     
@@ -191,7 +197,30 @@ def loadKirkland(device='cpu'):
         kirklandABCDs = np.asarray(kirkland_params)
 
 class Potential:
+    """On-demand projected potential slices for multislice propagation.
+
+    The potential can be backed by precomputed ``array`` data or generated from
+    atom positions using Kirkland form factors.  When ``cache_dir`` is supplied,
+    individual real-space slices are read/written as ``potential_<frame>_<slice>.npy``.
+    """
+
     def __init__(self, xs, ys, zs, positions=None, atomTypes=None, array=None, kind="kirkland", device=None, slice_axis=2, progress=False, cache_dir=None, frame_idx=None):
+        """Create a potential generator.
+
+        Args:
+            xs: x coordinates in Angstroms.
+            ys: y coordinates in Angstroms.
+            zs: slice coordinates in Angstroms.
+            positions: Atom positions with Cartesian columns.
+            atomTypes: Atomic numbers or element symbols for each atom.
+            array: Optional precomputed potential array ``(x, y, z)``.
+            kind: Form-factor model. Currently ``"kirkland"`` or ``"gauss"``.
+            device: Optional Torch device when Torch is available.
+            slice_axis: Cartesian axis used as the beam/slicing direction.
+            progress: Show per-slice progress where supported.
+            cache_dir: Optional directory for potential-slice cache files.
+            frame_idx: Frame index used in cache filenames.
+        """
         # Set up device and backend first
         if TORCH_AVAILABLE:
             # Auto-detect device if not specified

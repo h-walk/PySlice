@@ -1,3 +1,4 @@
+"""Probe construction and core multislice propagation primitives."""
 import numpy as np
 from tqdm import tqdm
 import logging,time
@@ -90,21 +91,22 @@ def wavelength(eV):
 
 class Probe:
     """
-    PyTorch-accelerated probe class for electron microscopy.
+    Electron probe wavefunction for plane-wave and convergent-beam simulations.
     
-    Generates probe wavefunctions on GPU for both plane wave and convergent beam modes.
-    Significant speedup for large grid sizes through GPU-accelerated FFT operations.
+    Uses Torch when available and falls back to NumPy otherwise.  Probe arrays
+    are stored with copy/decoherence and probe-position axes before spatial
+    axes: ``(n_copies, n_positions, nx, ny)``.
     """
     
     def __init__(self, xs, ys, mrad, eV, array=None, device=None, gaussianVOA=0, preview=False, probe_xs=None, probe_ys=None, probe_positions=None, cropping=False, defer_shifts=False, stay_reciprocal = False, crop_reciprocal=False):
         """
-        Initialize GPU-accelerated probe wavefunction.
+        Initialize a probe wavefunction.
         
         Args:
             xs, ys: Real space coordinate arrays
             mrad: Convergence semi-angle in milliradians (0.0 = plane wave)
             eV: Electron energy in eV
-            device: PyTorch device (None for auto-detection)
+            device: Optional Torch device (None for auto-detection)
         """
         # TORCH DEVICES AND DTYPES
         if TORCH_AVAILABLE:
@@ -492,6 +494,15 @@ class Probe:
 # Aberrations are an adjustment to the phase of the wave ("dPhi"), to be applied in reciprocal space.
 # this is done by multiplying the complex wave (be it a probe or an exit wave) by xp.exp(-1j * dPhi)
 def aberrationFunction(kxs,kys,wavelength,aberrations): # aberrations should be a dict of Cnm following https://abtem.readthedocs.io/en/latest/user_guide/walkthrough/contrast_transfer_function.html
+    """Return a reciprocal-space phase factor for microscope aberrations.
+
+    Args:
+        kxs: Reciprocal x coordinates.
+        kys: Reciprocal y coordinates.
+        wavelength: Electron wavelength in Angstroms.
+        aberrations: Mapping like ``{"C10": value, "C12": (value, angle)}``.
+            Coefficients follow the ``Cnm`` convention used by abTEM.
+    """
     dPhi = xp.zeros_like(kxs[:,None] * kys[None,:])
     ks = xp.sqrt( kxs[:,None]**2 + kys[None,:]**2 ) # unshifted: 0,1,2,3,...-3,-2,-1, reciprocal origin at corner
     theta = xp.arctan2( kys[None,:] , kxs[:,None] )
@@ -957,6 +968,12 @@ def Propagate(
 # i σ O = log( ℱ⁻¹[ ℱ[ ψ₂ ]/P ]/ψ₁ )
 # O = log( ℱ⁻¹[ ℱ[ ψ₂ ]/P ]/ψ₁ ) / i / σ
 def calculateObject(probe,exitwave,guessedObject,weighting=.5,dz=0.5,damping=.01):
+    """Estimate a projected object from an entrance and exit wave.
+
+    This is an experimental inverse-multislice helper.  It uses the first probe
+    in ``probe`` and applies a damped update toward the object implied by the
+    measured ``exitwave``.
+    """
 
     import matplotlib.pyplot as plt
     #fig, axs = plt.subplots(1,2)

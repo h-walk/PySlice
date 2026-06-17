@@ -6,20 +6,31 @@ from pyslice.multislice.calculators import MultisliceCalculator, checkCache
 from pyslice.multislice.trajectory import Trajectory
 
 
-def test_output_slice_indices_are_normalized_and_validated():
+def test_return_layers_are_normalized_and_validated():
     calc = MultisliceCalculator(force_cpu=True)
-    calc.output = "slices"
     calc.nz = 5
 
-    calc.output_slice_indices = [3, 1, 3]
-    assert calc._resolve_output_layers() == [1, 3]
+    calc.return_layers = [3, 1, 3]
+    assert calc._resolve_return_layers() == [1, 3]
 
-    calc.output_slice_indices = [5]
+    calc.return_layers = -1
+    assert calc._resolve_return_layers() == [4]
+
+    calc.return_layers = "all"
+    assert calc._resolve_return_layers() == [0, 1, 2, 3, 4]
+
+    calc.return_layers = None
+    assert calc._resolve_return_layers() == []
+
+    calc.return_layers = []
+    assert calc._resolve_return_layers() == []
+
+    calc.return_layers = [5]
     with pytest.raises(ValueError, match="out-of-range"):
-        calc._resolve_output_layers()
+        calc._resolve_return_layers()
 
 
-def test_selected_output_slice_indices_participate_in_cache_key():
+def test_selected_return_layers_participate_in_cache_key():
     traj = _make_tiny_trajectory()
 
     first = MultisliceCalculator(force_cpu=True)
@@ -29,8 +40,7 @@ def test_selected_output_slice_indices_participate_in_cache_key():
         sampling=1.0,
         slice_thickness=1.0,
         probe_positions=[(2.0, 2.0)],
-        output="slices",
-        output_slice_indices=[3, 1, 1],
+        return_layers=[3, 1, 1],
     )
 
     second = MultisliceCalculator(force_cpu=True)
@@ -40,23 +50,42 @@ def test_selected_output_slice_indices_participate_in_cache_key():
         sampling=1.0,
         slice_thickness=1.0,
         probe_positions=[(2.0, 2.0)],
-        output="slices",
-        output_slice_indices=[1, 3],
+        return_layers=[1, 3],
     )
 
-    all_slices = MultisliceCalculator(force_cpu=True)
-    all_slices.setup(
+    all_layers = MultisliceCalculator(force_cpu=True)
+    all_layers.setup(
         traj,
         aperture=5,
         sampling=1.0,
         slice_thickness=1.0,
         probe_positions=[(2.0, 2.0)],
-        output="slices",
+        return_layers="all",
     )
 
-    assert first._output_layers == [1, 3]
+    no_return = MultisliceCalculator(force_cpu=True)
+    no_return.setup(
+        traj,
+        aperture=5,
+        sampling=1.0,
+        slice_thickness=1.0,
+        probe_positions=[(2.0, 2.0)],
+        return_layers=None,
+    )
+
+    exit_wave = MultisliceCalculator(force_cpu=True)
+    exit_wave.setup(
+        traj,
+        aperture=5,
+        sampling=1.0,
+        slice_thickness=1.0,
+        probe_positions=[(2.0, 2.0)],
+    )
+
+    assert first._return_layers == [1, 3]
     assert first.cache_key == second.cache_key
-    assert all_slices.cache_key != first.cache_key
+    assert all_layers.cache_key != first.cache_key
+    assert no_return.cache_key == exit_wave.cache_key
 
 
 def test_cached_files_with_mismatched_layer_counts_are_ignored(tmp_path):
@@ -71,7 +100,7 @@ def test_cached_files_with_mismatched_layer_counts_are_ignored(tmp_path):
     assert to_cpu(frame_data).shape[-2] == 3
 
 
-def test_exit_output_returns_final_layer_metadata(tmp_path, monkeypatch):
+def test_default_return_layers_returns_final_layer_metadata(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     calc = MultisliceCalculator(force_cpu=True)
     calc.setup(
@@ -81,7 +110,6 @@ def test_exit_output_returns_final_layer_metadata(tmp_path, monkeypatch):
         sampling=1.0,
         slice_thickness=1.0,
         probe_positions=[(2.0, 2.0)],
-        output="exit",
     )
 
     wave = calc.run()
@@ -90,7 +118,7 @@ def test_exit_output_returns_final_layer_metadata(tmp_path, monkeypatch):
     assert to_cpu(wave.array).shape[-1] == 1
 
 
-def test_slice_output_returns_selected_layers(tmp_path, monkeypatch):
+def test_return_layers_returns_selected_layers(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     calc = MultisliceCalculator(force_cpu=True)
     calc.setup(
@@ -100,14 +128,34 @@ def test_slice_output_returns_selected_layers(tmp_path, monkeypatch):
         sampling=1.0,
         slice_thickness=1.0,
         probe_positions=[(2.0, 2.0)],
-        output="slices",
-        output_slice_indices=[1, 3],
+        return_layers=[1, 3],
     )
 
     wave = calc.run()
 
     assert wave.layer.tolist() == [1, 3]
     assert to_cpu(wave.array).shape[-1] == 2
+
+
+def test_none_return_layers_suppresses_wavefunction_return(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    calc = MultisliceCalculator(force_cpu=True)
+    calc.setup(
+        _make_tiny_trajectory(),
+        aperture=5,
+        voltage_eV=60e3,
+        sampling=1.0,
+        slice_thickness=1.0,
+        probe_positions=[(2.0, 2.0)],
+        return_layers=None,
+        cache_wavefunctions=False,
+    )
+
+    wave = calc.run()
+
+    assert wave.layer.tolist() == []
+    assert to_cpu(wave.array).shape[-1] == 0
+    assert not (calc.output_dir / "frame_0.npy").exists()
 
 
 def test_cache_potentials_routes_potential_cache(tmp_path, monkeypatch):
@@ -120,7 +168,8 @@ def test_cache_potentials_routes_potential_cache(tmp_path, monkeypatch):
         sampling=1.0,
         slice_thickness=1.0,
         probe_positions=[(2.0, 2.0)],
-        cache=False,
+        return_layers=None,
+        cache_wavefunctions=False,
         cache_potentials=True,
     )
 
@@ -137,16 +186,19 @@ def test_legacy_cache_keywords_report_new_api():
     legacy_wave_cache = "cache" + "_levels"
     legacy_layer_selection = "cache" + "_layer_indices"
     legacy_materialization = "store" + "_full"
+    intermediate_output = "output"
+    intermediate_cache = "cache"
 
     with pytest.raises(TypeError) as excinfo:
         calc.setup(traj, **{legacy_wave_cache: []})
     message = str(excinfo.value)
     assert legacy_wave_cache in message
-    assert "output='exit'" in message
-    assert "output='slices'" in message
-    assert "cache=True/False" in message
+    assert "return_layers=-1" in message
+    assert "return_layers='all'" in message
+    assert "cache_wavefunctions=True/False" in message
     assert "cache_potentials=True/False" in message
-    assert "keep_wavefunctions=False" in message
+    assert "return_layers=None" in message
+    assert "return_layers=[]" in message
     assert "Old arguments were not applied" in message
 
     with pytest.raises(TypeError, match=legacy_layer_selection):
@@ -154,6 +206,12 @@ def test_legacy_cache_keywords_report_new_api():
 
     with pytest.raises(TypeError, match=legacy_materialization):
         calc.setup(traj, **{legacy_materialization: False})
+
+    with pytest.raises(TypeError, match=intermediate_output):
+        calc.setup(traj, **{intermediate_output: "slices"})
+
+    with pytest.raises(TypeError, match=intermediate_cache):
+        calc.setup(traj, **{intermediate_cache: False})
 
 
 def _make_tiny_trajectory():

@@ -8,11 +8,18 @@ from ase import Atoms
 
 @dataclass
 class Trajectory:
+    """Molecular trajectory data used by PySlice simulations.
+
+    Arrays use shape ``(n_frames, n_atoms, 3)`` for positions and velocities.
+    ``box_matrix`` is a 3x3 cell matrix with lattice vectors stored by row, and
+    ``timestep`` is measured in picoseconds.
+    """
+
     atom_types: np.ndarray
     positions: np.ndarray
     velocities: np.ndarray
     box_matrix: np.ndarray
-    timestep: float  # Timestep in picosecondss
+    timestep: float  # Timestep in picoseconds
 
     def __post_init__(self):
         """Validate trajectory data."""
@@ -123,14 +130,17 @@ class Trajectory:
         return np.mean(self.positions, axis=0)
  
     def get_distplacements(self) -> np.ndarray:
+        """Return per-frame displacements from each atom's time-averaged position."""
         return self.positions[:,:,:]-self.get_mean_positions()[None,:,:]
 
     def tile_positions(self, repeats: Tuple[int, int, int], trajectories:list = None) -> 'Trajectory':
         """
-        Tile the positions by repeating the system in 3D space.
+        Tile one or more trajectories into a repeated supercell.
 
         Args:
             repeats: Tuple of (nx, ny, nz) repeats in x, y, z directions
+            trajectories: Optional trajectory per tile. If omitted, this trajectory is
+                repeated into every tile.
 
         Returns:
             New Trajectory with tiled positions
@@ -194,6 +204,7 @@ class Trajectory:
         return range_val
 
     def swap_axes(self,axes):
+        """Return a trajectory with Cartesian axes permuted."""
         positions_swapped = self.positions[:,:,axes]
         velocities_swapped = self.velocities[:,:,axes]
         box_swapped = self.box_matrix[axes,:][:,axes]
@@ -206,6 +217,12 @@ class Trajectory:
         )
 
     def tilt_positions(self,alpha=0,beta=0) -> 'Trajectory':
+        """Rotate positions and velocities by x-axis then y-axis tilt angles.
+
+        Args:
+            alpha: Rotation angle about x in radians.
+            beta: Rotation angle about y in radians.
+        """
         ca=np.cos(alpha) ; sa=np.sin(alpha)
         cb=np.cos(beta) ; sb=np.sin(beta)
         Ra=np.asarray([[1,0,0],[0,ca,-sa],[0,sa,ca]])
@@ -375,6 +392,13 @@ class Trajectory:
         )
 
     def generate_random_displacements(self,n_displacements,sigma,seed=None):
+        """Generate frozen-phonon frames from Gaussian displacements.
+
+        Args:
+            n_displacements: Number of displaced frames to generate.
+            sigma: RMS displacement magnitude in Angstroms.
+            seed: Optional NumPy random seed.
+        """
         na=len(self.positions[0])
         if seed is not None:
             np.random.seed(seed)
@@ -555,4 +579,5 @@ class Trajectory:
 
     # returns an ase object
     def to_ase(self):
+        """Convert the first frame to an ASE ``Atoms`` object."""
         return Atoms(''.join(self.atom_types), positions=self.positions[0], cell=self.box_matrix, pbc=True)
