@@ -20,7 +20,7 @@ dependencies = [
 [project.optional-dependencies]
 fast = ["torch","torchvision"]
 test = []
-md = ["orb-models>=0.6.0"]
+md = ["orb-models>=0.6.0; python_version < '3.13'"]
 
 [project.urls]
 Homepage = "https://github.com/h-walk/PySlice"

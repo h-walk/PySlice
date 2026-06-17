@@ -3,21 +3,17 @@ Trajectory loading module for LAMMPS dump files.
 """
 import numpy as np
 from pathlib import Path
+import json
 import logging
+import os
+import subprocess
+import sys
+import tempfile
 from tqdm import tqdm
 from typing import Optional, Dict, Union
 
 from ..multislice.trajectory import Trajectory
 from ..multislice.potentials import getZfromElementName
-
-# Try to import OVITO, but don't fail if it's not available
-try:
-    from ovito.io import import_file
-    from ovito.modifiers import UnwrapTrajectoriesModifier
-    OVITO_AVAILABLE = True
-except ImportError as e:
-    logging.error(f"OVITO import failed: {e}")
-    OVITO_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -207,8 +203,161 @@ class Loader:
 
     def _load_via_ovito(self) -> Trajectory:
         """Load trajectory via OVITO."""
-        if not OVITO_AVAILABLE:
-            raise ImportError("OVITO is not available. Please install ovito package.")
+        if sys.platform == "win32" and os.environ.get("PYSLICE_OVITO_IN_PROCESS") != "1":
+            return self._load_via_ovito_subprocess()
+        return self._load_via_ovito_direct()
+
+    def _load_via_ovito_subprocess(self) -> Trajectory:
+        """Load trajectory via OVITO in a subprocess to avoid Windows DLL conflicts."""
+        try:
+            import_kwargs_json = json.dumps(self.ovitokwargs)
+        except TypeError as exc:
+            raise TypeError("ovitokwargs must be JSON serializable for Windows OVITO loading.") from exc
+
+        worker_code = r'''
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+from ovito.io import import_file
+from ovito.modifiers import UnwrapTrajectoriesModifier
+
+
+def validate_frame_data(frame_data, frame_num=0):
+    if not frame_data:
+        raise ValueError(f"No data for frame {frame_num}")
+    if not (hasattr(frame_data, "cell") and frame_data.cell):
+        raise ValueError(f"No cell data in frame {frame_num}")
+    if not (hasattr(frame_data, "particles") and frame_data.particles):
+        raise ValueError(f"No particle data in frame {frame_num}")
+    if not (
+        hasattr(frame_data.particles, "positions")
+        and frame_data.particles.positions is not None
+        and len(frame_data.particles.positions) > 0
+    ):
+        raise ValueError(f"No position data in frame {frame_num}")
+
+
+filepath = Path(sys.argv[1])
+output_path = Path(sys.argv[2])
+import_kwargs = json.loads(sys.argv[3])
+
+try:
+    if filepath.suffix.lower() == ".xyz":
+        try:
+            pipeline = import_file(str(filepath), bounding_box=True, **import_kwargs)
+        except KeyError as exc:
+            if "bounding_box" in str(exc):
+                pipeline = import_file(str(filepath), **import_kwargs)
+            else:
+                raise
+    else:
+        pipeline = import_file(str(filepath), **import_kwargs)
+except Exception as exc:
+    raise RuntimeError(f"OVITO import failed: {exc}") from exc
+
+if hasattr(pipeline.source, "data") and pipeline.source.data:
+    pipeline.modifiers.append(UnwrapTrajectoriesModifier())
+
+n_frames = pipeline.source.num_frames
+if n_frames == 0:
+    raise ValueError("No frames found in trajectory")
+
+try:
+    frame0_data = pipeline.compute(0)
+except RuntimeError as exc:
+    if "Unwrap trajectories" in str(exc):
+        pipeline.modifiers.clear()
+        frame0_data = pipeline.compute(0)
+    else:
+        raise RuntimeError(f"Failed to compute frame 0: {exc}") from exc
+
+validate_frame_data(frame0_data, 0)
+
+n_atoms = len(frame0_data.particles.positions)
+h_matrix = np.array(frame0_data.cell.matrix, dtype=np.float32)[:3, :3]
+has_velocities = (
+    hasattr(frame0_data.particles, "velocities")
+    and frame0_data.particles.velocities is not None
+)
+
+positions = np.zeros((n_frames, n_atoms, 3), dtype=np.float32)
+velocities = np.zeros((n_frames, n_atoms, 3), dtype=np.float32)
+
+for i in range(n_frames):
+    try:
+        frame_data = pipeline.compute(i)
+        if frame_data and hasattr(frame_data, "particles"):
+            if (
+                hasattr(frame_data.particles, "positions")
+                and frame_data.particles.positions is not None
+            ):
+                positions[i] = np.array(frame_data.particles.positions, dtype=np.float32)
+            if (
+                has_velocities
+                and hasattr(frame_data.particles, "velocities")
+                and frame_data.particles.velocities is not None
+            ):
+                velocities[i] = np.array(frame_data.particles.velocities, dtype=np.float32)
+    except Exception as exc:
+        print(f"Failed to load frame {i}: {exc}", file=sys.stderr)
+
+if (
+    hasattr(frame0_data.particles, "particle_types")
+    and frame0_data.particles.particle_types is not None
+    and len(frame0_data.particles.particle_types) == n_atoms
+):
+    atom_types = np.array(frame0_data.particles.particle_types, dtype=np.int32)
+else:
+    print("No particle type data found. Setting all types to 1.", file=sys.stderr)
+    atom_types = np.ones(n_atoms, dtype=np.int32)
+
+np.savez(
+    output_path,
+    positions=positions,
+    velocities=velocities,
+    atom_types=atom_types,
+    box_matrix=h_matrix,
+)
+'''
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "ovito_trajectory.npz"
+            result = subprocess.run(
+                [sys.executable, "-c", worker_code, str(self.filepath), str(output_path), import_kwargs_json],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                stderr = result.stderr.strip()
+                raise RuntimeError(f"OVITO subprocess failed: {stderr}")
+            if result.stderr.strip():
+                logger.warning(result.stderr.strip())
+
+            with np.load(output_path) as data:
+                positions = data["positions"]
+                velocities = data["velocities"]
+                atom_types = self._apply_atomic_mapping(data["atom_types"])
+                box_matrix = data["box_matrix"]
+
+        logger.info(f"Loaded {positions.shape[0]} frames with {positions.shape[1]} atoms")
+
+        return Trajectory(
+            atom_types=atom_types,
+            positions=positions,
+            velocities=velocities,
+            box_matrix=box_matrix,
+            timestep=self.timestep
+        )
+
+    def _load_via_ovito_direct(self) -> Trajectory:
+        """Load trajectory via OVITO in the current Python process."""
+        try:
+            from ovito.io import import_file
+            from ovito.modifiers import UnwrapTrajectoriesModifier
+        except ImportError as exc:
+            raise ImportError("OVITO is not available. Please install ovito package.") from exc
 
         # Import file
         try:
@@ -364,4 +513,3 @@ class Loader:
             box_matrix=box_matrix,
             timestep=self.timestep
         )
-

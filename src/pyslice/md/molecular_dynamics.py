@@ -10,6 +10,7 @@ from __future__ import annotations
 import numpy as np
 from pathlib import Path
 import logging,traceback
+import sys
 import time
 from typing import Optional, Dict, List, TYPE_CHECKING
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
@@ -731,6 +732,13 @@ class ORBMDCalculator(MDCalculator):
 
     def _setup_calculator(self) -> bool:
         """Load ORB calculator."""
+        if sys.version_info >= (3, 13):
+            logger.error(
+                "ORB MD support currently requires Python 3.12 because "
+                "orb-models depends on dm-tree==0.1.8, which does not publish "
+                "Python 3.13 wheels."
+            )
+            return False
         try:
             from orb_models.forcefield import pretrained
             from orb_models.forcefield.inference.calculator import ORBCalculator
