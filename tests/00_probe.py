@@ -1,4 +1,7 @@
-import sys,os,time
+import os
+os.environ["MPLBACKEND"] = "Agg"
+
+import sys,time
 try:
     import pyslice
 except ModuleNotFoundError:

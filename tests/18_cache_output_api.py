@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from pyslice.backend import to_cpu
+from pyslice.backend import to_numpy
 from pyslice.multislice.calculators import MultisliceCalculator, checkCache
 from pyslice.multislice.trajectory import Trajectory
 
@@ -91,13 +91,14 @@ def test_selected_return_layers_participate_in_cache_key():
 def test_cached_files_with_mismatched_layer_counts_are_ignored(tmp_path):
     cache_file = tmp_path / "frame_0.npy"
     np.save(cache_file, np.zeros((1, 2, 2, 3, 1), dtype=np.complex128))
+    backend = MultisliceCalculator(force_cpu=True)._backend
 
-    cache_exists, _ = checkCache(cache_file, True, expected_n_layers=2)
+    cache_exists, _ = checkCache(cache_file, True, backend, expected_n_layers=2)
     assert not cache_exists
 
-    cache_exists, frame_data = checkCache(cache_file, True, expected_n_layers=3)
+    cache_exists, frame_data = checkCache(cache_file, True, backend, expected_n_layers=3)
     assert cache_exists
-    assert to_cpu(frame_data).shape[-2] == 3
+    assert to_numpy(frame_data).shape[-2] == 3
 
 
 def test_default_return_layers_returns_final_layer_metadata(tmp_path, monkeypatch):
@@ -115,7 +116,7 @@ def test_default_return_layers_returns_final_layer_metadata(tmp_path, monkeypatc
     wave = calc.run()
 
     assert wave.layer.tolist() == [3]
-    assert to_cpu(wave.array).shape[-1] == 1
+    assert to_numpy(wave.array).shape[-1] == 1
 
 
 def test_return_layers_returns_selected_layers(tmp_path, monkeypatch):
@@ -134,7 +135,7 @@ def test_return_layers_returns_selected_layers(tmp_path, monkeypatch):
     wave = calc.run()
 
     assert wave.layer.tolist() == [1, 3]
-    assert to_cpu(wave.array).shape[-1] == 2
+    assert to_numpy(wave.array).shape[-1] == 2
 
 
 def test_none_return_layers_suppresses_wavefunction_return(tmp_path, monkeypatch):
@@ -154,7 +155,7 @@ def test_none_return_layers_suppresses_wavefunction_return(tmp_path, monkeypatch
     wave = calc.run()
 
     assert wave.layer.tolist() == []
-    assert to_cpu(wave.array).shape[-1] == 0
+    assert to_numpy(wave.array).shape[-1] == 0
     assert not (calc.output_dir / "frame_0.npy").exists()
 
 

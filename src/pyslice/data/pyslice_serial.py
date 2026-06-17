@@ -8,6 +8,7 @@ that need conversion for HDF5 storage.
 import numpy as np
 from pathlib import Path
 from h5py import File, Group, Dataset
+from ..backend import to_numpy
 
 try:
     import sys
@@ -23,9 +24,7 @@ def _to_numpy(x):
     """Convert tensor or array-like to numpy array."""
     if x is None:
         return None
-    if hasattr(x, 'cpu'):
-        return x.cpu().numpy()
-    return np.asarray(x)
+    return to_numpy(x)
 
 
 class PySliceSerial:

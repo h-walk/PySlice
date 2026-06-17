@@ -4,7 +4,7 @@ try:
 except ModuleNotFoundError:
     sys.path.insert(0, '../src')
 
-from pyslice import Loader,MultisliceCalculator,HAADFData,gridFromTrajectory,Potential,differ
+from pyslice import Loader,MultisliceCalculator,HAADFData,grid_from_trajectory,Potential,differ
 
 import numpy as np
 import matplotlib.pyplot as plt

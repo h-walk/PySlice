@@ -11,7 +11,7 @@ from tqdm import tqdm
 from typing import Optional, Dict, Union
 
 from ..multislice.trajectory import Trajectory
-from ..multislice.potentials import getZfromElementName
+from ..multislice.potentials import get_z_from_element
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +74,7 @@ class Loader:
         for atom_type, value in mapping.items():
             if isinstance(value, str):
                 # Element name - convert to atomic number
-                result[atom_type] = getZfromElementName(value)
+                result[atom_type] = get_z_from_element(value)
             elif isinstance(value, int):
                 # Already an atomic number
                 if not (1 <= value <= 118):

@@ -4,7 +4,7 @@ try:
 except ModuleNotFoundError:
 	sys.path.insert(0, '../src')
 
-from pyslice import Loader,Probe,Propagate,gridFromTrajectory,Potential,MultisliceCalculator,differ
+from pyslice import Loader,Probe,Propagate,grid_from_trajectory,Potential,MultisliceCalculator,differ
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -25,7 +25,7 @@ trajectory=trajectory.slice_timesteps( 0,1 )
 # POTENTIAL
 positions = trajectory.positions[0]
 atom_types=trajectory.atom_types
-xs,ys,zs,lx,ly,lz=gridFromTrajectory(trajectory,sampling=0.1,slice_thickness=0.5)
+xs,ys,zs,lx,ly,lz=grid_from_trajectory(trajectory,sampling=0.1,slice_thickness=0.5)
 potential = Potential(xs, ys, zs, positions, atom_types, kind="kirkland")
 #potential.plot()
 

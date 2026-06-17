@@ -313,7 +313,7 @@ class Trajectory:
             timestep=self.timestep
         )
 
-    def slice_timesteps(self, i1: int=1, i2:int=None, ith: int=1) -> 'Trajectory':
+    def slice_timesteps(self, i1: int=0, i2: Optional[int]=None, ith: int=1) -> 'Trajectory':
         """
         Slice trajectory to include only specified timesteps.
 
@@ -326,12 +326,12 @@ class Trajectory:
         Returns:
             New Trajectory with only the specified timesteps
         """
-        # Handle list of indices - delegate to select_timesteps
-        if isinstance(i1, (list, tuple)):
+        # Handle explicit indices - delegate to select_timesteps.
+        if isinstance(i1, (list, tuple, np.ndarray)):
             return self.select_timesteps(i1)
 
         if i2 is None:
-            i2=len(self.positions)
+            i2 = len(self.positions)
 
         return Trajectory(
             atom_types=self.atom_types,
@@ -341,7 +341,7 @@ class Trajectory:
             timestep=self.timestep*ith
         )
 
-    def select_timesteps(self, indices: int) -> 'Trajectory':
+    def select_timesteps(self, indices) -> 'Trajectory':
         """
         Select specified timesteps.
 
@@ -353,7 +353,11 @@ class Trajectory:
         """
 
         if indices is None:
-            indices=slice(0, len(self.positions), 1)
+            indices = slice(0, len(self.positions), 1)
+        elif isinstance(indices, (int, np.integer)):
+            indices = [indices]
+        elif isinstance(indices, tuple):
+            indices = list(indices)
 
         # Note in this case the timestep variable is meaningless,
         # maybe we can find a more elegant solution (?) 
@@ -365,7 +369,7 @@ class Trajectory:
             timestep=0.0
         )
 
-    def get_random_timesteps(self, N: int=1, seed: int = None) -> 'Trajectory':
+    def get_random_timesteps(self, N: int=1, seed: Optional[int] = None) -> 'Trajectory':
         """
         Filter trajectory down to random frames (useful for conventional frozen-phonon)
 
@@ -376,13 +380,12 @@ class Trajectory:
             New Trajectory with randomized frames
         """
 
-        if seed is not None:
-            np.random.seed(seed)
+        return self.random_frames(N=N, seed=seed)
 
-        indices = np.arange(len(self.positions))
-        np.random.shuffle(indices) #; print(indices)
-        indices = indices[:N]
-        
+    def random_frames(self, N: int, seed: Optional[int] = None) -> 'Trajectory':
+        """Return a new trajectory with ``N`` randomly selected frames."""
+        rng = np.random.default_rng(seed)
+        indices = rng.choice(self.n_frames, size=N, replace=False)
         return Trajectory(
             atom_types=self.atom_types,
             positions=self.positions[indices, :, :],
@@ -391,7 +394,7 @@ class Trajectory:
             timestep=self.timestep
         )
 
-    def generate_random_displacements(self,n_displacements,sigma,seed=None):
+    def generate_random_displacements(self, n_displacements, sigma, seed=None):
         """Generate frozen-phonon frames from Gaussian displacements.
 
         Args:
@@ -399,16 +402,15 @@ class Trajectory:
             sigma: RMS displacement magnitude in Angstroms.
             seed: Optional NumPy random seed.
         """
-        na=len(self.positions[0])
-        if seed is not None:
-            np.random.seed(seed)
-        dxyz=np.random.normal(0,sigma/np.sqrt(3),size=(n_displacements,na,3))
-        positions = self.positions[0]+dxyz
+        rng = np.random.default_rng(seed)
+        na = self.n_atoms
+        dxyz = rng.normal(0, sigma / np.sqrt(3), size=(n_displacements, na, 3))
+        positions = self.positions[0] + dxyz
 
         return Trajectory(
             atom_types=self.atom_types,
             positions=positions,
-            velocities=np.ones(n_displacements)[:,None,None]*self.velocities[0, :, :],
+            velocities=np.broadcast_to(self.velocities[0], (n_displacements, na, 3)).copy(),
             box_matrix=self.box_matrix,
             timestep=self.timestep
         )

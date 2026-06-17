@@ -7,33 +7,9 @@ from pathlib import Path
 import logging
 from .wf_data import WFData
 from ..data.pyslice_serial import PySliceSerial, Signal, Dimensions, Dimension, Metadata
-#from ..data import Signal, Dimensions, Dimension, GeneralMetadata
-from pyslice.backend import zeros,to_cpu,mean,sum,absolute,einsum
-#from ..data.pyslice_serial import PySliceSerial
+from pyslice.backend import Backend, to_numpy
 
 logger = logging.getLogger(__name__)
-
-try:
-    import torch ; xp = torch
-    TORCH_AVAILABLE = True
-    if torch.cuda.is_available():
-        device = torch.device('cuda')
-    elif torch.backends.mps.is_available():
-        device = torch.device('mps')
-    else:
-        device = torch.device('cpu')
-    if device.type == 'mps':
-        complex_dtype = torch.complex64
-        float_dtype = torch.float32
-    else:
-        complex_dtype = torch.complex128
-        float_dtype = torch.float64
-except ImportError:
-    TORCH_AVAILABLE = False
-    xp = np
-    print("PyTorch not available, falling back to NumPy")
-    complex_dtype = np.complex128
-    float_dtype = np.float64
 
 
 class HAADFData(PySliceSerial, Signal):
@@ -55,7 +31,7 @@ class HAADFData(PySliceSerial, Signal):
         'tensor_attrs': ['_kxs', '_kys', '_xs', '_ys', '_array', 'data'],
         'path_attrs': ['cache_dir'],
         'tuple_list_attrs': ['probe_positions'],
-        'exclude_attrs': ['probe', '_wf_array'],
+        'exclude_attrs': ['probe', '_wf_array', '_backend'],
         'force_datasets': ['_array', 'probe_positions', '_kxs', '_kys', '_xs', '_ys'],
     }
 
@@ -67,6 +43,7 @@ class HAADFData(PySliceSerial, Signal):
             wf_data: WFData object containing wavefunction data
         """
         # Copy needed attributes from WFData (raw tensors for GPU ops)
+        self._backend = wf_data._backend
         self.probe_positions = wf_data.probe_positions
         self._kxs = wf_data._kxs
         self._kys = wf_data._kys
@@ -109,9 +86,7 @@ class HAADFData(PySliceSerial, Signal):
         """Lazy conversion to numpy for Signal compatibility."""
         if self._array is None:
             return None
-        if hasattr(self._array, 'cpu'):
-            return self._array.cpu().numpy()
-        return np.asarray(self._array)
+        return to_numpy(self._array)
 
     @data.setter
     def data(self, value):
@@ -129,7 +104,7 @@ class HAADFData(PySliceSerial, Signal):
     @property
     def array(self):
         """Alias for adf (backward compatibility)."""
-        return to_cpu(self._array)
+        return to_numpy(self._array)
 
     def __getattr__(self, name):
         """Auto-convert coordinate arrays from tensor to numpy on access."""
@@ -138,19 +113,18 @@ class HAADFData(PySliceSerial, Signal):
             raw = object.__getattribute__(self, f'_{name}')
             if raw is None:
                 return None
-            if hasattr(raw, 'cpu'):
-                return raw.cpu().numpy()
-            return np.asarray(raw)
+            return to_numpy(raw)
         raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
 
     def getMask(self, inner_mrad: float = 45, outer_mrad: float = 150):
-        q = xp.sqrt(self._kxs[:,None]**2 + self._kys[None,:]**2)
+        b = self._backend
+        q = b.sqrt(self._kxs[:,None]**2 + self._kys[None,:]**2)
         radius_inner = (inner_mrad * 1e-3) / self.probe.wavelength
         radius_outer = (outer_mrad * 1e-3) / self.probe.wavelength
 
-        mask = zeros(q.shape, type_match = self._wf_array)
-        if isinstance(self._wf_array,np.memmap):
-            q = to_cpu(q)
+        mask = b.zeros(q.shape, type_match=self._wf_array)
+        if isinstance(self._wf_array, np.memmap):
+            q = to_numpy(q)
         mask[q >= radius_inner] = 1
         mask[q >= radius_outer] = 0
         return mask
@@ -170,64 +144,22 @@ class HAADFData(PySliceSerial, Signal):
         # Use float_dtype to ensure MPS compatibility (float32 on MPS, float64 otherwise)
         #self._xs = xp.asarray(sorted(list(set(self.probe_positions[:,0]))), dtype=float_dtype)
         #self._ys = xp.asarray(sorted(list(set(self.probe_positions[:,1]))), dtype=float_dtype)
-        self._array = zeros((len(self._xs), len(self._ys)), type_match = self._wf_array)
+        b = self._backend
+        self._array = b.zeros((len(self._xs), len(self._ys)), type_match=self._wf_array)
 
         mask = self.getMask(inner_mrad, outer_mrad)
-        #q = xp.sqrt(self._kxs[:,None]**2 + self._kys[None,:]**2)
-        #radius_inner = (inner_mrad * 1e-3) / self.probe.wavelength
-        #radius_outer = (outer_mrad * 1e-3) / self.probe.wavelength
-
-        #mask = zeros(q.shape, type_match = self._wf_array)
-        #if isinstance(self._wf_array,np.memmap):
-        #    q = to_cpu(q)
-        #mask[q >= radius_inner] = 1
-        #mask[q >= radius_outer] = 0
-
-        probe_positions = xp.asarray(self.probe_positions, dtype=float_dtype)
-
-        #for i, x in enumerate(self._xs):
-        #    for j, y in enumerate(self._ys):
-        #        dxy = xp.sqrt(xp.sum((probe_positions - xp.asarray([x, y], dtype=float_dtype)[None, :]) ** 2, axis=1))
-        #        p = xp.argmin(dxy) # TODO inferring point from grid is still quite goofy. maybe we should track a grid of indices (if we're going to leave p as a single index in the final t,p,kx,ky,l datacube)
-        #        exits = self._wf_array[p, :, :, :, -1]  # which probe position, all frames, kx, ky, last layer
-        #
-        #        if preview and i == 0 and j == 0:
-        #            import matplotlib.pyplot as plt
-        #            fig, ax = plt.subplots()
-        #            preview_data = xp.mean(xp.absolute(exits), axis=0) ** .1 * (1 - mask)
-        #            if TORCH_AVAILABLE:
-        #                preview_data = preview_data.cpu().numpy()
-        #            ax.imshow(preview_data, cmap="inferno")
-        #            plt.show()
-        #
-        #        collected = xp.mean(xp.sum(xp.absolute(exits * mask[None, :, :]), axis=(1, 2)))
-        #        self._array[i, j] = collected
-
 
         # recall self._wf_array is reshaped: p,t,kx,ky,l --> c,x,y,t,kx,ky,l
         if preview:
             import matplotlib.pyplot as plt
             fig, ax = plt.subplots()
-            preview_data = mean(absolute(self._wf_array),axis=(0,1,2,3,6))**.2 * (1 - mask)
-            ax.imshow(absolute(np.asarray(preview_data)), cmap="inferno")
+            preview_data = b.mean(b.absolute(self._wf_array), axis=(0,1,2,3,6))**.2 * (1 - mask)
+            ax.imshow(to_numpy(b.absolute(preview_data)), cmap="inferno")
             plt.show()
 
-        #collected = self._wf_array * mask[None,None,None,:,:,None] # c,x,y,t,kx,ky,l indices, mask is kx,ky
-        #self._array = xp.mean(xp.sum(xp.absolute(collected),axis=(4,5)),axis=(0,3,4)) # sum over kx,ky, mean over c,t,l
-        #for i in range(len(self._xs)): # looping doesn't blow up ram when we absolute it
-        #    for j in range(len(self._ys)):
-        #        collected = self._wf_array[:,i,j,:,:,:,:] * mask[None,None,:,:,None] # c,[x],[y],t,kx,ky,l indices, mask is kx,ky
-        #        self._array[i,j] = mean(sum(absolute(collected)**2,axis=(2,3)),axis=(0,1,2)) # sum |ψ|² over kx,ky, mean over c,t,l
-        # TODO this should be einsum, but i'm not trying to test it right now...
         nc,_,_,nt,_,_,nl = self._wf_array.shape
-        wf_intensity = absolute(self._wf_array)**2 ; mask = absolute(mask)
-        self._array = einsum('cxytkql,kq->xy',wf_intensity,mask)/(nc*nt*nl)
-
-        # Update dimensions with computed xs, ys
-        def to_numpy(x):
-            if hasattr(x, 'cpu'):
-                return x.cpu().numpy()
-            return np.asarray(x)
+        wf_intensity = b.absolute(self._wf_array)**2 ; mask = b.absolute(mask)
+        self._array = b.einsum('cxytkql,kq->xy', wf_intensity, mask) / (nc*nt*nl)
 
         xs_np = to_numpy(self._xs)
         ys_np = to_numpy(self._ys)
@@ -259,13 +191,13 @@ class HAADFData(PySliceSerial, Signal):
 
         fig, ax = plt.subplots()
         array = self.array.T[::-1,:]  # imshow convention: y,x. our convention: x,y, and flip y (0,0 upper-left)
-        xs = to_cpu(self._xs)
-        ys = to_cpu(self._ys)
+        xs = to_numpy(self._xs)
+        ys = to_numpy(self._ys)
 
         dx = (xs[-1] - xs[0]) / (len(xs) - 1) if len(xs) > 1 else 0
         dy = (ys[-1] - ys[0]) / (len(ys) - 1) if len(ys) > 1 else 0
         extent = (np.amin(xs) - dx/2, np.amax(xs) + dx/2, np.amin(ys) - dy/2, np.amax(ys) + dy/2)
-        ax.imshow(absolute(array), cmap="inferno", extent=extent)
+        ax.imshow(np.absolute(array), cmap="inferno", extent=extent)
         ax.set_xlabel("x ($\\AA$)")
         ax.set_ylabel("y ($\\AA$)")
 
@@ -276,4 +208,3 @@ class HAADFData(PySliceSerial, Signal):
             plt.savefig(filename)
         else:
             plt.show()
-

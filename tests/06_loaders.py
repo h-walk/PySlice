@@ -4,7 +4,7 @@ try:
 except ModuleNotFoundError:
     sys.path.insert(0, '../src')
 
-from pyslice import Loader,gridFromTrajectory,Potential,differ
+from pyslice import Loader,grid_from_trajectory,Potential,differ
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -42,7 +42,7 @@ for i,filename in enumerate(testFiles.keys()):
 	positions = trajectory.positions[0]
 	atom_types=trajectory.atom_types
 	# PLOT IT
-	xs,ys,zs,lx,ly,lz=gridFromTrajectory(trajectory,sampling=0.1,slice_thickness=0.5)
+	xs,ys,zs,lx,ly,lz=grid_from_trajectory(trajectory,sampling=0.1,slice_thickness=0.5)
 	potential = Potential(xs, ys, zs, positions, atom_types, kind="kirkland")
 	print("saving plot for",filename,"to","06_loaders_"+str(i)+".png")
 	potential.plot("outputs/figs/06_loaders_"+str(i)+".png")

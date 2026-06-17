@@ -4,7 +4,7 @@ try:
 except ModuleNotFoundError:
     sys.path.insert(0, '../src')
 
-from pyslice import Loader,MultisliceCalculator,HAADFData,TACAWData,differ,gridFromTrajectory,Potential
+from pyslice import Loader,MultisliceCalculator,HAADFData,TACAWData,differ,grid_from_trajectory,Potential
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -49,7 +49,7 @@ if run in [ "reference", "all" ]: # same as 04_haadf.py, no modifications
 		trajectory.atom_types[i] = m
 	#positions = trajectory.positions[0]											# PREVIEW POTENTIAL
 	#atom_types=trajectory.atom_types
-	#xs,ys,zs,lx,ly,lz=gridFromTrajectory(trajectory,sampling=0.1,slice_thickness=0.5)
+	#xs,ys,zs,lx,ly,lz=grid_from_trajectory(trajectory,sampling=0.1,slice_thickness=0.5)
 	#potential = Potential(xs, ys, zs, positions, atom_types, kind="kirkland")
 	#potential.plot()
 	calculator=MultisliceCalculator()											# CREATE CALCULATOR OBJECT
@@ -169,7 +169,7 @@ if run in [ "bigref" ]: # same as 04_haadf.py, but bigger FOV. immediate OOM-kil
 		trajectory.atom_types[i] = m
 	positions = trajectory.positions[0]											# PREVIEW POTENTIAL
 	atom_types=trajectory.atom_types
-	xs,ys,zs,lx,ly,lz=gridFromTrajectory(trajectory,sampling=0.1,slice_thickness=0.5)
+	xs,ys,zs,lx,ly,lz=grid_from_trajectory(trajectory,sampling=0.1,slice_thickness=0.5)
 	potential = Potential(xs, ys, zs, positions, atom_types, kind="kirkland")
 	potential.plot()
 	calculator=MultisliceCalculator()											# CREATE CALCULATOR OBJECT
@@ -195,7 +195,7 @@ if run in [ "bigmemmap", "all" ]:
 		trajectory.atom_types[i] = m
 	#positions = trajectory.positions[0]											# PREVIEW POTENTIAL
 	#atom_types=trajectory.atom_types
-	#xs,ys,zs,lx,ly,lz=gridFromTrajectory(trajectory,sampling=0.1,slice_thickness=0.5)
+	#xs,ys,zs,lx,ly,lz=grid_from_trajectory(trajectory,sampling=0.1,slice_thickness=0.5)
 	#potential = Potential(xs, ys, zs, positions, atom_types, kind="kirkland")
 	#potential.plot()
 	calculator=MultisliceCalculator()											# CREATE CALCULATOR OBJECT
@@ -221,7 +221,7 @@ if run in [ "bigmemloop", "all" ]:
 		trajectory.atom_types[i] = m
 	#positions = trajectory.positions[0]											# PREVIEW POTENTIAL
 	#atom_types=trajectory.atom_types
-	#xs,ys,zs,lx,ly,lz=gridFromTrajectory(trajectory,sampling=0.1,slice_thickness=0.5)
+	#xs,ys,zs,lx,ly,lz=grid_from_trajectory(trajectory,sampling=0.1,slice_thickness=0.5)
 	#potential = Potential(xs, ys, zs, positions, atom_types, kind="kirkland")
 	#potential.plot()
 	calculator=MultisliceCalculator()											# CREATE CALCULATOR OBJECT
@@ -248,7 +248,7 @@ if run in [ "mongo" ]:
 		trajectory.atom_types[i] = m
 	#positions = trajectory.positions[0]											# PREVIEW POTENTIAL
 	#atom_types=trajectory.atom_types
-	#xs,ys,zs,lx,ly,lz=gridFromTrajectory(trajectory,sampling=0.1,slice_thickness=0.5)
+	#xs,ys,zs,lx,ly,lz=grid_from_trajectory(trajectory,sampling=0.1,slice_thickness=0.5)
 	#potential = Potential(xs, ys, zs, positions, atom_types, kind="kirkland")
 	#potential.plot()
 	calculator=MultisliceCalculator()											# CREATE CALCULATOR OBJECT

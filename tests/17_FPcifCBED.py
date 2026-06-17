@@ -4,7 +4,7 @@ try:
 except ModuleNotFoundError:
     sys.path.insert(0, '../src')
 
-from pyslice import Loader,gridFromTrajectory,Potential,MultisliceCalculator,HAADFData
+from pyslice import Loader,grid_from_trajectory,Potential,MultisliceCalculator,HAADFData
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -16,7 +16,7 @@ trajectory = trajectory.generate_random_displacements(n_displacements=20,sigma=.
 
 positions = trajectory.positions[0]
 atom_types=trajectory.atom_types
-xs,ys,zs,lx,ly,lz=gridFromTrajectory(trajectory,sampling=0.1,slice_thickness=0.5)
+xs,ys,zs,lx,ly,lz=grid_from_trajectory(trajectory,sampling=0.1,slice_thickness=0.5)
 potential = Potential(xs, ys, zs, positions, atom_types, kind="kirkland")
 potential.plot("outputs/figs/17_potential.png")
 

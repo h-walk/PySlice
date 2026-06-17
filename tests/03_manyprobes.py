@@ -4,7 +4,7 @@ try:
 except ModuleNotFoundError:
     sys.path.insert(0, '../src')
 
-from pyslice import Loader,Probe,Propagate,create_batched_probes,gridFromTrajectory,Potential,differ
+from pyslice import Loader,Probe,Propagate,create_batched_probes,grid_from_trajectory,Potential,differ
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -17,7 +17,7 @@ a,b=2.4907733333333337,2.1570729817355123
 # LOAD MD OUTPUT
 trajectory=Loader(dump,timestep=dt,atom_mapping=types).load()
 trajectory=trajectory.slice_positions([0,10*a],[0,10*b])
-xs,ys,zs,lx,ly,lz=gridFromTrajectory(trajectory,sampling=0.1,slice_thickness=0.5)
+xs,ys,zs,lx,ly,lz=grid_from_trajectory(trajectory,sampling=0.1,slice_thickness=0.5)
 
 # GENERATE PROBE (ENSURE 00_PROBE.PY PASSES BEFORE RUNNING)
 #probe=Probe(xs,ys,mrad=30,eV=100e3)

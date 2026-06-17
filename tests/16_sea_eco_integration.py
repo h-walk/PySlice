@@ -484,11 +484,11 @@ def test_tacawdata_sea_roundtrip(tacaw):
 
     from pathlib import Path
     from pyslice.postprocessing.tacaw_data import TACAWData
-    from pyslice.backend import to_cpu
+    from pyslice.backend import to_numpy
 
     # Store original values
-    original_array = to_cpu(tacaw._array)
-    original_freqs = to_cpu(tacaw.frequencies)
+    original_array = to_numpy(tacaw._array)
+    original_freqs = to_numpy(tacaw.frequencies)
     original_positions = list(tacaw.probe_positions)
     original_cache_dir = tacaw.cache_dir
 
@@ -539,12 +539,12 @@ def test_wfdata_sea_roundtrip(wf_data):
 
     from pathlib import Path
     from pyslice.postprocessing.wf_data import WFData
-    from pyslice.backend import to_cpu
+    from pyslice.backend import to_numpy
 
     # Store original values
-    original_array = to_cpu(wf_data._array)
+    original_array = to_numpy(wf_data._array)
     original_positions = list(wf_data.probe_positions)
-    original_kxs = to_cpu(wf_data.kxs)
+    original_kxs = to_numpy(wf_data.kxs)
 
     # Save using to_sea
     output_path = 'outputs/test_wf_serial.sea'
@@ -581,10 +581,10 @@ def test_haadfdata_sea_roundtrip(haadf):
 
     from pathlib import Path
     from pyslice.postprocessing.haadf_data import HAADFData
-    from pyslice.backend import to_cpu
+    from pyslice.backend import to_numpy
 
     # Store original values
-    original_array = to_cpu(haadf._array)
+    original_array = to_numpy(haadf._array)
     original_positions = list(haadf.probe_positions)
 
     # Save using to_sea

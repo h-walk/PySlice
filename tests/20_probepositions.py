@@ -4,7 +4,7 @@ try:
 except ModuleNotFoundError:
     sys.path.insert(0, '../src')
 
-from pyslice import Loader,MultisliceCalculator,HAADFData,differ,gridFromTrajectory,Potential
+from pyslice import Loader,MultisliceCalculator,HAADFData,differ,grid_from_trajectory,Potential
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -28,13 +28,13 @@ distances = np.sqrt(np.sum((dxyz)**2,axis=1))
 i = np.argmin(distances) # which atom is closest to a,b?
 trajectory.atom_types[i] = 28
 # PREVIEW IT:
-xs,ys,zs,lx,ly,lz=gridFromTrajectory(trajectory,sampling=0.1,slice_thickness=0.5)
+xs,ys,zs,lx,ly,lz=grid_from_trajectory(trajectory,sampling=0.1,slice_thickness=0.5)
 potential = Potential(xs, ys, zs, trajectory.positions[0], trajectory.atom_types, kind="kirkland")
 potential.plot()
 # TRIM TO 10x10 UC
 trajectory=trajectory.slice_positions([0,10*a],[0,10*b])
 # CHECK AGAIN, POST-CROP
-xs,ys,zs,lx,ly,lz=gridFromTrajectory(trajectory,sampling=0.1,slice_thickness=0.5)
+xs,ys,zs,lx,ly,lz=grid_from_trajectory(trajectory,sampling=0.1,slice_thickness=0.5)
 potential = Potential(xs, ys, zs, trajectory.positions[0], trajectory.atom_types, kind="kirkland")
 potential.plot()
 # CREATE CALCULATOR OBJECT
