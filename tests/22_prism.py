@@ -33,10 +33,10 @@ trajectory=trajectory.get_random_timesteps(2,seed=5)
 calculator=MultisliceCalculator()
 # SET UP GRID OF HAADF SCAN POINTS
 #xy=probe_grid([a,3*a],[b,3*b],14,16)
-#calculator.setup(trajectory,aperture=30,voltage_eV=100e3,sampling=.1,slice_thickness=.5,probe_positions=xy,cache_levels=[])
+#calculator.setup(trajectory,aperture=30,voltage_eV=100e3,sampling=.1,slice_thickness=.5,probe_positions=xy,cache=False)
 lx,ly,lz=np.diag(trajectory.box_matrix)
 probe_xs = np.linspace(0,lx,1024) ; probe_ys = np.linspace(0,ly,1024)
-calculator.setup(trajectory,aperture=30,voltage_eV=100e3,sampling=.1,slice_thickness=.5,probe_xs=probe_xs,probe_ys=probe_ys,prism=50,loop_probes=7,use_memmap=False,kth=10,ADF=True,cache_levels=[],store_full=False)
+calculator.setup(trajectory,aperture=30,voltage_eV=100e3,sampling=.1,slice_thickness=.5,probe_xs=probe_xs,probe_ys=probe_ys,prism=50,loop_probes=7,use_memmap=False,kth=10,ADF=True,cache=False,keep_wavefunctions=False)
 # RUN MULTISLICE
 exitwaves,haadf = calculator.run()
 #exitwaves.plot_realspace(whichProbe=500)

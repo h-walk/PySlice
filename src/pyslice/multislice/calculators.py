@@ -111,30 +111,33 @@ class MultisliceCalculator:
         param_str = str(sorted(params.items()))
         return hashlib.md5(param_str.encode()).hexdigest()[:12]
 
-    def _resolve_active_layers(self):
-        if "slices" not in self.cache_levels:
-            return [0]
+    def _resolve_output_layers(self):
+        if self.output == "exit":
+            return [self.nz - 1]
 
-        if self.cache_layer_indices is None:
+        if self.output != "slices":
+            raise ValueError("output must be either 'exit' or 'slices'")
+
+        if self.output_slice_indices is None:
             return list(range(self.nz))
 
-        active_layers = sorted(set(int(i) for i in self.cache_layer_indices))
-        invalid_layers = [i for i in active_layers if i < 0 or i >= self.nz]
+        output_layers = sorted(set(int(i) for i in self.output_slice_indices))
+        invalid_layers = [i for i in output_layers if i < 0 or i >= self.nz]
         if invalid_layers:
             raise ValueError(
-                f"cache_layer_indices contains out-of-range layers {invalid_layers}; "
+                f"output_slice_indices contains out-of-range layers {invalid_layers}; "
                 f"valid range is [0, {self.nz - 1}]"
             )
-        if not active_layers:
-            raise ValueError("cache_layer_indices must contain at least one layer index")
-        return active_layers
+        if not output_layers:
+            raise ValueError("output_slice_indices must contain at least one layer index")
+        return output_layers
 
-    def _cache_key_layers(self, active_layers):
-        if "slices" not in self.cache_levels:
+    def _cache_key_output_layers(self, output_layers):
+        if self.output != "slices":
             return None
-        if list(active_layers) == list(range(self.nz)):
+        if list(output_layers) == list(range(self.nz)):
             return None
-        return tuple(active_layers)
+        return tuple(output_layers)
     
     def setup(
         self,
@@ -151,8 +154,10 @@ class MultisliceCalculator:
         save_path: Optional[Path] = None,
         cleanup_temp_files: bool = False,
         slice_axis: int = 2,
-        cache_levels: list = ["exitwaves"], # options include: exitwaves, slices, potentials (this replaces store_all_slices)
-        cache_layer_indices: Optional[List[int]] = None,
+        output: str = "exit",
+        output_slice_indices: Optional[List[int]] = None,
+        cache: bool = True,
+        cache_potentials: bool = False,
         max_kx = np.inf,
         max_ky = np.inf,
         use_memmap = False,
@@ -161,8 +166,9 @@ class MultisliceCalculator:
         prism = False,
         kth=1,
         ADF=False,
-        store_full=True,
-        skip_vacuum=False
+        keep_wavefunctions=True,
+        skip_vacuum=False,
+        **kwargs,
     ):
         """
         Set up multislice simulation using PyTorch acceleration.
@@ -178,13 +184,42 @@ class MultisliceCalculator:
             batch_size: Number of frames to process at once
             save_path: Optional path to save wave function data
             cleanup_temp_files: Whether to delete temp files after loading
-            store_all_slices: If True, store wavefunction at each slice for 3D visualization
-            cache_layer_indices: Optional list of 0-based slice-layer indices to record when
-                cache_levels includes "slices". If None (default), all nz layers are stored.
+            output: "exit" returns only exit waves; "slices" returns intermediate slice waves
+            output_slice_indices: Optional list of 0-based slice-layer indices to return when
+                output="slices". If None (default), all nz layers are returned.
                 Specifying a small subset (e.g. the 6 depths needed for EELS thickness series)
                 can reduce disk usage by >98% without affecting propagation accuracy.
-                Example: cache_layer_indices=[43, 87, 175, 263, 351, 439]
+                Example: output_slice_indices=[43, 87, 175, 263, 351, 439]
+            cache: Whether to read/write per-frame wavefunction cache files
+            cache_potentials: Whether to read/write potential-slice cache data
+            keep_wavefunctions: Whether to materialize wavefunction diffraction data in WFData.
+                Set False for HAADF-only runs that only need the detector image.
         """
+        if kwargs:
+            old_api_kwargs = {"cache_levels", "cache_layer_indices", "store_full"}
+            old_kwargs_used = sorted(old_api_kwargs.intersection(kwargs))
+            if old_kwargs_used:
+                raise TypeError(
+                    "MultisliceCalculator.setup() cache/output API has changed. "
+                    f"Unsupported old argument(s): {', '.join(old_kwargs_used)}.\n"
+                    "Use output='exit' for exit waves, or output='slices' with "
+                    "output_slice_indices=[...] for selected slice wavefunctions.\n"
+                    "Use cache=True/False for wavefunction frame caching, "
+                    "cache_potentials=True/False for potential-slice caching, and "
+                    "keep_wavefunctions=False for HAADF-only runs that do not need raw "
+                    "wavefunctions.\n"
+                    "Old arguments were not applied."
+                )
+            unexpected = next(iter(kwargs))
+            raise TypeError(
+                "MultisliceCalculator.setup() got an unexpected keyword argument "
+                f"'{unexpected}'"
+            )
+
+        if output not in {"exit", "slices"}:
+            raise ValueError("output must be either 'exit' or 'slices'")
+        if output != "slices" and output_slice_indices is not None:
+            raise ValueError("output_slice_indices can only be used when output='slices'")
 
         self.trajectory = trajectory
         self.aperture = aperture
@@ -198,8 +233,10 @@ class MultisliceCalculator:
         self.save_path = save_path
         self.cleanup_temp_files = cleanup_temp_files
         self.slice_axis = slice_axis
-        self.cache_levels = cache_levels
-        self.cache_layer_indices = cache_layer_indices
+        self.output = output
+        self.output_slice_indices = output_slice_indices
+        self.cache = cache
+        self.cache_potentials = cache_potentials
         self.max_kx = max_kx
         self.max_ky = max_ky
         self.use_memmap = use_memmap   # bool: frame_data (p,x,y,l,1) and wavefunction_data (p,t,x,y,l) will be memmapped instead of held in RAM
@@ -208,7 +245,7 @@ class MultisliceCalculator:
         self.prism = prism             # False or int: PRISM algorithm implementation, this denotes how many fourier components are used in kx ky
         self.kth = kth                 # int: Δk=1/L, nk = nx. huge systems waste RAM with ultra-fine Δk. this sparsifies the exitwaves via ::kth
         self.ADF = ADF                 # bool or (inner,outer): allows on-the-fly calculation of the ADF signal
-        self.store_full = store_full   # bool: if ADF=True and prism=False, this skips storing of the full [t],x,y,kx,ky 5D exit data
+        self.keep_wavefunctions = keep_wavefunctions # bool: if False, skip storing the full [t],x,y,kx,ky 5D exit data
         self.skip_vacuum = skip_vacuum # bool: if True, we skip propagation of probes in locations where there are no atoms
 
         # Set up spatial grids
@@ -218,7 +255,7 @@ class MultisliceCalculator:
         self.lx = lx ; self.ly = ly ; self.lz = lz
         self.nx = nx ; self.ny = ny ; self.nz = nz
         self.dx = xs[1]-xs[0] ; self.dy = ys[1]-ys[0] ; self.dy = ys[1]-ys[0]
-        self._active_layers = self._resolve_active_layers()
+        self._output_layers = self._resolve_output_layers()
 
         self.probe_cropping = 0
         if self.min_dk > 0: # dk = 1/L = 1/(nx*sampling)
@@ -285,7 +322,7 @@ class MultisliceCalculator:
                                            self.slice_thickness, self.sampling, self.probe_positions,
                                            self.base_probe.spatial_decoherence, self.base_probe.temporal_decoherence,
                                            self.base_probe._array,
-                                           self._cache_key_layers(self._active_layers))
+                                           self._cache_key_output_layers(self._output_layers))
         #print(cache_key)
         self.output_dir = Path("psi_data/" + ("torch" if TORCH_AVAILABLE else "numpy") + "_"+self.cache_key)
         #self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -319,13 +356,13 @@ class MultisliceCalculator:
 
         # cache key is calculated TWICE: once during setup (so the user only needs to setup to infer where their cache folder will go), and again during run (just in case the user does something funky)
         # Generate cache key and setup output directory
-        _active_layers = self._resolve_active_layers()
-        self._active_layers = _active_layers
+        _output_layers = self._resolve_output_layers()
+        self._output_layers = _output_layers
         cache_key = self._generate_cache_key(self.trajectory, self.aperture, self.voltage_eV,
                                            self.slice_thickness, self.sampling, self.probe_positions,
                                            self.base_probe.spatial_decoherence, self.base_probe.temporal_decoherence,
                                            self.base_probe._array,
-                                           self._cache_key_layers(_active_layers))
+                                           self._cache_key_output_layers(_output_layers))
         if self.cache_key != cache_key:
             self.cache_key = cache_key
         #print(cache_key)
@@ -353,8 +390,8 @@ class MultisliceCalculator:
         nc,npt,nx,ny = self.base_probe._array.shape
         self.n_probes = nc*len(self.probe_positions)
         # Storage: [probe, frame, x, y, layer] - matches WFData expected format
-        self.n_layers = len(_active_layers)
-        if self.store_full:
+        self.n_layers = len(_output_layers)
+        if self.keep_wavefunctions:
             fd_nx = self.nx ; fd_ny = self.ny ; fd_npt = self.n_probes
             #if self.base_probe.cropping:
             #    fd_nx = self.base_probe.cropping ; fd_ny = fd_nx
@@ -404,7 +441,7 @@ class MultisliceCalculator:
                 show_progress = (frame_idx == 0 and self.n_frames == 1 and not self.loop_probes)
 
                 # special case: no frames cached, but we clearly finished and got to tacaw. if so, don't bother regenerating
-                # this allows cache_levels = [] to be used for disk space savings
+                # this allows cache=False to be used for disk space savings
                 if os.path.exists( self.output_dir / f"tacaw.npy" ) and not os.path.exists( cache_file ):
                     pbar.update(1)
                     continue
@@ -421,7 +458,7 @@ class MultisliceCalculator:
                 # frame_data should always be shaped: n_probes,nkx,nky,n_layers,1 (idk why there's a trailing 1)
                 cache_exists,frame_data = checkCache(
                     cache_file,
-                    self.cache_levels,
+                    self.cache,
                     expected_n_layers=self.n_layers,
                 )
                 if cache_exists and not self.prism and self.ADF:
@@ -440,7 +477,7 @@ class MultisliceCalculator:
                     frames_cached += 1
                 else:
                     #print("create potential") ; start = time.time()
-                    potential = Potential(self.xs, self.ys, self.zs, positions, atom_type_names, kind="kirkland", device=self.device, slice_axis=self.slice_axis, progress=show_progress, cache_dir=cache_file.parent if "potentials" in self.cache_levels else None, frame_idx = frame_idx)
+                    potential = Potential(self.xs, self.ys, self.zs, positions, atom_type_names, kind="kirkland", device=self.device, slice_axis=self.slice_axis, progress=show_progress, cache_dir=cache_file.parent if self.cache_potentials else None, frame_idx = frame_idx)
                     #print("(done)",time.time()-start)
                     #n_probes = nc*npt
                     nc,npt,nx,ny = self.base_probe._array.shape ; npt = len(self.base_probe.probe_positions)
@@ -452,7 +489,7 @@ class MultisliceCalculator:
 
                     #print("create frame_data") ; start = time.time()
                     # frame_data is always: p,x,y,l,1 (self.wavefunction_data expects p,t,x,y,l, since we loop time. recall Propagate gave l,p,x,y)
-                    if self.store_full or self.prism:
+                    if self.keep_wavefunctions or self.prism:
                         fd_nx = self.nx ; fd_ny = self.ny ; fd_npt = self.n_probes
                         #if self.base_probe.cropping:
                         #    fd_nx = self.base_probe.cropping ; fd_ny = fd_nx # ceil(/self.kth) ;
@@ -491,8 +528,8 @@ class MultisliceCalculator:
                         #print("propagate") ; start = time.time()
                         exit_waves_single = Propagate(
                             probe, potential, self.device, progress=show_progress, onthefly=True,
-                            store_all_slices=("slices" in self.cache_levels),
-                            stored_slice_indices=_active_layers if "slices" in self.cache_levels else None,
+                            store_all_slices=(self.output == "slices"),
+                            stored_slice_indices=_output_layers if self.output == "slices" else None,
                         ) # [l],p,x,y indices
                         #print("(done)",time.time()-start)
 
@@ -501,7 +538,7 @@ class MultisliceCalculator:
                         # FFT and load into frame_data
                         kwarg = {"dim":(-2,-1)} if TORCH_AVAILABLE else {"axes":(-2,-1)}
 
-                        for out_idx, _ in enumerate(_active_layers):
+                        for out_idx, _ in enumerate(_output_layers):
                             exit_waves_k = xp.fft.fft2(exit_waves_single[out_idx,:,:,:], **kwarg) # l,p,x,y --> p,x,y
                             diffraction_patterns = xp.fft.fftshift(exit_waves_k, **kwarg)
                             #if not self.prism:
@@ -509,7 +546,7 @@ class MultisliceCalculator:
                             if self.use_memmap:
                                 diffraction_patterns = to_cpu(diffraction_patterns)
                                 selected = to_cpu(selected)
-                            if self.store_full or self.prism:
+                            if self.keep_wavefunctions or self.prism:
                                 frame_data[selected,:,:,out_idx,0] = diffraction_patterns # load p,x,y --> p,x,y,l,1 indices
                             if self.ADF and not self.prism:
                                 #print(self.ADF._wf_array[0,:,:,0,0,0,0])
@@ -520,7 +557,7 @@ class MultisliceCalculator:
                             pbar2.update(len(selected))
 #                    else:
 #                        # simultaneously propagate all probes at once, [l],p,x,y
-#                        exit_waves_batch = Propagate(self.base_probe, potential, self.device, progress=show_progress, onthefly=True, store_all_slices = ("slices" in self.cache_levels) )
+#                        exit_waves_batch = Propagate(self.base_probe, potential, self.device, progress=show_progress, onthefly=True, store_all_slices = (self.output == "slices") )
 #                        # expand out to fixed l,p,x,y indices
 #                        exit_waves_batch = expand_dims(exit_waves_batch,0) if len(exit_waves_batch.shape)==3 else exit_waves_batch
 #                        # FFT and load into frame_data
@@ -533,7 +570,7 @@ class MultisliceCalculator:
 #                            diffraction_patterns = diffraction_patterns[:,self.keep_kxs_indices,:][:,:,self.keep_kys_indices]*self.kth**2
 #                            if self.use_memmap:
 #                                diffraction_patterns = to_cpu(diffraction_patterns)
-#                            if self.store_full or self.prism:
+#                            if self.keep_wavefunctions or self.prism:
 #                                frame_data[:,:,:,layer_idx,0] = diffraction_patterns # load p,x,y --> p,x,y,l,1 indices
 #                            if self.ADF and not self.prism:
 #                                intensities = einsum('pxy,xy->p',absolute(diffraction_patterns)**2,self.ADFmask)
@@ -544,14 +581,14 @@ class MultisliceCalculator:
 #                                #self.ADF._array = einsum('pxyln,'frame_data
 
 
-                    if not self.use_memmap and ( "exitwaves" in self.cache_levels or "slices" in self.cache_levels ) and (self.store_full or self.prism):
+                    if not self.use_memmap and self.cache and (self.keep_wavefunctions or self.prism):
                         # Convert to CPU numpy array for saving
                         frame_data_cpu = to_cpu(frame_data)
                         np.save(cache_file, frame_data_cpu)
                     frames_computed += 1
 
                 #print(frame_data.shape,self.wavefunction_data.shape)
-                if self.store_full or self.prism:
+                if self.keep_wavefunctions or self.prism:
                     cropped = frame_data[:,:,:,:,0]
                 #print(cropped.shape)
                 #if self.use_memmap:
@@ -562,10 +599,10 @@ class MultisliceCalculator:
                     kwarg ={}
                     if self.ADF:
                         kwarg["ADF"]=(self.ADF,self.ADFmask,self.ADFindex)
-                    if self.store_full:
+                    if self.keep_wavefunctions:
                         kwarg["load_into"]=self.wavefunction_data[:,frame_idx,:,:,0]
                     self.base_probe.calculateProbesFromS(frame_data,self.probe_positions,**kwarg,chunksize=self.loop_probes)
-                elif self.store_full:
+                elif self.keep_wavefunctions:
                     if self.use_memmap:
                         cropped = to_cpu(cropped)
                     self.wavefunction_data[:, frame_idx, :, :, :] = cropped # load p,x,y,l,1 --> p,t,x,y,l indices
@@ -598,11 +635,11 @@ class MultisliceCalculator:
         #kys = xp.fft.fftshift(xp.fft.fftfreq(self.ny, self.sampling))  # k-space in 1/Å
         time_array = np.arange(self.n_frames) * self.trajectory.timestep  # Time array in ps
 
-        layer_array = np.array(_active_layers) if "slices" in self.cache_levels else np.array([0])  # Layer indices
+        layer_array = np.array(_output_layers)  # Layer indices
         
         # Package results
         array = zeros((self.n_probes,1,1,1,1), dtype=self.complex_dtype, device=self.device)
-        if self.store_full:
+        if self.keep_wavefunctions:
             array = self.wavefunction_data
         #print(array.shape,self.kxs.shape,self.kys.shape)
         wf_data = WFData(
@@ -643,9 +680,9 @@ class MultisliceCalculator:
         return wf_data
 
 logging_tracker=[]
-def checkCache(cache_file,cache_levels,expected_n_layers=None):
+def checkCache(cache_file,cache,expected_n_layers=None):
     global logging_tracker
-    if cache_file.exists() and ( "exitwaves" in cache_levels or "slices" in cache_levels ):
+    if cache and cache_file.exists():
         frame_data = np.load(cache_file)
         if expected_n_layers is not None and frame_data.shape[-2] != expected_n_layers:
             logging.warning(
