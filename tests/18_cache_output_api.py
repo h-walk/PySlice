@@ -88,6 +88,64 @@ def test_selected_return_layers_participate_in_cache_key():
     assert no_return.cache_key == exit_wave.cache_key
 
 
+def test_setup_defocus_applies_probe_defocus_and_partitions_cache():
+    traj = _make_tiny_trajectory()
+
+    from_setup = MultisliceCalculator(force_cpu=True)
+    from_setup.setup(
+        traj,
+        aperture=20,
+        voltage_eV=100e3,
+        sampling=0.5,
+        slice_thickness=1.0,
+        probe_positions=[(2.0, 2.0)],
+        defocus=250.0,
+    )
+
+    manual = MultisliceCalculator(force_cpu=True)
+    manual.setup(
+        traj,
+        aperture=20,
+        voltage_eV=100e3,
+        sampling=0.5,
+        slice_thickness=1.0,
+        probe_positions=[(2.0, 2.0)],
+    )
+    manual.base_probe.defocus(250.0)
+
+    focused = MultisliceCalculator(force_cpu=True)
+    focused.setup(
+        traj,
+        aperture=20,
+        voltage_eV=100e3,
+        sampling=0.5,
+        slice_thickness=1.0,
+        probe_positions=[(2.0, 2.0)],
+    )
+
+    np.testing.assert_allclose(
+        to_numpy(from_setup.base_probe._array),
+        to_numpy(manual.base_probe._array),
+    )
+    assert from_setup.cache_key != focused.cache_key
+
+
+def test_setup_defocus_rejects_prism_path():
+    calc = MultisliceCalculator(force_cpu=True)
+
+    with pytest.raises(NotImplementedError, match="PRISM defocus"):
+        calc.setup(
+            _make_tiny_trajectory(),
+            aperture=20,
+            voltage_eV=100e3,
+            sampling=0.5,
+            slice_thickness=1.0,
+            probe_positions=[(2.0, 2.0)],
+            prism=2,
+            defocus=250.0,
+        )
+
+
 def test_cached_files_with_mismatched_layer_counts_are_ignored(tmp_path):
     cache_file = tmp_path / "frame_0.npy"
     np.save(cache_file, np.zeros((1, 2, 2, 3, 1), dtype=np.complex128))

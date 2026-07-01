@@ -156,7 +156,7 @@ class MultisliceCalculator:
             trajectory: Input trajectory data
             aperture: Objective aperture semi-angle in mrad
             voltage_eV: Accelerating voltage in eV
-            defocus: Defocus in Angstroms (not implemented yet)
+            defocus: Defocus in Angstroms applied to the probe before propagation
             slice_thickness: Thickness of each slice in Angstroms
             sampling: Sampling rate in Angstroms per pixel
             probe_positions: List of (x,y) probe positions in Angstroms
@@ -279,6 +279,19 @@ class MultisliceCalculator:
             # OR, we'll propagate our series of real-space probes.
             # need to make sure they're on the correct device, and defer_shifts=True means the calculator controls when to expand the probe cube (see loop_probes)
             self.base_probe = Probe(xs, ys, self.aperture, self.voltage_eV, backend=b, probe_xs=self.probe_xs, probe_ys=self.probe_ys, probe_positions=self.probe_positions, cropping=self.probe_cropping, defer_shifts=True)
+
+        defocus_values = to_numpy(self.defocus)
+        if np.ndim(defocus_values) != 0:
+            raise TypeError("MultisliceCalculator.setup(defocus=...) expects a scalar Angstrom value.")
+
+        defocus_value = float(defocus_values)
+        if defocus_value != 0:
+            if self.prism:
+                raise NotImplementedError(
+                    "setup(defocus=...) is only wired for the real-space Probe path; "
+                    "PRISM defocus needs an explicit reconstruction-path implementation."
+                )
+            self.base_probe.defocus(defocus_value)
 
         if not self.loop_probes:
             self.base_probe.applyShifts()
