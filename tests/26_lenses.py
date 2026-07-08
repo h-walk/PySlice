@@ -31,10 +31,17 @@ calculator.setup(trajectory,aperture=5,voltage_eV=100e3)
 
 exitwaves = calculator.run()
 
+exitwaves.recenter()
+exitwaves.plot_realspace(filename="outputs/figs/26_lenses_0_orig.png")
+exitwaves.pad_real_space(100,100)
+exitwaves.plot_realspace(filename="outputs/figs/26_lenses_1_pad.png")
+
 #exitwaves.plot_reciprocal(powerscaling=0.125)
 
 exitwaves.propagate_free_space(1000)
+exitwaves.plot_realspace(filename="outputs/figs/26_lenses_2_100nm.png")
 exitwaves.propagate_through_lens(1000)
-for n in range(20):
-    exitwaves.propagate_free_space(200)
-    exitwaves.plot_realspace()
+for n in range(30):
+    exitwaves.propagate_free_space(50)
+    exitwaves.plot_realspace(filename="outputs/figs/26_lenses_"+str(n+3)+"_"+str(100+5*(n+1))+"nm.png")
+

@@ -267,7 +267,7 @@ class WFData(PySliceSerial, Signal):
         plt.close(fig)
 
     def plot_realspace(self, whichProbe="mean", whichTimestep="mean",
-                       extent=None, filename=None):
+                       extent=None, filename=None,powerscaling=0.25):
         import matplotlib.pyplot as plt
 
         b = self._backend
@@ -287,7 +287,7 @@ class WFData(PySliceSerial, Signal):
         if extent is None:
             extent = (xs_np.min(), xs_np.max(), ys_np.min(), ys_np.max())
 
-        img = to_numpy(b.absolute(array) ** 0.25).T
+        img = to_numpy(b.absolute(array) ** powerscaling).T
         fig, ax = plt.subplots()
         ax.imshow(img, cmap="inferno", extent=extent)
         if filename:
@@ -300,10 +300,32 @@ class WFData(PySliceSerial, Signal):
     # Post-processing
     # ------------------------------------------------------------------
 
+    def recenter(self):
+        b = self._backend
+        self._xs -= b.mean(self._xs)
+        self._ys -= b.mean(self._ys)
+    def pad_real_space(self,add_x=0,add_y=0):
+        b = self._backend
+        dx = self._xs[1]-self._xs[0] ; dy = self._ys[1]-self._ys[0]
+        pix_x = int(round(add_x/dx)) ; pix_y = int(round(add_y/dy))
+        npt, nt, nx, ny, nl = self._array.shape
+        array = b.ifft2(self._array,axes=(-3,-2)) # npt, nt, nx, ny, nl indices. iFFT x,y
+        new = b.zeros((npt, nt, nx+pix_x*2, ny+pix_y*2, nl), type_match = self._array)
+        i1=pix_x ; i2=pix_x+nx ; j1=pix_y ; j2=pix_y+ny
+        new[:,:,i1:i2,j1:j2,:] += array
+        self._array = b.fft2(new,axes=(-3,-2))
+        # xs=[0,1,2,3,4], dx=1, add 3. new should be -3,-2,-1,0,1,2,3,4,5,6,7. from x[0]-N*dx, to x[-1]+N*dx, and length len(xs)+2*N
+        self._xs = b.linspace( self._xs[0]-dx*pix_x , self._xs[-1]+dx*pix_x , nx+pix_x*2 )
+        self._ys = b.linspace( self._ys[0]-dy*pix_y , self._ys[-1]+dy*pix_y , ny+pix_y*2 )
+        self._kxs = b.fftshift(b.fftfreq(nx+pix_x*2, dx))  # k-space in 1/Å
+        self._kys = b.fftshift(b.fftfreq(ny+pix_y*2, dy))  # k-space in 1/Å
+
+
     def propagate_through_lens(self,f):
         b = self._backend
         array = b.ifft2(self._array[:, :, :, :, -1])
-        xs = b.asarray(self._xs)-self.probe_positions[-1][0] ; ys = b.asarray(self._ys)-self.probe_positions[-1][1]
+        xs = b.asarray(self._xs)#-self.probe_positions[-1][0]
+        ys = b.asarray(self._ys)#-self.probe_positions[-1][1]
         x_grid, y_grid = b.meshgrid(xs,ys, indexing='ij')
         k = 2*b.pi / self.probe.wavelength
         L = b.exp(-1j * k / 2 / f * ( x_grid ** 2 + y_grid ** 2 ) )
