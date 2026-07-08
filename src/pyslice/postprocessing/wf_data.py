@@ -300,6 +300,16 @@ class WFData(PySliceSerial, Signal):
     # Post-processing
     # ------------------------------------------------------------------
 
+    def propagate_through_lens(self,f):
+        b = self._backend
+        array = b.ifft2(self._array[:, :, :, :, -1])
+        xs = b.asarray(self._xs)-self.probe_positions[-1][0] ; ys = b.asarray(self._ys)-self.probe_positions[-1][1]
+        x_grid, y_grid = b.meshgrid(xs,ys, indexing='ij')
+        k = 2*b.pi / self.probe.wavelength
+        L = b.exp(-1j * k / 2 / f * ( x_grid ** 2 + y_grid ** 2 ) )
+        array = L[None,None,:,:] * array
+        self._array[:,:,:,:,-1] = b.fft2(array)
+
     def propagate_free_space(self, dz: float):
         b = self._backend
         kx_grid, ky_grid = b.meshgrid(self._kxs, self._kys, indexing='ij')

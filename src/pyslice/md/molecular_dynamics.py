@@ -18,7 +18,7 @@ from ase.md.langevin import Langevin
 from ase.md.nvtberendsen import NVTBerendsen
 from ase.md.npt import NPT
 from ase.optimize import BFGS, FIRE, LBFGS
-from ase.filters import FrechetCellFilter
+#from ase.filters import FrechetCellFilter   # TWP20260708: appears to be missing in some versions of ASE. moving import to where it's used. '
 from ase import units
 from ase.io import write, Trajectory as ASETrajectory
 from ase import Atoms
@@ -209,6 +209,7 @@ class MDCalculator:
         Returns:
             The same ASE Atoms object, after relaxation.
         """
+        from ase.filters import FrechetCellFilter
         self._ensure_calculator()
         atoms.calc = self.calculator
 
