@@ -3,6 +3,8 @@ import pytest
 
 from pyslice.backend import NumpyBackend
 from pyslice.multislice.multislice import Probe
+from pyslice.optics.column import OpticalColumn
+from pyslice.optics.elements import BeamTilt, FreeSpace, Lens
 from pyslice.postprocessing.haadf_data import HAADFData
 from pyslice.postprocessing.tacaw_data import TACAWData
 from pyslice.postprocessing.wf_data import WFData
@@ -57,6 +59,20 @@ def test_wfdata_uses_real_sea_eco_signal(tmp_path):
     assert "WFData.__init__" in _record_operations(wf)
 
 
+def test_wfdata_from_probe_keeps_optical_api_and_signal_contract():
+    wf = WFData.from_probe(
+        extent_A=8.0,
+        sampling=1.0,
+        voltage_eV=100e3,
+        aperture=10.0,
+    )
+
+    assert isinstance(wf, pysea_base.Signal)
+    assert wf.array.shape == (1, 1, 8, 8, 1)
+    assert wf.dimensions.get_names() == ["probe", "time", "kx", "ky", "layer"]
+    assert "WFData.__init__" in _record_operations(wf)
+
+
 def test_wfdata_sea_roundtrip_preserves_signal_and_provenance(tmp_path):
     wf = _make_wf_data(tmp_path)
     path = tmp_path / "wavefunction.sea"
@@ -78,6 +94,27 @@ def test_wfdata_records_in_place_processing(tmp_path):
 
     assert "WFData.applyMask" in _record_operations(wf)
     assert hasattr(wf.metadata, "Processing")
+
+
+def test_optical_column_records_each_user_level_wave_operation():
+    wf = WFData.from_probe(
+        extent_A=16.0,
+        sampling=1.0,
+        voltage_eV=100e3,
+        aperture=2.0,
+    )
+    column = OpticalColumn([
+        FreeSpace(2.0),
+        Lens(1000.0),
+        BeamTilt(0.1e-3, -0.1e-3),
+    ])
+
+    column.apply(wf)
+
+    operations = _record_operations(wf)
+    assert operations.count("WFData.propagate_free_space") == 1
+    assert operations.count("WFData.propagate_through_lens") == 1
+    assert operations.count("WFData.apply_beam_tilt") == 1
 
 
 def test_tacawdata_records_wfdata_parent(tmp_path):

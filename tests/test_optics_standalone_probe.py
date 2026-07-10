@@ -7,6 +7,7 @@ import pytest
 
 from pyslice import simulate_raytem_wave
 from pyslice.backend import NumpyBackend, TORCH_AVAILABLE, TorchBackend
+from pyslice.data import Dimension, Dimensions, Metadata, SEA_ECO_AVAILABLE
 from pyslice.optics.column import OpticalColumn
 from pyslice.optics.elements import (
     Aperture,
@@ -363,11 +364,18 @@ def test_recorded_planes_own_independent_dimensions_and_metadata():
         voltage_eV=100e3,
         backend=NumpyBackend(),
     )
-    wave.dimensions = {
-        "kx": SimpleNamespace(values=wave.kxs.copy()),
-        "ky": SimpleNamespace(values=wave.kys.copy()),
-    }
-    wave.metadata = {"nested": {"label": "source"}}
+    if SEA_ECO_AVAILABLE:
+        wave.dimensions = Dimensions([
+            Dimension(name="kx", space="scattering", units="Å⁻¹", values=wave.kxs.copy()),
+            Dimension(name="ky", space="scattering", units="Å⁻¹", values=wave.kys.copy()),
+        ], det_dimensions=[0, 1])
+        wave.metadata = Metadata({"nested": {"label": "source"}})
+    else:
+        wave.dimensions = {
+            "kx": SimpleNamespace(values=wave.kxs.copy()),
+            "ky": SimpleNamespace(values=wave.kys.copy()),
+        }
+        wave.metadata = {"nested": {"label": "source"}}
 
     propagation = OpticalColumn([FreeSpace(1.0)]).propagate(wave, record=True)
     source = propagation.planes[0].wave
@@ -376,8 +384,12 @@ def test_recorded_planes_own_independent_dimensions_and_metadata():
     assert source.dimensions is not propagated.dimensions
     propagated.dimensions["kx"].values = np.arange(20)
     assert len(source.dimensions["kx"].values) == 16
-    propagated.metadata["nested"]["label"] = "propagated"
-    assert source.metadata["nested"]["label"] == "source"
+    if SEA_ECO_AVAILABLE:
+        propagated.metadata.nested.label = "propagated"
+        assert source.metadata.nested.label == "source"
+    else:
+        propagated.metadata["nested"]["label"] = "propagated"
+        assert source.metadata["nested"]["label"] == "source"
 
 
 @pytest.mark.skipif(not TORCH_AVAILABLE, reason="Torch is optional")
