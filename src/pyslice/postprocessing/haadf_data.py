@@ -6,7 +6,15 @@ from typing import Optional, Tuple, Dict, Any, List, Union
 from pathlib import Path
 import logging
 from .wf_data import WFData
-from ..data.pyslice_serial import PySliceSerial, Signal, Dimensions, Dimension, Metadata
+from ..data.pyslice_serial import (
+    PySliceSerial,
+    Signal,
+    Dimensions,
+    Dimension,
+    Metadata,
+    record_pyslice_operation,
+    track_pyslice_action,
+)
 from pyslice.backend import Backend, to_numpy
 
 logger = logging.getLogger(__name__)
@@ -60,10 +68,10 @@ class HAADFData(PySliceSerial, Signal):
 
         if Dimensions is not None:
             # Build placeholder dimensions (will be updated after calculateADF)
-            self.dimensions = Dimensions([
+            dimensions = Dimensions([
                 Dimension(name='x', space='position', units='Å', values=np.array([0])),
                 Dimension(name='y', space='position', units='Å', values=np.array([0])),
-            ], nav_dimensions=[0, 1], sig_dimensions=[])
+            ], nav_dimensions=[0, 1], det_dimensions=[])
 
             # Build metadata
             metadata_dict = {
@@ -78,8 +86,28 @@ class HAADFData(PySliceSerial, Signal):
                     'probe_positions': [list(p) for p in self.probe_positions],
                 }
             }
-            self.metadata = Metadata(metadata_dict)
+            metadata = Metadata(metadata_dict)
+            Signal.__init__(
+                self,
+                data=None,
+                name='HAADF Image',
+                dimensions=dimensions,
+                signal_type='Image',
+                metadata=metadata,
+            )
             self.sea_type="Signal"
+            record_pyslice_operation(
+                self,
+                "HAADFData.from_wf_data",
+                inputs=[wf_data],
+                parameters={
+                    "n_probe_positions": len(self.probe_positions),
+                    "k_shape": (len(self._kxs), len(self._kys)),
+                    "image_shape": (len(self._xs), len(self._ys)),
+                    "cache_dir": None if self.cache_dir is None else str(self.cache_dir),
+                },
+                callable_obj=type(self).__init__,
+            )
 
     @property
     def data(self):
@@ -129,6 +157,7 @@ class HAADFData(PySliceSerial, Signal):
         mask[q >= radius_outer] = 0
         return mask
 
+    @track_pyslice_action
     def calculateADF(self, inner_mrad: float = 45, outer_mrad: float = 150, preview: bool = False) -> np.ndarray:
         """
         Calculate the ADF (Annular Dark Field) image.
@@ -168,7 +197,7 @@ class HAADFData(PySliceSerial, Signal):
             self._local_dimensions = Dimensions([
                 Dimension(name='x', space='position', units='Å', values=xs_np),
                 Dimension(name='y', space='position', units='Å', values=ys_np),
-            ], nav_dimensions=[0, 1], sig_dimensions=[])
+            ], nav_dimensions=[0, 1], det_dimensions=[])
 
             # Update metadata with detector settings
             #if hasattr(self.signal.metadata, 'Simulation'):

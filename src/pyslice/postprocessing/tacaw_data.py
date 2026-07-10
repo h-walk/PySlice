@@ -12,7 +12,15 @@ import numpy as np
 from tqdm import tqdm
 
 from .wf_data import WFData
-from ..data.pyslice_serial import PySliceSerial, Signal, Dimensions, Dimension, Metadata
+from ..data.pyslice_serial import (
+    PySliceSerial,
+    Signal,
+    Dimensions,
+    Dimension,
+    Metadata,
+    record_pyslice_operation,
+    track_pyslice_action,
+)
 from pyslice.backend import Backend, to_numpy
 
 logger = logging.getLogger(__name__)
@@ -89,7 +97,7 @@ class TACAWData(PySliceSerial, Signal):
             self.apply_bose_correction(self.temperature_K)
 
         if Dimensions is not None:
-            self.dimensions = Dimensions([
+            dimensions = Dimensions([
                 Dimension(name='probe',     space='position',
                           values=np.arange(len(self.probe_positions))),
                 Dimension(name='frequency', space='spectral', units='THz',
@@ -98,9 +106,9 @@ class TACAWData(PySliceSerial, Signal):
                           values=to_numpy(self._kxs)),
                 Dimension(name='ky',        space='scattering', units='Å⁻¹',
                           values=to_numpy(self._kys)),
-            ], nav_dimensions=[0, 1], sig_dimensions=[2, 3])
+            ], nav_dimensions=[0, 1], det_dimensions=[2, 3])
 
-            self.metadata = Metadata({
+            metadata = Metadata({
                 'General':    {'title': 'TACAW Intensity', 'signal_type': 'TACAW'},
                 'Simulation': {
                     'voltage_eV':    float(self.probe.eV),
@@ -111,7 +119,31 @@ class TACAWData(PySliceSerial, Signal):
                     'bose_corrected': bool(self.apply_bose),
                 },
             })
+            Signal.__init__(
+                self,
+                data=self._array,
+                name='TACAW Intensity',
+                dimensions=dimensions,
+                signal_type='2D-EELS',
+                metadata=metadata,
+            )
             self.sea_type = "Signal"
+            record_pyslice_operation(
+                self,
+                "TACAWData.from_wf_data",
+                inputs=[wf_data],
+                parameters={
+                    "array_shape": tuple(getattr(self._array, "shape", ())),
+                    "layer_index": layer_index,
+                    "keep_complex": bool(keep_complex),
+                    "chunkFFT": bool(chunkFFT),
+                    "chunk_size_time": chunk_size_time,
+                    "force_rerun": bool(force_rerun),
+                    "temperature_K": temperature_K,
+                    "apply_bose": bool(apply_bose),
+                },
+                callable_obj=type(self).__init__,
+            )
 
     # ------------------------------------------------------------------
     # Properties
@@ -148,6 +180,71 @@ class TACAWData(PySliceSerial, Signal):
     def array(self):
         return to_numpy(self._array) if self._array is not None else None
 
+    def _frequency_dimension(self):
+        return Dimension(
+            name='frequency',
+            space='spectral',
+            units='THz',
+            values=to_numpy(self._frequencies),
+        )
+
+    def _reciprocal_dimensions(self):
+        return [
+            Dimension(name='kx', space='scattering', units='Å⁻¹', values=to_numpy(self._kxs)),
+            Dimension(name='ky', space='scattering', units='Å⁻¹', values=to_numpy(self._kys)),
+        ]
+
+    def _real_space_dimensions(self):
+        return [
+            Dimension(name='x', space='position', units='Å', values=to_numpy(self._xs)),
+            Dimension(name='y', space='position', units='Å', values=to_numpy(self._ys)),
+        ]
+
+    @staticmethod
+    def _returns_analysis_signal(as_signal: Optional[bool]) -> bool:
+        return Dimensions is not None if as_signal is None else bool(as_signal)
+
+    def _analysis_signal(
+        self,
+        data,
+        *,
+        name: str,
+        dimensions,
+        signal_type: Optional[str],
+        operation: str,
+        parameters: Optional[dict] = None,
+    ):
+        if Dimensions is None:
+            raise ImportError("pySEA is required to return TACAW analysis as a Signal")
+
+        metadata = Metadata({
+            'General': {
+                'title': name,
+                'signal_type': signal_type or 'TACAW analysis',
+            },
+            'Source': {
+                'source_name': self.name,
+                'source_seaid': self.Provenance.seaid,
+                'operation': operation,
+            },
+        })
+        signal = Signal(
+            data=np.asarray(data),
+            name=name,
+            dimensions=Dimensions(dimensions),
+            signal_type=signal_type,
+            metadata=metadata,
+        )
+        record_pyslice_operation(
+            signal,
+            f"TACAWData.{operation}",
+            inputs=[self],
+            parameters=parameters or {},
+            callable_obj=getattr(type(self), operation, None),
+        )
+        return signal
+
+    @track_pyslice_action
     def apply_bose_correction(self, temperature_K: float):
         """Apply the detailed-balance Bose factor to an intensity TACAW array."""
         if temperature_K is None:
@@ -252,29 +349,54 @@ class TACAWData(PySliceSerial, Signal):
     # Analysis methods
     # ------------------------------------------------------------------
 
-    def spectrum(self, probe_index: Optional[int] = None) -> np.ndarray:
+    def spectrum(self, probe_index: Optional[int] = None, as_signal: Optional[bool] = None) -> Union[np.ndarray, Signal]:
         """Spectrum for one probe (or mean over all) by summing over k-space."""
         b = self._backend
         if probe_index is None:
             spectra = [to_numpy(b.sum(self._array[i], axis=(1, 2)))
                        for i in range(len(self.probe_positions))]
-            return np.mean(spectra, axis=0)
-        if probe_index >= len(self.probe_positions):
+            result = np.mean(spectra, axis=0)
+        elif probe_index >= len(self.probe_positions):
             raise ValueError(f"Probe index {probe_index} out of range")
-        return to_numpy(b.sum(self._array[probe_index], axis=(1, 2)))
+        else:
+            result = to_numpy(b.sum(self._array[probe_index], axis=(1, 2)))
+        if self._returns_analysis_signal(as_signal):
+            return self._analysis_signal(
+                result,
+                name='TACAW Spectrum',
+                dimensions=[self._frequency_dimension()],
+                signal_type='1D-EELS',
+                operation='spectrum',
+                parameters={'probe_index': probe_index},
+            )
+        return result
 
     def spectrum_image(self, frequency: float,
-                       probe_indices: Optional[List[int]] = None) -> np.ndarray:
+                       probe_indices: Optional[List[int]] = None,
+                       as_signal: Optional[bool] = None) -> Union[np.ndarray, Signal]:
         """Intensity at a given frequency for each probe position (real-space map)."""
         b = self._backend
         freq_idx = int(np.argmin(np.abs(self.frequencies - frequency)))
         if probe_indices is None:
             probe_indices = list(range(len(self.probe_positions)))
-        return np.array([to_numpy(b.sum(self._array[p, freq_idx, :, :])) for p in probe_indices])
+        result = np.array([to_numpy(b.sum(self._array[p, freq_idx, :, :])) for p in probe_indices])
+        if self._returns_analysis_signal(as_signal):
+            return self._analysis_signal(
+                result,
+                name='TACAW Spectrum Image',
+                dimensions=[
+                    Dimension(name='probe', space='position', values=np.asarray(probe_indices)),
+                ],
+                signal_type='Image',
+                operation='spectrum_image',
+                parameters={'frequency': frequency, 'probe_indices': probe_indices},
+            )
+        return result
 
 
     def diffraction(self, probe_index: Optional[int] = None,
-                    space: str = "reciprocal") -> np.ndarray:
+                    space: str = "reciprocal",
+                    as_signal: Optional[bool] = None) -> Union[np.ndarray, Signal]:
         """Diffraction pattern (kx, ky) summed over all frequencies."""
         b = self._backend
         array_dtype = getattr(self._array, "dtype", b.complex_dtype)
@@ -289,11 +411,22 @@ class TACAWData(PySliceSerial, Signal):
 
         if space == "real":
             pattern = to_numpy(b.absolute(b.ifft2(b.asarray(pattern, dtype=array_dtype))))
+        if self._returns_analysis_signal(as_signal):
+            is_real = space == "real"
+            return self._analysis_signal(
+                pattern,
+                name='TACAW Real-space Diffraction' if is_real else 'TACAW Diffraction',
+                dimensions=self._real_space_dimensions() if is_real else self._reciprocal_dimensions(),
+                signal_type='Image' if is_real else 'Diffraction',
+                operation='diffraction',
+                parameters={'probe_index': probe_index, 'space': space},
+            )
         return pattern
 
     def spectral_diffraction(self, frequency: float,
                              probe_index: Optional[int] = None,
-                             space: str = "reciprocal") -> np.ndarray:
+                             space: str = "reciprocal",
+                             as_signal: Optional[bool] = None) -> Union[np.ndarray, Signal]:
         """Diffraction pattern at a specific frequency."""
         b = self._backend
         freq_idx = int(np.argmin(np.abs(self.frequencies - frequency)))
@@ -313,10 +446,21 @@ class TACAWData(PySliceSerial, Signal):
         if space == "real":
             array_dtype = getattr(self._array, "dtype", b.complex_dtype)
             pattern = to_numpy(b.absolute(b.ifft2(b.asarray(pattern, dtype=array_dtype))))
+        if self._returns_analysis_signal(as_signal):
+            is_real = space == "real"
+            return self._analysis_signal(
+                pattern,
+                name='TACAW Spectral Real-space Diffraction' if is_real else 'TACAW Spectral Diffraction',
+                dimensions=self._real_space_dimensions() if is_real else self._reciprocal_dimensions(),
+                signal_type='Image' if is_real else 'Diffraction',
+                operation='spectral_diffraction',
+                parameters={'frequency': frequency, 'probe_index': probe_index, 'space': space},
+            )
         return pattern
 
     def masked_spectrum(self, mask=None, probe_index: Optional[int] = None,
-                        preview: bool = False) -> np.ndarray:
+                        preview: bool = False,
+                        as_signal: Optional[bool] = None) -> Union[np.ndarray, Signal]:
         """Spectrum with k-space masking applied."""
         b = self._backend
         kxs_np = to_numpy(self._kxs)
@@ -354,11 +498,26 @@ class TACAWData(PySliceSerial, Signal):
                 plt.close(fig)
                 preview = False
             spectra.append(to_numpy(b.sum(masked, axis=(1, 2))))
-        return np.mean(spectra, axis=0)
+        result = np.mean(spectra, axis=0)
+        if self._returns_analysis_signal(as_signal):
+            return self._analysis_signal(
+                result,
+                name='TACAW Masked Spectrum',
+                dimensions=[self._frequency_dimension()],
+                signal_type='1D-EELS',
+                operation='masked_spectrum',
+                parameters={
+                    'mask': mask,
+                    'probe_index': probe_index,
+                    'preview': preview,
+                },
+            )
+        return result
 
     def dispersion(self, kx_path: np.ndarray, ky_path: np.ndarray,
                    probe_index: Optional[int] = None,
-                   space: str = "reciprocal") -> np.ndarray:
+                   space: str = "reciprocal",
+                   as_signal: Optional[bool] = None) -> Union[np.ndarray, Signal]:
         """Extract dispersion relation along a k-path."""
         b = self._backend
         kx_np = to_numpy(self._kxs) if space != "real" else to_numpy(self._xs)
@@ -380,7 +539,30 @@ class TACAWData(PySliceSerial, Signal):
             for i, (ki, kj) in enumerate(zip(kx_indices, ky_indices)):
                 dispersion[w, i] = w_np[ki, kj]
 
-        return np.abs(dispersion)
+        result = np.abs(dispersion)
+        if self._returns_analysis_signal(as_signal):
+            path_values = np.arange(len(kx_indices))
+            return self._analysis_signal(
+                result,
+                name='TACAW Dispersion',
+                dimensions=[
+                    self._frequency_dimension(),
+                    Dimension(
+                        name='path',
+                        space='position' if space == "real" else 'scattering',
+                        values=path_values,
+                    ),
+                ],
+                signal_type='2D-EELS',
+                operation='dispersion',
+                parameters={
+                    'kx_path': np.asarray(kx_path),
+                    'ky_path': np.asarray(ky_path),
+                    'probe_index': probe_index,
+                    'space': space,
+                },
+            )
+        return result
 
     # ------------------------------------------------------------------
     # Generic heatmap plot

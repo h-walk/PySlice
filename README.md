@@ -26,11 +26,31 @@ pip install ovito --find-links https://www.ovito.org/pip/
 # Or using uv (recommended)
 uv sync
 
+# Add the shared SEA data model, provenance, and .sea serialization
+uv sync --extra sea
+
 # Optional ORB/MD support currently requires Python 3.12 because ORB's dm-tree
 # dependency does not publish Python 3.13 wheels.
 uv python install 3.12
 uv sync --python 3.12 --extra fast --extra md
 ```
+
+### SEA data and provenance integration
+
+Install the optional `sea` extra when PySlice outputs should participate in the
+shared pySEA data model:
+
+```bash
+pip install -e ".[sea]"
+```
+
+With sea-eco available, `WFData`, `TACAWData`, and `HAADFData` are calibrated
+sea-eco `Signal` objects. Their construction and scientific transformations are
+recorded in `Signal.Analysis`, parent/child SEAIDs connect derived results to
+their inputs, and `.to_sea()` preserves the data and processing receipt.
+TACAW analysis methods return tracked `Signal` results by default; pass
+`as_signal=False` when a raw NumPy array is specifically required. Without the
+extra, PySlice retains its standalone array behavior.
 
 ## Quick Start
 

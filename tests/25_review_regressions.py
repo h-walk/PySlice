@@ -15,6 +15,17 @@ from pyslice.postprocessing.haadf_data import HAADFData
 from pyslice.postprocessing.tacaw_data import TACAWData
 from pyslice.postprocessing.wf_data import WFData
 
+try:
+    from pySEA.sea_eco.architecture.base_structure import Signal as SeaSignal
+except Exception:
+    SeaSignal = None
+
+
+def _analysis_array(result):
+    if SeaSignal is not None:
+        assert isinstance(result, SeaSignal)
+    return np.asarray(result)
+
 
 def test_wavelength_public_helper_accepts_scalar_without_backend():
     lam = wavelength(100e3)
@@ -254,8 +265,9 @@ def test_tacaw_real_space_dispersion_uses_inverse_fft(tmp_path):
         probe_index=0,
         space="real",
     )
+    dispersion_array = _analysis_array(dispersion)
 
-    assert dispersion[0, 0] == pytest.approx(abs(np.fft.ifft2(reciprocal)[0, 0]))
+    assert dispersion_array[0, 0] == pytest.approx(abs(np.fft.ifft2(reciprocal)[0, 0]))
 
 
 def test_tacaw_complex_spectral_diffraction_preserves_imaginary_parts(tmp_path):
@@ -269,7 +281,7 @@ def test_tacaw_complex_spectral_diffraction_preserves_imaginary_parts(tmp_path):
     pattern = tacaw.spectral_diffraction(0.0, space="real")
 
     expected = np.abs(np.fft.ifft2(np.mean([first, second], axis=0)))
-    np.testing.assert_allclose(pattern, expected)
+    np.testing.assert_allclose(_analysis_array(pattern), expected)
 
 
 @pytest.mark.skipif(not TORCH_AVAILABLE, reason="PyTorch not available")
@@ -290,7 +302,7 @@ def test_masked_spectrum_moves_generated_mask_to_torch_backend(tmp_path, monkeyp
     spectrum = tacaw.masked_spectrum(mask={"shape": "round", "radius": 10.0})
 
     assert mask_dtypes == [tacaw._array.dtype]
-    assert spectrum.shape == (4,)
+    assert _analysis_array(spectrum).shape == (4,)
 
 
 def test_haadf_serialization_excludes_backend():

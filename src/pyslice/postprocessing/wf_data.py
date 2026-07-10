@@ -8,7 +8,15 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from ..multislice.multislice import Probe, aberrationFunction
-from ..data.pyslice_serial import PySliceSerial, Signal, Dimensions, Dimension, Metadata
+from ..data.pyslice_serial import (
+    PySliceSerial,
+    Signal,
+    Dimensions,
+    Dimension,
+    Metadata,
+    record_pyslice_operation,
+    track_pyslice_action,
+)
 from pyslice.backend import Backend, to_numpy
 
 
@@ -66,7 +74,22 @@ class WFData(PySliceSerial, Signal):
         # Build Signal dimensions
         if Dimensions is not None:
             layer_arr = to_numpy(layer) if layer is not None else np.array([0])
-            self.dimensions = Dimensions([
+            layer_dimension = (
+                Dimension(
+                    name='layer',
+                    space='position',
+                    size=0,
+                    scale=1,
+                    offset=0,
+                )
+                if layer_arr.size == 0
+                else Dimension(
+                    name='layer',
+                    space='position',
+                    values=layer_arr,
+                )
+            )
+            dimensions = Dimensions([
                 Dimension(name='probe',  space='position',
                           values=np.arange(len(probe_positions))),
                 Dimension(name='time',   space='temporal',   units='ps',
@@ -75,12 +98,11 @@ class WFData(PySliceSerial, Signal):
                           values=to_numpy(kxs)),
                 Dimension(name='ky',     space='scattering', units='Å⁻¹',
                           values=to_numpy(kys)),
-                Dimension(name='layer',  space='position',
-                          values=layer_arr),
-            ], nav_dimensions=[0, 1], sig_dimensions=[2, 3, 4])
+                layer_dimension,
+            ], nav_dimensions=[0, 1], det_dimensions=[2, 3, 4])
 
             pp_array = np.array(probe_positions).flatten().tolist()
-            self.metadata = Metadata({
+            metadata = Metadata({
                 'General': {
                     'title': 'Multislice Wavefunction',
                     'signal_type': 'Wavefunction',
@@ -93,6 +115,26 @@ class WFData(PySliceSerial, Signal):
                     'n_probes': len(probe_positions),
                 },
             })
+            Signal.__init__(
+                self,
+                data=array,
+                name='Multislice Wavefunction',
+                dimensions=dimensions,
+                signal_type='Diffraction',
+                metadata=metadata,
+            )
+            record_pyslice_operation(
+                self,
+                "WFData.__init__",
+                parameters={
+                    "array_shape": tuple(getattr(array, "shape", ())),
+                    "n_probe_positions": len(probe_positions),
+                    "n_time": len(time) if time is not None else None,
+                    "n_layers": len(layer_arr),
+                    "cache_dir": None if cache_dir is None else str(cache_dir),
+                },
+                callable_obj=type(self).__init__,
+            )
 
     # ------------------------------------------------------------------
     # Properties — public interface always returns numpy
@@ -300,10 +342,12 @@ class WFData(PySliceSerial, Signal):
     # Post-processing
     # ------------------------------------------------------------------
 
+    @track_pyslice_action
     def recenter(self):
         b = self._backend
         self._xs -= b.mean(self._xs)
         self._ys -= b.mean(self._ys)
+    @track_pyslice_action
     def pad_real_space(self,add_x=0,add_y=0):
         b = self._backend
         dx = self._xs[1]-self._xs[0] ; dy = self._ys[1]-self._ys[0]
@@ -321,6 +365,7 @@ class WFData(PySliceSerial, Signal):
         self._kys = b.fftshift(b.fftfreq(ny+pix_y*2, dy))  # k-space in 1/Å
 
 
+    @track_pyslice_action
     def propagate_through_lens(self,f):
         b = self._backend
         array = b.ifft2(self._array[:, :, :, :, -1])
@@ -332,12 +377,14 @@ class WFData(PySliceSerial, Signal):
         array = L[None,None,:,:] * array
         self._array[:,:,:,:,-1] = b.fft2(array)
 
+    @track_pyslice_action
     def propagate_free_space(self, dz: float):
         b = self._backend
         kx_grid, ky_grid = b.meshgrid(self._kxs, self._kys, indexing='ij')
         P = b.exp(-1j * b.pi * self.probe.wavelength * dz * (kx_grid ** 2 + ky_grid ** 2))
         self._array = P[None, None, :, :, None] * self._array
 
+    @track_pyslice_action
     def addSpatialDecoherence(self, sigma_dz: float, N: int):
         b = self._backend
         dzs = b.linspace(-2 * sigma_dz, 2 * sigma_dz, N)
@@ -351,6 +398,7 @@ class WFData(PySliceSerial, Signal):
             self._array[:, i, :, :, :, :] *= amplitudes[i] * P[None, None, :, :, None]
         self._array = b.reshape(self._array, (nc * npt, nt, nx, ny, nl))
 
+    @track_pyslice_action
     def applyMask(self, radius: float, realOrReciprocal: str = "reciprocal"):
         b = self._backend
         if realOrReciprocal == "reciprocal":
@@ -369,6 +417,7 @@ class WFData(PySliceSerial, Signal):
             real *= mask[None, None, :, :, None]
             self._array = b.fftshift(b.fft2(real, axes=(2, 3)), axes=(2, 3))
 
+    @track_pyslice_action
     def crop(self, kx_range=None, ky_range=None):
         kxs_np = to_numpy(self._kxs)
         kys_np = to_numpy(self._kys)
@@ -384,6 +433,7 @@ class WFData(PySliceSerial, Signal):
         self._kxs = self._kxs[i1:i2]
         self._kys = self._kys[j1:j2]
 
+    @track_pyslice_action
     def aberrate(self, aberrations: dict):
         dP = aberrationFunction(
             self._kxs, self._kys, self.probe.wavelength, aberrations, self._backend
