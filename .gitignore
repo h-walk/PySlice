@@ -12,8 +12,11 @@ wheels/
 # Large data directories (exclude from version control)
 psi_data/
 extras/
+untracked/
+.codex/visualizations/
 examples/outputs/
 examples/hBN_GAP/
+examples/monolayer300k.lammpstrj
 
 # Simulation results and output files
 test_results/
@@ -22,6 +25,11 @@ test_results/
 !*-test.npy
 *.png
 !tests/outputs/figs/*.png
+tests/outputs/figs/complex_wave_column_comparison.png
+tests/outputs/figs/macstem_standalone_wave_summary.png
+tests/outputs/figs/ray_wave_*.png
+tests/outputs/figs/raytem_*.png
+tests/outputs/figs/standalone_wave_*.png
 *.jpg
 *.jpeg
 *.sea

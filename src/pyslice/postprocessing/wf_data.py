@@ -136,6 +136,108 @@ class WFData(PySliceSerial, Signal):
                 callable_obj=type(self).__init__,
             )
 
+    @classmethod
+    def from_probe(
+        cls,
+        *,
+        extent_A: float | Tuple[float, float],
+        sampling: float | Tuple[float, float],
+        voltage_eV: float,
+        aperture: float = 0.0,
+        defocus: float = 0.0,
+        probe_positions: Optional[List[Tuple[float, float]]] = None,
+        backend: Optional[Backend] = None,
+        device: Optional[str] = None,
+    ) -> "WFData":
+        """Create a standalone electron probe without a specimen.
+
+        The returned wave is centered on an optical-axis coordinate system and
+        is immediately compatible with :class:`pyslice.optics.OpticalColumn`.
+        ``sampling``, ``voltage_eV``, ``aperture``, ``defocus``, and
+        ``probe_positions`` have the same meaning as in
+        :meth:`MultisliceCalculator.setup`; only ``extent_A`` is additional,
+        because there is no specimen cell from which to derive the field of
+        view. Probe positions are relative to the optical axis rather than
+        absolute specimen-cell coordinates. A zero aperture creates a plane
+        wave. Requested extents are rounded to an even number of samples so
+        the FFT grid has a unique central pixel.
+        """
+        extent_x, extent_y = (
+            (float(extent_A), float(extent_A))
+            if isinstance(extent_A, (int, float))
+            else (float(extent_A[0]), float(extent_A[1]))
+        )
+        dx, dy = (
+            (float(sampling), float(sampling))
+            if isinstance(sampling, (int, float))
+            else (float(sampling[0]), float(sampling[1]))
+        )
+        if extent_x <= 0 or extent_y <= 0:
+            raise ValueError("extent_A values must be positive.")
+        if dx <= 0 or dy <= 0:
+            raise ValueError("sampling values must be positive.")
+        if voltage_eV <= 0:
+            raise ValueError("voltage_eV must be positive.")
+        if probe_positions is None:
+            probe_positions = [(0.0, 0.0)]
+        relative_positions = [
+            (float(position[0]), float(position[1]))
+            for position in probe_positions
+        ]
+        if not relative_positions:
+            raise ValueError("probe_positions must contain at least one position.")
+
+        nx = max(2, int(round(extent_x / dx)))
+        ny = max(2, int(round(extent_y / dy)))
+        # Probe generation and shifted FFT coordinates share an unambiguous
+        # central pixel on even grids. Round odd requests up by one sample
+        # rather than introducing a half-pixel origin mismatch.
+        nx += nx % 2
+        ny += ny % 2
+        xs = np.arange(nx, dtype=float) * dx
+        ys = np.arange(ny, dtype=float) * dy
+        optical_xs = (np.arange(nx, dtype=float) - nx // 2) * dx
+        optical_ys = (np.arange(ny, dtype=float) - ny // 2) * dy
+        # Match the discrete origin used by ``optical_xs``/``optical_ys``.
+        # For an odd-sized grid, ``n * d / 2`` lies between pixels and shifts
+        # the generated probe by one sample after the FFT shift.
+        center_x = (nx // 2) * dx
+        center_y = (ny // 2) * dy
+        absolute_positions = [
+            (center_x + x, center_y + y) for x, y in relative_positions
+        ]
+        probe = Probe(
+            xs,
+            ys,
+            mrad=float(aperture),
+            eV=float(voltage_eV),
+            backend=backend,
+            device=device,
+            probe_positions=absolute_positions,
+        )
+        defocus_value = float(defocus)
+        if defocus_value:
+            probe.defocus(defocus_value)
+        b = probe._backend
+        reciprocal = b.fftshift(
+            b.fft2(probe._array[0], axes=(-2, -1)), axes=(-2, -1)
+        )
+        wf = cls(
+            probe_positions=relative_positions,
+            probe_xs=sorted({position[0] for position in relative_positions}),
+            probe_ys=sorted({position[1] for position in relative_positions}),
+            time=np.array([0.0]),
+            kxs=b.fftshift(probe.kxs),
+            kys=b.fftshift(probe.kys),
+            xs=b.asarray(optical_xs),
+            ys=b.asarray(optical_ys),
+            layer=np.array([0]),
+            array=reciprocal[:, None, :, :, None],
+            probe=probe,
+            backend=b,
+        )
+        return wf
+
     # ------------------------------------------------------------------
     # Properties — public interface always returns numpy
     # ------------------------------------------------------------------
@@ -194,6 +296,7 @@ class WFData(PySliceSerial, Signal):
     # Photon-counting simulation
     # ------------------------------------------------------------------
 
+    @track_pyslice_action
     def counts(self, N: int):
         b = self._backend
         npt, nt, nx, ny, nl = self._array.shape
@@ -347,42 +450,283 @@ class WFData(PySliceSerial, Signal):
         b = self._backend
         self._xs -= b.mean(self._xs)
         self._ys -= b.mean(self._ys)
-    @track_pyslice_action
-    def pad_real_space(self,add_x=0,add_y=0):
+
+    def sampling_report(
+        self,
+        *,
+        real_edge_fraction: float = 0.1,
+        reciprocal_edge_fraction: float = 0.2,
+    ) -> dict:
+        """Return real- and reciprocal-space sampling diagnostics.
+
+        Edge fractions describe the outer portion of each axis included in the
+        audit. For example, ``real_edge_fraction=0.1`` measures power in the
+        outer 10 percent at either side of the real-space field. The report is
+        backend-independent and contains ordinary Python/NumPy values.
+        """
+        if not 0.0 < real_edge_fraction < 0.5:
+            raise ValueError("real_edge_fraction must be between 0 and 0.5.")
+        if not 0.0 < reciprocal_edge_fraction < 0.5:
+            raise ValueError(
+                "reciprocal_edge_fraction must be between 0 and 0.5."
+            )
+
         b = self._backend
-        dx = self._xs[1]-self._xs[0] ; dy = self._ys[1]-self._ys[0]
-        pix_x = int(round(add_x/dx)) ; pix_y = int(round(add_y/dy))
+        nx, ny = len(self._xs), len(self._ys)
+        dx = float(to_numpy(self._xs[1] - self._xs[0]))
+        dy = float(to_numpy(self._ys[1] - self._ys[0]))
+        center_x = self._xs[nx // 2]
+        center_y = self._ys[ny // 2]
+        half_extent_x = nx * dx / 2.0
+        half_extent_y = ny * dy / 2.0
+        real_mask = (
+            (
+                b.absolute(self._xs - center_x)
+                >= (1.0 - real_edge_fraction) * half_extent_x
+            )[:, None]
+            | (
+                b.absolute(self._ys - center_y)
+                >= (1.0 - real_edge_fraction) * half_extent_y
+            )[None, :]
+        )
+
+        real = b.ifft2(
+            b.ifftshift(self._array, axes=(2, 3)), axes=(2, 3)
+        )
+        real_power = b.absolute(real) ** 2
+        real_totals = np.asarray(
+            to_numpy(b.sum(real_power, axis=(2, 3))), dtype=float
+        )
+        real_edge_powers = np.asarray(
+            to_numpy(
+                b.sum(
+                    real_power * real_mask[None, None, :, :, None],
+                    axis=(2, 3),
+                )
+            ),
+            dtype=float,
+        )
+        max_real_edge_fraction = float(
+            np.max(real_edge_powers / np.maximum(real_totals, 1e-300))
+        )
+
+        kx_limit = float(np.max(np.abs(to_numpy(self._kxs))))
+        ky_limit = float(np.max(np.abs(to_numpy(self._kys))))
+        reciprocal_mask = (
+            (
+                b.absolute(self._kxs)
+                >= (1.0 - reciprocal_edge_fraction) * kx_limit
+            )[:, None]
+            | (
+                b.absolute(self._kys)
+                >= (1.0 - reciprocal_edge_fraction) * ky_limit
+            )[None, :]
+        )
+        reciprocal_power = b.absolute(self._array) ** 2
+        reciprocal_totals = np.asarray(
+            to_numpy(b.sum(reciprocal_power, axis=(2, 3))), dtype=float
+        )
+        reciprocal_edge_powers = np.asarray(
+            to_numpy(
+                b.sum(
+                    reciprocal_power
+                    * reciprocal_mask[None, None, :, :, None],
+                    axis=(2, 3),
+                )
+            ),
+            dtype=float,
+        )
+        max_reciprocal_edge_fraction = float(
+            np.max(
+                reciprocal_edge_powers
+                / np.maximum(reciprocal_totals, 1e-300)
+            )
+        )
+
+        wavelength_A = float(to_numpy(self.probe.wavelength))
+        return {
+            "shape": (nx, ny),
+            "sampling_A": (dx, dy),
+            "extent_A": (nx * dx, ny * dy),
+            "real_edge_power_fraction": max_real_edge_fraction,
+            "reciprocal_edge_power_fraction": max_reciprocal_edge_fraction,
+            "theta_nyquist_mrad": (
+                wavelength_A * kx_limit * 1e3,
+                wavelength_A * ky_limit * 1e3,
+            ),
+            "physical_norm": float(np.sum(real_totals)) * dx * dy,
+        }
+
+    @track_pyslice_action
+    def pad_real_space(self, add_x=0, add_y=0) -> dict:
+        """Add zero-valued real-space margins while preserving grid spacing.
+
+        ``add_x`` and ``add_y`` are the requested margins on *each* side of
+        the existing field in Angstroms. They are rounded to whole pixels. The
+        shifted reciprocal-space convention, optical-axis coordinate, and
+        physical wave norm are preserved.
+        """
+        add_x = float(add_x)
+        add_y = float(add_y)
+        if add_x < 0 or add_y < 0:
+            raise ValueError("Real-space padding must be non-negative.")
+
+        b = self._backend
+        dx = float(to_numpy(self._xs[1] - self._xs[0]))
+        dy = float(to_numpy(self._ys[1] - self._ys[0]))
+        pix_x = int(round(add_x / dx))
+        pix_y = int(round(add_y / dy))
         npt, nt, nx, ny, nl = self._array.shape
-        array = b.ifft2(self._array,axes=(-3,-2)) # npt, nt, nx, ny, nl indices. iFFT x,y
-        new = b.zeros((npt, nt, nx+pix_x*2, ny+pix_y*2, nl), type_match = self._array)
-        i1=pix_x ; i2=pix_x+nx ; j1=pix_y ; j2=pix_y+ny
-        new[:,:,i1:i2,j1:j2,:] += array
-        self._array = b.fft2(new,axes=(-3,-2))
-        # xs=[0,1,2,3,4], dx=1, add 3. new should be -3,-2,-1,0,1,2,3,4,5,6,7. from x[0]-N*dx, to x[-1]+N*dx, and length len(xs)+2*N
-        self._xs = b.linspace( self._xs[0]-dx*pix_x , self._xs[-1]+dx*pix_x , nx+pix_x*2 )
-        self._ys = b.linspace( self._ys[0]-dy*pix_y , self._ys[-1]+dy*pix_y , ny+pix_y*2 )
-        self._kxs = b.fftshift(b.fftfreq(nx+pix_x*2, dx))  # k-space in 1/Å
-        self._kys = b.fftshift(b.fftfreq(ny+pix_y*2, dy))  # k-space in 1/Å
+        new_nx = nx + 2 * pix_x
+        new_ny = ny + 2 * pix_y
+        before = self.sampling_report()
+        if new_nx == nx and new_ny == ny:
+            return {
+                "requested_padding_A": (add_x, add_y),
+                "actual_padding_A": (0.0, 0.0),
+                "old_shape": (nx, ny),
+                "new_shape": (nx, ny),
+                "before": before,
+                "after": before,
+            }
+
+        real = b.ifft2(
+            b.ifftshift(self._array, axes=(2, 3)), axes=(2, 3)
+        )
+        padded = b.zeros(
+            (npt, nt, new_nx, new_ny, nl), type_match=self._array
+        )
+        padded[:, :, pix_x : pix_x + nx, pix_y : pix_y + ny, :] = real
+        self._array = b.fftshift(
+            b.fft2(padded, axes=(2, 3)), axes=(2, 3)
+        )
+
+        center_x = float(to_numpy(self._xs[nx // 2]))
+        center_y = float(to_numpy(self._ys[ny // 2]))
+        self._xs = (b.arange(new_nx) - new_nx // 2) * dx + center_x
+        self._ys = (b.arange(new_ny) - new_ny // 2) * dy + center_y
+        self._kxs = b.fftshift(b.fftfreq(new_nx, d=dx))
+        self._kys = b.fftshift(b.fftfreq(new_ny, d=dy))
+
+        if getattr(self, "dimensions", None) is not None:
+            try:
+                self.dimensions["kx"].values = to_numpy(self._kxs)
+                self.dimensions["ky"].values = to_numpy(self._kys)
+            except Exception:
+                pass
+
+        after = self.sampling_report()
+        return {
+            "requested_padding_A": (add_x, add_y),
+            "actual_padding_A": (pix_x * dx, pix_y * dy),
+            "old_shape": (nx, ny),
+            "new_shape": (new_nx, new_ny),
+            "before": before,
+            "after": after,
+        }
 
 
     @track_pyslice_action
     def propagate_through_lens(self,f):
+        self.propagate_through_astigmatic_lens(f, f)
+
+    @track_pyslice_action
+    def propagate_through_astigmatic_lens(self, f_x, f_y):
         b = self._backend
-        array = b.ifft2(self._array[:, :, :, :, -1])
+        array = b.ifft2(self._array, axes=(2, 3))
         xs = b.asarray(self._xs)#-self.probe_positions[-1][0]
         ys = b.asarray(self._ys)#-self.probe_positions[-1][1]
         x_grid, y_grid = b.meshgrid(xs,ys, indexing='ij')
         k = 2*b.pi / self.probe.wavelength
-        L = b.exp(-1j * k / 2 / f * ( x_grid ** 2 + y_grid ** 2 ) )
-        array = L[None,None,:,:] * array
-        self._array[:,:,:,:,-1] = b.fft2(array)
+        phase = b.zeros(x_grid.shape, type_match=x_grid)
+        if f_x is not None and np.isfinite(float(f_x)):
+            phase += x_grid ** 2 / float(f_x)
+        if f_y is not None and np.isfinite(float(f_y)):
+            phase += y_grid ** 2 / float(f_y)
+        L = b.exp(-1j * k / 2 * phase)
+        array = L[None, None, :, :, None] * array
+        self._array = b.fft2(array, axes=(2, 3))
 
     @track_pyslice_action
     def propagate_free_space(self, dz: float):
+        self.propagate_anisotropic_free_space(dz, dz)
+
+    @track_pyslice_action
+    def propagate_anisotropic_free_space(self, dz_x: float, dz_y: float):
         b = self._backend
         kx_grid, ky_grid = b.meshgrid(self._kxs, self._kys, indexing='ij')
-        P = b.exp(-1j * b.pi * self.probe.wavelength * dz * (kx_grid ** 2 + ky_grid ** 2))
+        P = b.exp(
+            -1j * b.pi * self.probe.wavelength
+            * (float(dz_x) * kx_grid ** 2 + float(dz_y) * ky_grid ** 2)
+        )
         self._array = P[None, None, :, :, None] * self._array
+
+    @track_pyslice_action
+    def apply_beam_tilt(self, theta_x: float = 0.0, theta_y: float = 0.0):
+        """Apply a transverse angular kick to the wavefunction."""
+        b = self._backend
+        array = b.ifft2(self._array, axes=(2, 3))
+        x_grid, y_grid = b.meshgrid(
+            b.asarray(self._xs), b.asarray(self._ys), indexing='ij'
+        )
+        phase = 2j * b.pi / self.probe.wavelength * (
+            float(theta_x) * x_grid + float(theta_y) * y_grid
+        )
+        self._array = b.fft2(
+            b.exp(phase)[None, None, :, :, None] * array,
+            axes=(2, 3),
+        )
+
+    @track_pyslice_action
+    def rotate_real_space(self, angle_rad: float):
+        """Rotate the transverse wave without interpolation using FFT shears."""
+        angle = float(angle_rad)
+        if angle == 0.0:
+            return
+
+        # Three-shear rotation becomes ill-conditioned near pi, so split large
+        # rotations into pieces no larger than 45 degrees.
+        n_steps = max(1, int(np.ceil(abs(angle) / (np.pi / 4.0))))
+        step = angle / n_steps
+        for _ in range(n_steps):
+            self._rotate_real_space_step(step)
+
+    def _rotate_real_space_step(self, angle_rad: float):
+        """Apply one three-shear real-space rotation step."""
+        b = self._backend
+        array = b.ifft2(
+            b.ifftshift(self._array, axes=(2, 3)),
+            axes=(2, 3),
+        )
+        dx = float(to_numpy(self._xs[1] - self._xs[0]))
+        dy = float(to_numpy(self._ys[1] - self._ys[0]))
+        kx = b.fftfreq(len(self._xs), d=dx)
+        ky = b.fftfreq(len(self._ys), d=dy)
+        xs = b.asarray(self._xs)
+        ys = b.asarray(self._ys)
+
+        shear_x = np.tan(float(angle_rad) / 2.0)
+        shear_y = -np.sin(float(angle_rad))
+
+        phase_x = b.exp(2j * b.pi * shear_x * kx[:, None] * ys[None, :])
+        array = b.ifft(
+            b.fft(array, axes=2) * phase_x[None, None, :, :, None],
+            axes=2,
+        )
+
+        phase_y = b.exp(2j * b.pi * shear_y * xs[:, None] * ky[None, :])
+        array = b.ifft(
+            b.fft(array, axes=3) * phase_y[None, None, :, :, None],
+            axes=3,
+        )
+
+        array = b.ifft(
+            b.fft(array, axes=2) * phase_x[None, None, :, :, None],
+            axes=2,
+        )
+        self._array = b.fftshift(
+            b.fft2(array, axes=(2, 3)), axes=(2, 3)
+        )
 
     @track_pyslice_action
     def addSpatialDecoherence(self, sigma_dz: float, N: int):
@@ -407,15 +751,19 @@ class WFData(PySliceSerial, Signal):
             mask[radii < radius] = 1
             self._array *= mask[None, None, :, :, None]
         else:
+            center_x = self._xs[len(self._xs) // 2]
+            center_y = self._ys[len(self._ys) // 2]
             radii = b.sqrt(
-                (self._xs[:, None] - b.mean(b.asarray(self._xs))) ** 2 +
-                (self._ys[None, :] - b.mean(b.asarray(self._ys))) ** 2
+                (self._xs[:, None] - center_x) ** 2 +
+                (self._ys[None, :] - center_y) ** 2
             )
             mask = b.zeros(radii.shape)
             mask[radii < radius] = 1
             real = b.ifft2(b.ifftshift(self._array, axes=(2, 3)), axes=(2, 3))
             real *= mask[None, None, :, :, None]
-            self._array = b.fftshift(b.fft2(real, axes=(2, 3)), axes=(2, 3))
+            self._array = b.fftshift(
+                b.fft2(real, axes=(2, 3)), axes=(2, 3)
+            )
 
     @track_pyslice_action
     def crop(self, kx_range=None, ky_range=None):

@@ -22,3 +22,5 @@ from .multislice.trajectory import *
 from .postprocessing.haadf_data import *
 from .postprocessing.tacaw_data import *
 from .postprocessing.testtools import *
+from .postprocessing.wf_data import WFData
+from .optics import OpticalColumn, WavePlane, WavePropagation, simulate_raytem_wave

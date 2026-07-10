@@ -19,7 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 fast = ["torch","torchvision"]
-test = []
+test = ["pytest>=8"]
 md = ["orb-models>=0.6.0; python_version < '3.13'"]
 sea = ["sea-eco", "sea-sand"]
 

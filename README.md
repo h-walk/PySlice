@@ -143,6 +143,47 @@ wf_data.plot(powerscaling=0.125)  # Diffraction pattern
 
 ```
 
+### Standalone RayTEM Wave Optics
+
+`simulate_raytem_wave` propagates a coherent, sample-free electron wave through
+an existing RayTEM configuration. RayTEM supplies the column geometry and
+calibrated elements; the call supplies the electron energy and wave grid because
+a ray bundle does not uniquely define a coherent field.
+
+```python
+from pyslice import simulate_raytem_wave
+
+result = simulate_raytem_wave(
+    "macstem.json",
+    start="gun",
+    stop="CCD",
+    voltage_eV=100e3,
+    extent_A=4096,
+    sampling_A=8,
+    convergence_mrad=0.05,
+)
+
+result.output.plot_realspace()
+result.plane("CL3").wave.plot_realspace()
+print(result.sampling_report())
+```
+
+Named planes are retained by default so the sampling audit can catch a beam
+that clips the grid before later refocusing. Set `record=False` when only the
+terminal wave is needed and retaining every plane would be too memory-intensive.
+
+The adapter converts RayTEM millimeters to Angstroms and supports drifts, round
+lenses and Larmor rotation, steering, thin quadrupoles, regular prisms,
+apertures, and Cnm aberrations. Non-symplectic RayTEM matrices are rejected
+rather than represented as lossless wave operators. Wave grids are finite and
+periodic. The simulation warns when any recorded plane approaches a real- or
+reciprocal-space boundary; quantitative work should adjust the field or
+sampling and repeat until `result.sampling_report()` is stable.
+
+See `examples/raytem_wave.py` for the command-line form. `OpticalColumn` remains
+available for advanced manual construction, but is not required for the normal
+RayTEM workflow.
+
 ## Data Flow
 
 ```
