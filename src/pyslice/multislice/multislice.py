@@ -267,6 +267,11 @@ class Probe:
         # Pixel offsets used when probe is cropped to a sub-region.
         self.offsets = np.zeros((len(self.probe_positions), 2), dtype=int)
 
+        # Whether applyShifts() has already positioned the probes.  Re-applying
+        # the position phase ramp would displace each probe by the requested
+        # offset a second time, so applyShifts() is a no-op once this is set.
+        self._shifts_applied = False
+
         if not defer_shifts:
             self.applyShifts()
 
@@ -361,8 +366,10 @@ class Probe:
         """
         b = self._backend
         nc, npt, nx, ny = self._array.shape
-        if npt > 1:
-            # Shifts have already been applied — nothing to do.
+        if self._shifts_applied or npt > 1:
+            # Shifts already applied — re-applying would displace each probe by
+            # its requested offset a second time (compounding on every frame in
+            # run()).  npt > 1 additionally guards an already-expanded array.
             return
 
         # Broadcast the single template probe to all npt positions.
@@ -387,6 +394,8 @@ class Probe:
                 self._array[:, i, :, :], px, py)
             self.offsets[i, 0] = int(dpx)
             self.offsets[i, 1] = int(dpy)
+
+        self._shifts_applied = True
 
     def placeProbe(self, array, x: float, y: float):
         """
@@ -497,6 +506,9 @@ class Probe:
         self.wavelengths = wavelength(self.eVs, b)
         amplitudes       = b.exp(-(self.eV - self.eVs)**2 / sigma_eV**2)
 
+        # Rebuilding the template from scratch discards any prior positioning,
+        # so allow the applyShifts() call below to run again.
+        self._shifts_applied = False
         self._array = b.zeros((N, 1, nx, ny), dtype=b.complex_dtype)
         for n, eV_n in enumerate(self.eVs):
             lam_n = wavelength(eV_n, b)
@@ -600,6 +612,11 @@ class Probe:
             new_probe.probe_positions = np.asarray(self.probe_positions)[sel, :]
         else:
             new_probe._array = b.clone(self._array)
+
+        # Inherit positioning state: a copy of an already-shifted probe must not
+        # be shifted again, while a copy of the unshifted template (the
+        # loop_probes path) still needs applyShifts().
+        new_probe._shifts_applied = self._shifts_applied
 
         return new_probe
 

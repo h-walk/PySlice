@@ -8,7 +8,7 @@ if TORCH_AVAILABLE:
     from pyslice.backend import TorchBackend
 from pyslice.multislice import calculators as calculators_module
 from pyslice.multislice.calculators import MultisliceCalculator
-from pyslice.multislice.multislice import PrismProbe, wavelength
+from pyslice.multislice.multislice import PrismProbe, Probe, wavelength
 from pyslice.multislice.potentials import Potential
 from pyslice.multislice.trajectory import Trajectory
 from pyslice.postprocessing.haadf_data import HAADFData
@@ -306,6 +306,97 @@ def _make_tiny_trajectory():
         box_matrix=np.diag([4.0, 4.0, 3.0]),
         timestep=0.1,
     )
+
+
+# ---------------------------------------------------------------------------
+# Regression: single off-centre probe must not be re-shifted every frame.
+#
+# Probe.applyShifts positions the probe with a k-space phase ramp.  It used to
+# guard against re-application only via "npt > 1", which never triggers for a
+# single probe position, so setup()'s shift plus run()'s per-frame shift (plus
+# the trailing shift inside addTemporalDecoherence) compounded and the probe
+# drifted across frames.  For TACAW this dwarfs the phonon signal.
+# ---------------------------------------------------------------------------
+
+# Grid + aperture chosen so the probe is well localised (aperture spans many
+# k-pixels); on a coarse grid the probe degenerates to a plane wave whose |ψ|²
+# is shift-invariant, which would hide the drift entirely.
+_UNIT_XS = np.linspace(0.0, 8.0, 32, endpoint=False)  # dx = 0.25, centre = 4.0
+_UNIT_YS = np.linspace(0.0, 8.0, 32, endpoint=False)
+_OFFCENTRE = (2.0, 2.0)          # peak pixel 2.0/0.25 = 8 when shifted once
+_ONCE_PIXEL = (8, 8)             # (unshifted -> 16, double-shifted -> 0)
+
+
+def _peak_pixel(array2d):
+    intensity = np.abs(to_numpy(array2d)) ** 2
+    return np.unravel_index(int(np.argmax(intensity)), intensity.shape)
+
+
+def _make_deferred_probe(position):
+    return Probe(
+        _UNIT_XS, _UNIT_YS, mrad=30.0, eV=60e3, backend=NumpyBackend(),
+        probe_positions=np.asarray([position], dtype=float),
+        defer_shifts=True,
+    )
+
+
+def test_apply_shifts_is_idempotent_for_single_offcentre_probe():
+    probe = _make_deferred_probe(_OFFCENTRE)  # cell centre is 4.0 -> off-centre
+
+    probe.applyShifts()
+    after_first = to_numpy(probe._array).copy()
+    probe.applyShifts()  # the historically buggy re-application
+    probe.applyShifts()
+
+    np.testing.assert_array_equal(to_numpy(probe._array), after_first)
+    # positioned once: peak at the requested position (not centre, not doubled)
+    assert _peak_pixel(probe._array[0, 0]) == _ONCE_PIXEL
+
+
+def test_apply_shifts_reapplied_after_decoherence_rebuild():
+    # setup() applies shifts; addTemporalDecoherence then rebuilds the template
+    # from scratch and must re-position it (flag reset), then stay idempotent.
+    probe = _make_deferred_probe(_OFFCENTRE)
+    probe.applyShifts()
+    probe.addTemporalDecoherence(sigma_eV=1.0, N=3)
+
+    assert probe._array.shape[0] == 3  # three energy copies
+    summed = np.sum(np.abs(to_numpy(probe._array[:, 0])) ** 2, axis=0)
+    assert _peak_pixel(summed) == _ONCE_PIXEL  # shifted exactly once, not twice
+
+    frozen = to_numpy(probe._array).copy()
+    probe.applyShifts()  # must be a no-op now
+    np.testing.assert_array_equal(to_numpy(probe._array), frozen)
+
+
+def test_static_trajectory_offcentre_probe_gives_frame_invariant_exit_wave(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    n_frames = 4
+    static = np.tile(np.array([[[3.1, 4.7, 1.5]]], dtype=float), (n_frames, 1, 1))
+    traj = Trajectory(
+        atom_types=np.array([14]),
+        positions=static,
+        velocities=np.zeros_like(static),
+        box_matrix=np.diag([8.0, 8.0, 3.0]),
+        timestep=0.1,
+    )
+    calc = MultisliceCalculator(force_cpu=True)
+    calc.setup(
+        traj,
+        aperture=30,
+        voltage_eV=60e3,
+        sampling=0.25,
+        slice_thickness=1.0,
+        probe_positions=[_OFFCENTRE],
+        cache_wavefunctions=False,
+    )
+    arr = to_numpy(calc.run(force_rerun=True).array)  # (probe, frame, kx, ky, layer)
+
+    # atoms are frozen -> a correctly-fixed probe reproduces the exit wave every
+    # frame; the drift bug moved the probe each frame, so patterns diverged.
+    reference = arr[:, 0]
+    for t in range(1, n_frames):
+        np.testing.assert_allclose(arr[:, t], reference, atol=1e-10, rtol=0)
 
 
 def _make_wf_data(tmp_path, n_time, backend=None):
