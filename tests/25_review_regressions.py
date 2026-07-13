@@ -549,6 +549,38 @@ def test_min_dk_calculator_run_completes(tmp_path, monkeypatch):
     assert np.max(np.abs(arr)) > 0
 
 
+@pytest.mark.parametrize("n", [32, 33, 63])
+def test_pad_real_space_preserves_field_for_odd_and_even_grids(tmp_path, n):
+    # self._array is an fftshifted spectrum; pad_real_space must undo/redo the
+    # shift around its FFT round trip.  Without that it is exact only for even
+    # grids and smears odd-grid spectra by several percent.
+    pad = 5
+    xs = np.arange(n, dtype=float)
+    xg, yg = np.meshgrid(xs, xs, indexing="ij")
+    psi = (np.exp(-((xg - n * 0.4) ** 2 + (yg - n * 0.6) ** 2) / (0.8 * n))
+           * np.exp(1j * 0.3 * xg))  # asymmetric -> sensitive to a shift error
+    spectrum = np.fft.fftshift(np.fft.fft2(psi))
+
+    probe = SimpleNamespace(
+        eV=1e5, wavelength=0.037, mrad=30.0,
+        _array=NumpyBackend().asarray(np.zeros((1, 1, 2, 2), dtype=np.complex128)))
+    wf = WFData(
+        probe_positions=[(0.0, 0.0)], probe_xs=[0.0], probe_ys=[0.0],
+        time=np.zeros(1),
+        kxs=np.fft.fftshift(np.fft.fftfreq(n)), kys=np.fft.fftshift(np.fft.fftfreq(n)),
+        xs=xs.copy(), ys=xs.copy(), layer=np.array([0]),
+        array=spectrum[None, None, :, :, None].astype(np.complex128),
+        probe=probe, backend=NumpyBackend(), cache_dir=tmp_path,
+    )
+    wf.pad_real_space(add_x=pad, add_y=pad)
+
+    recovered = np.fft.ifft2(np.fft.ifftshift(to_numpy(wf._array)[0, 0, :, :, 0]))
+    reference = np.zeros((n + 2 * pad, n + 2 * pad), dtype=complex)
+    reference[pad:pad + n, pad:pad + n] = psi
+    rel_err = np.max(np.abs(recovered - reference)) / np.max(np.abs(psi))
+    assert rel_err < 1e-10
+
+
 def _make_wf_data(tmp_path, n_time, backend=None):
     backend = NumpyBackend() if backend is None else backend
     probe = SimpleNamespace(

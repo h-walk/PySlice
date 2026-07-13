@@ -309,11 +309,16 @@ class WFData(PySliceSerial, Signal):
         dx = self._xs[1]-self._xs[0] ; dy = self._ys[1]-self._ys[0]
         pix_x = int(round(add_x/dx)) ; pix_y = int(round(add_y/dy))
         npt, nt, nx, ny, nl = self._array.shape
-        array = b.ifft2(self._array,axes=(-3,-2)) # npt, nt, nx, ny, nl indices. iFFT x,y
+        # self._array is an fftshifted spectrum, so undo the shift before the
+        # inverse transform and re-apply it after (as applyMask does).  Omitting
+        # these leaves a fractional-bin phase ramp that cancels only for even
+        # grid sizes; for odd nx/ny it smears the padded spectrum (Dirichlet
+        # leakage, up to ~10% amplitude error).
+        array = b.ifft2(b.ifftshift(self._array, axes=(-3,-2)), axes=(-3,-2)) # npt, nt, nx, ny, nl indices. iFFT x,y
         new = b.zeros((npt, nt, nx+pix_x*2, ny+pix_y*2, nl), type_match = self._array)
         i1=pix_x ; i2=pix_x+nx ; j1=pix_y ; j2=pix_y+ny
         new[:,:,i1:i2,j1:j2,:] += array
-        self._array = b.fft2(new,axes=(-3,-2))
+        self._array = b.fftshift(b.fft2(new,axes=(-3,-2)), axes=(-3,-2))
         # xs=[0,1,2,3,4], dx=1, add 3. new should be -3,-2,-1,0,1,2,3,4,5,6,7. from x[0]-N*dx, to x[-1]+N*dx, and length len(xs)+2*N
         self._xs = b.linspace( self._xs[0]-dx*pix_x , self._xs[-1]+dx*pix_x , nx+pix_x*2 )
         self._ys = b.linspace( self._ys[0]-dy*pix_y , self._ys[-1]+dy*pix_y , ny+pix_y*2 )
