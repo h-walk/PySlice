@@ -672,3 +672,60 @@ def _make_wf_data(tmp_path, n_time, backend=None):
         backend=backend,
         cache_dir=tmp_path,
     )
+
+
+def test_wavefunction_cache_key_uses_full_trajectory(tmp_path, monkeypatch):
+    # The key hashes the whole trajectory, so runs differing only in a later
+    # frame or in y/z (e.g. a temperature sweep from the same initial structure)
+    # no longer collide on the frame-0-x fingerprint.
+    monkeypatch.chdir(tmp_path)
+    base = (np.random.RandomState(0).rand(5, 2, 3) * 3).astype(np.float32)
+
+    def key(pos):
+        traj = Trajectory(
+            atom_types=np.array([14, 14]), positions=pos.astype(np.float32),
+            velocities=np.zeros_like(pos, dtype=np.float32),
+            box_matrix=np.diag([8.0, 8.0, 3.0]), timestep=0.1)
+        calc = MultisliceCalculator(force_cpu=True)
+        calc.setup(traj, aperture=30, voltage_eV=100e3, sampling=0.25,
+                   slice_thickness=1.0, probe_positions=[(4.0, 4.0)],
+                   cache_wavefunctions=False)
+        return calc.cache_key
+
+    k = key(base.copy())
+    assert key(base.copy()) == k                       # identical -> shared cache
+    later = base.copy(); later[3, 0, 0] += 0.5
+    assert key(later) != k                             # differs only in frame 3
+    ycomp = base.copy(); ycomp[0, 0, 1] += 0.5
+    assert key(ycomp) != k                             # differs only in frame-0 y
+
+
+def _make_layered_wf(cache_dir, n_layers=2, seed=0):
+    nt = 16
+    t = np.arange(nt) * 0.1
+    arr = np.zeros((1, nt, 2, 2, n_layers), dtype=np.complex128)
+    for layer in range(n_layers):
+        freq = (layer + 1) * 1.0 + seed * 0.3  # distinct per layer/dataset
+        arr[0, :, :, :, layer] = np.cos(2 * np.pi * freq * t)[:, None, None]
+    probe = SimpleNamespace(
+        eV=1e5, wavelength=0.037, mrad=30.0,
+        _array=NumpyBackend().asarray(np.zeros((1, 1, 2, 2), dtype=np.complex128)))
+    return WFData(
+        probe_positions=[(0.0, 0.0)], probe_xs=[0.0], probe_ys=[0.0], time=t,
+        kxs=np.arange(2.0), kys=np.arange(2.0), xs=np.arange(2.0), ys=np.arange(2.0),
+        layer=np.arange(n_layers), array=arr, probe=probe,
+        backend=NumpyBackend(), cache_dir=cache_dir)
+
+
+def test_tacaw_cache_distinguishes_layer_dtype_and_dataset(tmp_path):
+    # The tacaw.npy cache used a shape-only check, so a different layer / dtype /
+    # dataset in the same cache_dir was silently served the first spectrum.
+    wf = _make_layered_wf(tmp_path, seed=1)
+    s0 = to_numpy(TACAWData(wf, layer_index=0)._array).copy()
+    s1 = to_numpy(TACAWData(wf, layer_index=1)._array)   # same dir, other layer
+    assert not np.allclose(s0, s1)
+    assert np.allclose(s0, to_numpy(TACAWData(wf, layer_index=0)._array))  # hit is stable
+    sc = to_numpy(TACAWData(wf, layer_index=0, keep_complex=True)._array)
+    assert sc.dtype.kind == "c"                          # complex, not cached real intensity
+    wf2 = _make_layered_wf(tmp_path, seed=2)             # different data, same cache_dir
+    assert not np.allclose(s0, to_numpy(TACAWData(wf2, layer_index=0)._array))

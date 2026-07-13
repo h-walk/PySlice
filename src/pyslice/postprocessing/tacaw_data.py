@@ -3,6 +3,8 @@ Core data structure for TACAW EELS calculations.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 from pathlib import Path
@@ -172,6 +174,7 @@ class TACAWData(PySliceSerial, Signal):
 
         cache_tacaw = self.cache_dir / "tacaw.npy"
         cache_freq  = self.cache_dir / "tacaw_freq.npy"
+        cache_meta  = self.cache_dir / "tacaw_meta.json"
 
         fft_len = self.chunk_size_time if self.chunk_size_time is not None else len(self._time)
         if self.chunk_size_time is None:
@@ -186,20 +189,36 @@ class TACAWData(PySliceSerial, Signal):
             else:
                 self.n_chunks = len(self._time) // self.chunk_size_time
 
-        if not self.force_rerun and cache_tacaw.exists():
-            cached = np.load(cache_tacaw)
-            _, nt, nx, ny, _ = self._wf_array.shape
-            _, nw, nx2, ny2  = cached.shape
-            if nw == fft_len and nx == nx2 and ny == ny2:
-                self._frequencies = b.asarray(np.load(cache_freq))
-                self._array = b.asarray(cached)
-                return
-
+        # Resolve the layer up front: it — together with keep_complex, the
+        # chunking and the source-wavefunction identity — is part of the cache
+        # identity, so a different layer / dtype / dataset sharing this cache_dir
+        # is never served the wrong cached spectrum (a shape-only check was).
         if layer_index is None:
             layer_index = len(self._layer) - 1
         if not (0 <= layer_index < len(self._layer)):
             raise ValueError(
                 f"layer_index {layer_index} out of range [0, {len(self._layer) - 1}]")
+
+        meta = self._tacaw_cache_meta(layer_index, fft_len)
+        if not self.force_rerun and cache_tacaw.exists() and cache_meta.exists():
+            try:
+                with open(cache_meta) as f:
+                    cached_meta = json.load(f)
+            except (OSError, ValueError):
+                cached_meta = None
+            if cached_meta == meta:
+                cached = np.load(cache_tacaw)
+                if list(cached.shape) == meta["array_shape"]:
+                    self._frequencies = b.asarray(np.load(cache_freq))
+                    self._array = b.asarray(cached)
+                    return
+
+        # A (re)compute invalidates any previous completion marker first, so an
+        # interrupted run (partial tacaw.npy — notably the memmap accumulator)
+        # is never mistaken for a complete cache on the next load.
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        if cache_meta.exists():
+            cache_meta.unlink()
 
         wf_layer = self._wf_array[:, :, :, :, layer_index]  # p,t,kx,ky
 
@@ -243,6 +262,46 @@ class TACAWData(PySliceSerial, Signal):
         np.save(cache_freq,  to_numpy(self._frequencies))
         if not self.use_memmap:
             np.save(cache_tacaw, to_numpy(self._array))
+        # Completion marker written LAST, so its presence guarantees a fully
+        # written tacaw.npy that matches this metadata.
+        with open(cache_meta, "w") as f:
+            json.dump(meta, f)
+
+    # Bump when the TACAW FFT/normalisation changes so stale tacaw.npy caches
+    # are not reused across versions.
+    _TACAW_CACHE_VERSION = 1
+
+    def _tacaw_cache_meta(self, layer_index: int, fft_len: int) -> dict:
+        """Identity of the cached spectrum: everything that changes its values."""
+        n_probes = int(self._wf_array.shape[0])
+        nkx = int(self._wf_array.shape[2])
+        nky = int(self._wf_array.shape[3])
+        return {
+            "cache_version": self._TACAW_CACHE_VERSION,
+            "layer_index": int(layer_index),
+            "keep_complex": bool(self.keep_complex),
+            "fft_len": int(fft_len),
+            "n_chunks": int(self.n_chunks),
+            "array_shape": [n_probes, int(fft_len), nkx, nky],
+            "wf_dtype": str(getattr(self._wf_array, "dtype", "")),
+            "wf_fingerprint": self._wf_fingerprint(),
+        }
+
+    def _wf_fingerprint(self) -> str:
+        """Content fingerprint of the source wavefunction array.
+
+        Samples up to ~1M elements strided across the whole array (so it detects
+        any global difference, unlike a frame-0-style sample) and hashes them
+        with the shape — enough to tell a different dataset in the same cache_dir
+        apart from this one without a full multi-GB scan.
+        """
+        arr = self._wf_array
+        flat = arr.reshape(-1)
+        n = int(flat.shape[0])
+        step = max(1, n // (1 << 20))
+        sample = np.ascontiguousarray(to_numpy(flat[::step]))
+        payload = repr(tuple(int(s) for s in arr.shape)).encode() + sample.tobytes()
+        return hashlib.md5(payload).hexdigest()
 
     def fft_from_wf_data(self, layer_index: Optional[int] = None):
         """Public alias for backward compatibility."""

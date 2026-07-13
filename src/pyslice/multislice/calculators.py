@@ -50,24 +50,45 @@ class MultisliceCalculator:
             30: 'Zn', 31: 'Ga', 32: 'Ge', 33: 'As', 34: 'Se', 35: 'Br', 36: 'Kr'
         }
 
+    # Bump whenever a change to propagation / potential / probe code alters the
+    # cached wavefunction VALUES, so that stale psi_data from an older version
+    # is not silently reloaded as if it were current.
+    _CACHE_VERSION = 2
+
     def _generate_cache_key(self, trajectory, aperture, voltage_eV,
                             slice_thickness, sampling, probe_positions,
                             spatial_decoherence, temporal_decoherence,
                             probe_array=None, stored_layer_indices=None):
-        """Generate a short hash for parameters that affect wavefunction output."""
-        firstNAtoms = [str(np.round(v, 4)) for v in trajectory.positions[0, :100, 0]]  # first timestep's first 10 atom's x positions
+        """Generate a short hash for parameters that affect wavefunction output.
+
+        The trajectory is hashed in full (every frame, atom and component)
+        rather than sampled from frame 0, so runs that differ only in later
+        frames or in y/z — e.g. a temperature/seed sweep from the same initial
+        structure — get distinct caches instead of silently sharing one.
+        """
+        def _hash_array(a):
+            return hashlib.md5(
+                np.ascontiguousarray(to_numpy(a)).tobytes()).hexdigest()
+
         params = {
-            'firstNAtoms': ",".join(firstNAtoms),  # WHY? prevents the same script from re-using psi_data when positions change
+            'cache_version': self._CACHE_VERSION,
+            'traj_positions': _hash_array(trajectory.positions),
             'n_frames': trajectory.n_frames,
             'n_atoms': trajectory.n_atoms,
-            'box_matrix': trajectory.box_matrix.tolist(),
-            'atom_types': trajectory.atom_types.tolist(),
+            'box_matrix': np.asarray(trajectory.box_matrix).tolist(),
+            'atom_types': np.asarray(trajectory.atom_types).tolist(),
             'aperture': aperture,
             'voltage_eV': voltage_eV,
             'slice_thickness': slice_thickness,
             'sampling': sampling,
-            'probe_positions': probe_positions,
-            'backend': 'torch' if self._backend.xp is not np else 'numpy',
+            'probe_positions': np.asarray(probe_positions).tolist(),
+            'kth': self.kth,
+            'max_kx': self.max_kx,
+            'max_ky': self.max_ky,
+            'min_dk': self.min_dk,
+            'prism': self.prism,
+            'slice_axis': self.slice_axis,
+            'backend': 'torch' if not isinstance(self._backend, NumpyBackend) else 'numpy',
         }
         if stored_layer_indices is not None:
             params['stored_layer_indices'] = tuple(stored_layer_indices)
@@ -76,8 +97,9 @@ class MultisliceCalculator:
         if temporal_decoherence is not None:
             params['temporal_decoherence'] = temporal_decoherence
         if probe_array is not None:
-            probe_np = np.ascontiguousarray(to_numpy(probe_array).ravel()[:1000])
-            params['probe_hash'] = hashlib.md5(probe_np.tobytes()).hexdigest()
+            # Hashing the full probe array captures defocus, aberrations,
+            # decoherence and the aperture/crop geometry baked into the probe.
+            params['probe_hash'] = _hash_array(probe_array)
         param_str = str(sorted(params.items()))
         return hashlib.md5(param_str.encode()).hexdigest()[:12]
 
