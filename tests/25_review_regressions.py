@@ -399,6 +399,86 @@ def test_static_trajectory_offcentre_probe_gives_frame_invariant_exit_wave(tmp_p
         np.testing.assert_allclose(arr[:, t], reference, atol=1e-10, rtol=0)
 
 
+def test_explicit_probe_position_list_is_simulated_verbatim(tmp_path, monkeypatch):
+    # A non-grid probe_positions list (e.g. two atomic columns on a diagonal)
+    # used to be silently rebuilt into the outer-product grid of its unique x/y
+    # values.  That both changed the physics and desynced n_probes from the
+    # number of probes actually simulated -> a shape-mismatch crash as soon as
+    # wavefunctions were returned.
+    monkeypatch.chdir(tmp_path)
+    n_frames = 2
+    static = np.tile(np.array([[[3.1, 4.7, 1.5]]], dtype=float), (n_frames, 1, 1))
+    traj = Trajectory(
+        atom_types=np.array([14]),
+        positions=static,
+        velocities=np.zeros_like(static),
+        box_matrix=np.diag([8.0, 8.0, 3.0]),
+        timestep=0.1,
+    )
+    requested = [(2.0, 2.0), (6.0, 6.0)]  # diagonal -> not a full 2x2 grid
+    calc = MultisliceCalculator(force_cpu=True)
+    calc.setup(
+        traj,
+        aperture=30,
+        voltage_eV=60e3,
+        sampling=0.25,
+        slice_thickness=1.0,
+        probe_positions=requested,
+        cache_wavefunctions=False,
+    )
+    wave = calc.run(force_rerun=True)  # must not raise
+
+    # exactly the requested probes are simulated (not expanded to a 4-point grid)
+    np.testing.assert_allclose(
+        np.asarray(calc.base_probe.probe_positions, dtype=float), requested)
+    assert len(calc.probe_positions) == len(calc.base_probe.probe_positions)
+    assert to_numpy(wave.array).shape[0] == len(requested)
+
+
+def _adf_image_for(probe_kwargs, tmp_path, monkeypatch):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(tmp_path)
+    static = np.tile(
+        np.array([[[3.1, 4.7, 1.5], [5.5, 2.2, 1.5]]], dtype=float), (2, 1, 1))
+    traj = Trajectory(
+        atom_types=np.array([14, 14]),
+        positions=static,
+        velocities=np.zeros_like(static),
+        box_matrix=np.diag([8.0, 8.0, 3.0]),
+        timestep=0.1,
+    )
+    calc = MultisliceCalculator(force_cpu=True)
+    calc.setup(traj, aperture=30, voltage_eV=60e3, sampling=0.25,
+               slice_thickness=1.0, ADF=(45, 150), cache_wavefunctions=False,
+               **probe_kwargs)
+    wf, _ = calc.run(force_rerun=True)
+    return to_numpy(HAADFData(wf).calculateADF())
+
+
+def test_full_grid_probe_list_canonicalised_so_image_maps_correctly(tmp_path, monkeypatch):
+    # A full grid handed in as an explicit list in a non-meshgrid order must
+    # produce the SAME 2D image as the probe_xs/probe_ys path: WFData.reshaped()
+    # assumes meshgrid order, so setup() canonicalises full grids to it.
+    reference = _adf_image_for(dict(probe_xs=[2.0, 6.0], probe_ys=[2.0, 6.0]),
+                               tmp_path / "ref", monkeypatch)
+    scrambled = _adf_image_for(dict(probe_positions=[(6., 6.), (2., 2.), (6., 2.), (2., 6.)]),
+                               tmp_path / "scr", monkeypatch)
+    nested = _adf_image_for(dict(probe_positions=[(2., 2.), (2., 6.), (6., 2.), (6., 6.)]),
+                            tmp_path / "nest", monkeypatch)
+    np.testing.assert_allclose(scrambled, reference, atol=1e-10, rtol=0)
+    np.testing.assert_allclose(nested, reference, atol=1e-10, rtol=0)
+
+
+def test_malformed_probe_positions_raise_clear_error(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    traj = _make_tiny_trajectory()
+    for bad in [(4.0, 4.0), [], [(2, 2, 4), (6, 6, 4)]]:
+        calc = MultisliceCalculator(force_cpu=True)
+        with pytest.raises(ValueError, match="probe_positions must be"):
+            calc.setup(traj, aperture=5, voltage_eV=60e3, sampling=1.0,
+                       slice_thickness=1.0, probe_positions=bad)
+
+
 def _make_wf_data(tmp_path, n_time, backend=None):
     backend = NumpyBackend() if backend is None else backend
     probe = SimpleNamespace(

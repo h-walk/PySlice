@@ -258,14 +258,49 @@ class MultisliceCalculator:
 
         # Preferred to pass probe_xs and probe_ys from which we will define a grid
         if self.probe_xs is not None and self.probe_ys is not None:
+            if self.probe_positions is not None:
+                logger.warning(
+                    "Both probe_xs/probe_ys and probe_positions were supplied; "
+                    "probe_positions is ignored in favour of the "
+                    "probe_xs x probe_ys grid."
+                )
             x, y = np.meshgrid(self.probe_xs, self.probe_ys)
             self.probe_positions = np.reshape([x, y], (2, len(x.flat))).T  # x,y looped indices to match what multislice.Probe does
 
-        # If probe_positions provided but not probe_xs/probe_ys, derive them
+        # If probe_positions provided but not probe_xs/probe_ys, derive the scan
+        # coordinates.  probe_xs/probe_ys are the unique coordinates used to
+        # reshape the flat probe axis into a 2D image (WFData.reshaped / HAADF),
+        # which assumes the meshgrid flattening order (x fastest, y outer).
         elif self.probe_positions is not None:
-            positions = np.asarray(self.probe_positions)
+            positions = np.asarray(self.probe_positions, dtype=float)
+            if positions.ndim != 2 or positions.shape[1] != 2:
+                raise ValueError(
+                    "probe_positions must be a sequence of (x, y) pairs with "
+                    f"shape (N, 2); got array of shape {positions.shape}."
+                )
             self.probe_xs = sorted(list(set(positions[:, 0])))
             self.probe_ys = sorted(list(set(positions[:, 1])))
+            gx, gy = np.meshgrid(self.probe_xs, self.probe_ys)
+            grid = np.reshape([gx, gy], (2, gx.size)).T
+            pos_set = {(round(px, 6), round(py, 6)) for px, py in positions}
+            grid_set = {(round(px, 6), round(py, 6)) for px, py in grid}
+            if len(positions) == len(grid) and pos_set == grid_set:
+                # The points tile a full rectangular grid: canonicalise their
+                # order to the meshgrid flattening so the 2D image maps correctly
+                # regardless of the order they were passed in (e.g. a nested
+                # [(x, y) for x in xs for y in ys] loop).
+                self.probe_positions = grid
+            else:
+                # Arbitrary point set (e.g. site-resolved TACAW on selected
+                # columns): simulate exactly as given.  Per-probe spectra are
+                # correct, but 2D image reshaping cannot apply.
+                self.probe_positions = positions
+                logger.warning(
+                    "probe_positions (%d points) do not form a full %d x %d "
+                    "grid; per-probe spectra are correct but image reshaping "
+                    "(HAADFData/spectrum_image) will not apply.",
+                    len(positions), len(self.probe_xs), len(self.probe_ys),
+                )
 
         # Set up default probe position if not provided
         if self.probe_positions is None:
@@ -278,7 +313,12 @@ class MultisliceCalculator:
         else:
             # OR, we'll propagate our series of real-space probes.
             # need to make sure they're on the correct device, and defer_shifts=True means the calculator controls when to expand the probe cube (see loop_probes)
-            self.base_probe = Probe(xs, ys, self.aperture, self.voltage_eV, backend=b, probe_xs=self.probe_xs, probe_ys=self.probe_ys, probe_positions=self.probe_positions, cropping=self.probe_cropping, defer_shifts=True)
+            # Pass the canonical probe_positions directly (already meshed in the
+            # probe_xs/probe_ys branch above).  Passing probe_xs/probe_ys here
+            # would make Probe rebuild an outer-product grid, so an explicit
+            # position list would be silently replaced by that grid and desync
+            # n_probes from the actually-simulated probes (shape-mismatch crash).
+            self.base_probe = Probe(xs, ys, self.aperture, self.voltage_eV, backend=b, probe_positions=self.probe_positions, cropping=self.probe_cropping, defer_shifts=True)
 
         defocus_values = to_numpy(self.defocus)
         if np.ndim(defocus_values) != 0:
