@@ -8,7 +8,7 @@ if TORCH_AVAILABLE:
     from pyslice.backend import TorchBackend
 from pyslice.multislice import calculators as calculators_module
 from pyslice.multislice.calculators import MultisliceCalculator
-from pyslice.multislice.multislice import PrismProbe, Probe, wavelength
+from pyslice.multislice.multislice import PrismProbe, Probe, Propagate, wavelength
 from pyslice.multislice.potentials import Potential
 from pyslice.multislice.trajectory import Trajectory
 from pyslice.postprocessing.haadf_data import HAADFData
@@ -477,6 +477,76 @@ def test_malformed_probe_positions_raise_clear_error(tmp_path, monkeypatch):
         with pytest.raises(ValueError, match="probe_positions must be"):
             calc.setup(traj, aperture=5, voltage_eV=60e3, sampling=1.0,
                        slice_thickness=1.0, probe_positions=bad)
+
+
+# ---------------------------------------------------------------------------
+# Regression: probe cropping (min_dk) must (a) not crash on the b.roll call and
+# (b) read the potential sub-window centred on each probe, not the grid corner,
+# for every coherent (decoherence) copy.  For a single-slice potential there is
+# no inter-slice propagation, so a cropped exit wave must EXACTLY equal the
+# uncropped exit wave restricted to that probe's window.
+# ---------------------------------------------------------------------------
+
+def _single_slice_potential(xs, ys):
+    return Potential(
+        xs, ys, np.array([1.5]),
+        positions=np.array([[4.0, 4.0, 1.5]]),  # one atom at cell centre
+        atom_types=np.array([14]),
+        backend=NumpyBackend(),
+        kind="kirkland",
+    )
+
+
+def _propagate(position, cropping, decohere=False):
+    xs = np.linspace(0.0, 8.0, 32, endpoint=False)
+    probe = Probe(xs, xs, mrad=30.0, eV=100e3, backend=NumpyBackend(),
+                  probe_positions=np.asarray([position], dtype=float),
+                  cropping=cropping, defer_shifts=True)
+    if decohere:
+        probe.addTemporalDecoherence(2.0, 3)
+    else:
+        probe.applyShifts()
+    exit_wave = to_numpy(Propagate(probe, _single_slice_potential(xs, xs),
+                                   NumpyBackend(), onthefly=True))
+    return exit_wave, probe
+
+
+def test_cropped_probe_reads_window_centred_on_probe_not_grid_corner():
+    C = 16
+    for position, decohere in [((4.0, 4.0), False),   # centred
+                               ((2.0, 6.0), False),   # off-centre
+                               ((4.0, 4.0), True)]:    # centred + decoherence
+        full, _ = _propagate(position, 0, decohere)
+        crop, probe = _propagate(position, C, decohere)
+        assert crop.shape[-2:] == (C, C)
+        # every coherent copy must match the uncropped window at the probe's
+        # recorded offset (b.roll crash + corner-window + decoherence-row bugs)
+        ox, oy = (int(v) for v in probe.offsets[0])
+        window = full[:, ox:ox + C, oy:oy + C]
+        np.testing.assert_allclose(crop, window, atol=1e-12, rtol=0)
+    # and the centred crop must NOT be the grid-corner window (the old bug)
+    full, _ = _propagate((4.0, 4.0), 0)
+    crop, _ = _propagate((4.0, 4.0), C)
+    assert np.max(np.abs(crop[0] - full[0, 0:C, 0:C])) > 1e-3
+
+
+def test_min_dk_calculator_run_completes(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    static = np.tile(np.array([[[4.0, 4.0, 1.5]]], dtype=float), (2, 1, 1))
+    traj = Trajectory(
+        atom_types=np.array([14]),
+        positions=static,
+        velocities=np.zeros_like(static),
+        box_matrix=np.diag([8.0, 8.0, 3.0]),
+        timestep=0.1,
+    )
+    calc = MultisliceCalculator(force_cpu=True)
+    calc.setup(traj, aperture=30, voltage_eV=100e3, sampling=0.25,
+               slice_thickness=1.0, probe_positions=[(4.0, 4.0), (2.0, 6.0)],
+               min_dk=0.25, cache_wavefunctions=False)
+    arr = to_numpy(calc.run(force_rerun=True).array)  # previously TypeError in b.roll
+    assert np.all(np.isfinite(arr))
+    assert np.max(np.abs(arr)) > 0
 
 
 def _make_wf_data(tmp_path, n_time, backend=None):

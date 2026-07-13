@@ -389,7 +389,13 @@ class Probe:
 
         for i, (px, py) in enumerate(self.probe_positions):
             if px - self.lx / 2 == 0 and py - self.ly / 2 == 0:
-                continue   # already centred
+                # Already centred: no phase ramp needed, but a cropped probe's
+                # window still begins at the crop origin (i1, j1), not the grid
+                # corner (0, 0), so record that offset for Propagate.
+                if self.cropping:
+                    self.offsets[i, 0] = self.nx // 2 - self.cropping // 2
+                    self.offsets[i, 1] = self.ny // 2 - self.cropping // 2
+                continue
             self._array[:, i, :, :], (dpx, dpy) = self.placeProbe(
                 self._array[:, i, :, :], px, py)
             self.offsets[i, 0] = int(dpx)
@@ -1049,11 +1055,19 @@ def Propagate(
             # probe position without allocating a full (npt, nx, ny) array.
             nx_full, ny_full = potential_slice.shape
             xr = b.arange(nx_full); yr = b.arange(ny_full)
-            xi = b.zeros((len(sigma), probe.cropping), dtype=int)
-            yi = b.zeros((len(sigma), probe.cropping), dtype=int)
-            for p, (ox, oy) in enumerate(probe.offsets):
-                xi[p, :] = b.roll(xr, -ox)[:probe.cropping]
-                yi[p, :] = b.roll(yr, -oy)[:probe.cropping]
+            n_batch = len(sigma)
+            npt_off = probe.offsets.shape[0]
+            xi = b.zeros((n_batch, probe.cropping), dtype=int)
+            yi = b.zeros((n_batch, probe.cropping), dtype=int)
+            # The batch axis flattens (nc, npt) as c*npt + p (see reshape above),
+            # so batch row bi belongs to probe position bi % npt and must use
+            # that position's window offset — shared across all nc coherent
+            # copies.  (Previously only the first npt rows were filled, so every
+            # decoherence copy beyond the first read the grid-corner window.)
+            for bi in range(n_batch):
+                ox, oy = probe.offsets[bi % npt_off]
+                xi[bi, :] = b.roll(xr, -int(ox), 0)[:probe.cropping]
+                yi[bi, :] = b.roll(yr, -int(oy), 0)[:probe.cropping]
             # Advanced indexing: pot_stack[p, i, j] = potential_slice[xi[p,i], yi[p,j]]
             pot_stack = potential_slice[xi[:, :, None], yi[:, None, :]]
             t = b.exp(1j * sigma[:, None, None] * pot_stack)
