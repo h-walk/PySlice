@@ -11,6 +11,7 @@ from pyslice.multislice.calculators import MultisliceCalculator
 from pyslice.multislice.multislice import PrismProbe, Probe, Propagate, wavelength
 from pyslice.multislice.potentials import Potential
 from pyslice.multislice.trajectory import Trajectory
+from pyslice.io.loader import Loader
 from pyslice.postprocessing.haadf_data import HAADFData
 from pyslice.postprocessing.tacaw_data import TACAWData
 from pyslice.postprocessing.wf_data import WFData
@@ -594,6 +595,37 @@ def test_slice_axis_other_than_z_is_rejected(tmp_path, monkeypatch):
                   positions=np.array([[1.0, 1.0, 1.0]]),
                   atom_types=np.array([14]), backend=NumpyBackend(),
                   kind="gauss", slice_axis=0)
+
+
+def _loader(tmp_path, **kwargs):
+    dump = tmp_path / "dummy.lammpstrj"
+    dump.write_text("")  # only needs to exist; we call the resolver directly
+    return Loader(filename=str(dump), **kwargs)
+
+
+def test_ovito_type_ids_are_never_used_as_atomic_numbers(tmp_path):
+    # LAMMPS type IDs must not be treated as Z. Element identity comes from an
+    # explicit mapping or the file's embedded element names; otherwise abort.
+    ids = np.array([1, 1, 2])
+
+    # embedded element names present -> mapped to element symbols
+    resolved = _loader(tmp_path)._resolve_ovito_types(ids, {1: "Si", 2: "O"})
+    assert list(resolved) == ["Si", "Si", "O"]
+
+    # no names and no mapping -> abort asking for an exact mapping
+    with pytest.raises(ValueError, match="atom_mapping"):
+        _loader(tmp_path)._resolve_ovito_types(ids, {})
+    # a numeric/junk type name is NOT accepted as an element
+    with pytest.raises(ValueError, match="atom_mapping"):
+        _loader(tmp_path)._resolve_ovito_types(np.array([1]), {1: "1"})
+
+    # explicit mapping wins and yields atomic numbers
+    resolved = _loader(tmp_path, atom_mapping={1: "Si", 2: "O"})._resolve_ovito_types(ids, {})
+    assert list(resolved) == [14, 14, 8]
+
+    # explicit mapping must be exact: a missing type aborts
+    with pytest.raises(ValueError, match="missing entries"):
+        _loader(tmp_path, atom_mapping={1: "Si"})._resolve_ovito_types(ids, {2: "O"})
 
 
 def test_pyproject_sdist_ships_package_source():

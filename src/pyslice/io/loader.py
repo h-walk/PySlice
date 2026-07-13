@@ -85,25 +85,50 @@ class Loader:
 
         return result
 
-    def _apply_atomic_mapping(self, atom_types: np.ndarray) -> np.ndarray:
-        """Apply atomic number mapping to atom types."""
-        if self.atomic_numbers is None:
-            return atom_types
+    def _resolve_ovito_types(self, atom_type_ids: np.ndarray,
+                             type_names: Optional[Dict[int, str]]) -> np.ndarray:
+        """Resolve OVITO particle-type IDs to element identities.
 
-        mapped_types = atom_types.copy()
-        unique_types = np.unique(atom_types)
-        unmapped_types = []
+        Element identity comes from an explicit ``atom_mapping`` when provided,
+        otherwise from the element names embedded in the file (OVITO's
+        ``ParticleType.name``).  LAMMPS-style integer type IDs are NEVER used as
+        atomic numbers; if neither source yields a valid element for every type
+        present, loading aborts and asks for an explicit mapping.
+        """
+        atom_type_ids = np.asarray(atom_type_ids)
+        used = [int(t) for t in np.unique(atom_type_ids)]
 
-        for atom_type in unique_types:
-            if atom_type in self.atomic_numbers:
-                mapped_types[atom_types == atom_type] = self.atomic_numbers[atom_type]
-            else:
-                unmapped_types.append(atom_type)
+        # 1) Explicit mapping wins, but it must be exact (cover every type).
+        if self.atomic_numbers is not None:
+            missing = [t for t in used if t not in self.atomic_numbers]
+            if missing:
+                raise ValueError(
+                    f"atom_mapping is missing entries for particle type(s) "
+                    f"{missing}. Provide an exact mapping for every type, e.g. "
+                    f"atom_mapping={{{used[0]}: 'Si', ...}}."
+                )
+            return np.array([self.atomic_numbers[int(t)] for t in atom_type_ids],
+                            dtype=np.int32)
 
-        if unmapped_types:
-            logger.warning(f"No mapping provided for atom types {unmapped_types}.")
-
-        return mapped_types
+        # 2) Otherwise use the element names embedded in the file.
+        type_names = type_names or {}
+        symbols, unresolved = {}, []
+        for t in used:
+            name = str(type_names.get(t, "") or "").strip()
+            try:
+                get_z_from_element(name)  # validates it is a real element symbol
+                symbols[t] = name
+            except ValueError:
+                unresolved.append((t, name))
+        if unresolved:
+            raise ValueError(
+                "Could not identify elements from the file for particle "
+                f"type(s) {[t for t, _ in unresolved]} (embedded names: "
+                f"{[n for _, n in unresolved]!r}). LAMMPS type IDs are not "
+                "element identities. Supply an exact atom_mapping, e.g. "
+                f"atom_mapping={{{used[0]}: 'Si'}}."
+            )
+        return np.array([symbols[int(t)] for t in atom_type_ids])
 
     def _get_cache_files(self) -> Dict[str, Path]:
         """Get paths for cache files.
@@ -310,14 +335,16 @@ for i in range(n_frames):
     except Exception as exc:
         print(f"Failed to load frame {i}: {exc}", file=sys.stderr)
 
-if (
-    hasattr(frame0_data.particles, "particle_types")
-    and frame0_data.particles.particle_types is not None
-    and len(frame0_data.particles.particle_types) == n_atoms
-):
-    atom_types = np.array(frame0_data.particles.particle_types, dtype=np.int32)
+pt = getattr(frame0_data.particles, "particle_types", None)
+type_ids = []
+type_names = []
+if pt is not None and len(pt) == n_atoms:
+    atom_types = np.array(pt, dtype=np.int32)
+    for t in (getattr(pt, "types", None) or []):
+        type_ids.append(int(t.id))
+        type_names.append(str(t.name or ""))
 else:
-    print("No particle type data found. Setting all types to 1.", file=sys.stderr)
+    print("No particle type data found. Treating all atoms as one type.", file=sys.stderr)
     atom_types = np.ones(n_atoms, dtype=np.int32)
 
 np.savez(
@@ -325,6 +352,8 @@ np.savez(
     positions=positions,
     velocities=velocities,
     atom_types=atom_types,
+    type_ids=np.array(type_ids, dtype=np.int32),
+    type_names=np.array(type_names, dtype="<U16"),
     box_matrix=h_matrix,
 )
 '''
@@ -345,7 +374,9 @@ np.savez(
             with np.load(output_path) as data:
                 positions = data["positions"]
                 velocities = data["velocities"]
-                atom_types = self._apply_atomic_mapping(data["atom_types"])
+                type_names = {int(i): str(n) for i, n
+                              in zip(data["type_ids"], data["type_names"])}
+                atom_types = self._resolve_ovito_types(data["atom_types"], type_names)
                 box_matrix = data["box_matrix"]
 
         logger.info(f"Loaded {positions.shape[0]} frames with {positions.shape[1]} atoms")
@@ -436,17 +467,20 @@ np.savez(
                 logger.error(f"Failed to load frame {i}: {e}")
                 continue
 
-        # Get atom types
-        if (hasattr(frame0_data.particles, 'particle_types') and
-            frame0_data.particles.particle_types is not None and
-            len(frame0_data.particles.particle_types) == n_atoms):
-            atom_types = np.array(frame0_data.particles.particle_types, dtype=np.int32)
+        # Get per-atom type IDs and the element names OVITO embeds for each type.
+        pt = getattr(frame0_data.particles, 'particle_types', None)
+        if pt is not None and len(pt) == n_atoms:
+            atom_type_ids = np.array(pt, dtype=np.int32)
+            type_names = {int(t.id): (t.name or "").strip()
+                          for t in (getattr(pt, 'types', None) or [])}
         else:
-            logger.warning("No particle type data found. Setting all types to 1.")
-            atom_types = np.ones(n_atoms, dtype=np.int32)
+            logger.warning("No particle type data found. Treating all atoms as one type.")
+            atom_type_ids = np.ones(n_atoms, dtype=np.int32)
+            type_names = {}
 
-        # Apply atomic mapping
-        atom_types = self._apply_atomic_mapping(atom_types)
+        # Resolve to element identities (explicit mapping or embedded names;
+        # never the raw LAMMPS type IDs).
+        atom_types = self._resolve_ovito_types(atom_type_ids, type_names)
 
         logger.info(f"Loaded {n_frames} frames with {n_atoms} atoms")
 
