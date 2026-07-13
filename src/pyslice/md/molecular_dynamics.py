@@ -274,6 +274,21 @@ class MDCalculator:
 
         return atoms
 
+    @staticmethod
+    def _npt_barostat_params(pressure_bar: float, bulk_modulus_GPa: float):
+        """Return (externalstress, pfactor) for ase.md.npt.NPT, in ASE units.
+
+        externalstress is the target pressure converted from bar to eV/A^3;
+        pfactor = ptime^2 * B with ptime = 75 fs (ASE's suggested value) and B
+        the bulk modulus. Passing the bar value directly (as before) applied
+        ~1.6e5 bar, and pfactor = 75*fs**2 both dropped the square on ptime and
+        omitted B, so the barostat mass was ~10^5x too small.
+        """
+        externalstress = pressure_bar * units.bar
+        ptime = 75 * units.fs
+        pfactor = ptime ** 2 * (bulk_modulus_GPa * units.GPa)
+        return externalstress, pfactor
+
     def setup(
         self,
         atoms: Atoms,
@@ -281,6 +296,7 @@ class MDCalculator:
         timestep: float = 1.0,
         ensemble: str = 'nvt',
         pressure: float = 1.01325,
+        bulk_modulus: float = 100.0,
         friction: float = 0.02,
         production_ensemble: Optional[str] = None,
         production_friction: Optional[float] = None,
@@ -306,6 +322,9 @@ class MDCalculator:
             timestep: MD timestep (fs)
             ensemble: 'nvt', 'npt', or 'nve' (for equilibration)
             pressure: Target pressure for NPT (bar)
+            bulk_modulus: Approximate bulk modulus of the material (GPa), used to
+                          size the NPT barostat (pfactor = ptime^2 * B). Adjust
+                          per material; the default (100 GPa) is a metal-ish value.
             friction: Friction coefficient for Langevin thermostat during equilibration (fs^-1)
             production_ensemble: Ensemble for production run (default: same as equilibration)
                                  Use 'nve' for noise-free dynamics suitable for TACAW analysis
@@ -331,6 +350,7 @@ class MDCalculator:
         self.timestep = timestep
         self.ensemble = ensemble
         self.pressure = pressure
+        self.bulk_modulus = bulk_modulus
         self.friction = friction
         self.production_ensemble = production_ensemble if production_ensemble is not None else ensemble
         self.production_friction = production_friction if production_friction is not None else friction
@@ -371,13 +391,14 @@ class MDCalculator:
                 rng=self.rng,
             )
         elif ensemble.lower() == 'npt':
+            externalstress, pfactor = self._npt_barostat_params(pressure, bulk_modulus)
             self.dyn = NPT(
                 self.atoms,
                 timestep * units.fs,
                 temperature_K=temperature,
-                externalstress=pressure,
+                externalstress=externalstress,
                 ttime=25*units.fs,
-                pfactor=75*units.fs**2,
+                pfactor=pfactor,
             )
         elif ensemble.lower() == 'nve':
             from ase.md.verlet import VelocityVerlet
@@ -554,13 +575,15 @@ class MDCalculator:
                     rng=self.rng,
                 )
             elif self.production_ensemble.lower() == 'npt':
+                externalstress, pfactor = self._npt_barostat_params(
+                    self.pressure, self.bulk_modulus)
                 self.dyn = NPT(
                     self.atoms,
                     self.timestep * units.fs,
                     temperature_K=self.temperature,
-                    externalstress=self.pressure,
+                    externalstress=externalstress,
                     ttime=25*units.fs,
-                    pfactor=75*units.fs**2,
+                    pfactor=pfactor,
                 )
             elif self.production_ensemble.lower() == 'nve':
                 from ase.md.verlet import VelocityVerlet

@@ -15,6 +15,22 @@ from ..multislice.potentials import get_z_from_element
 
 logger = logging.getLogger(__name__)
 
+
+def _ovito_cell_to_row_convention(matrix):
+    """Convert an OVITO cell matrix to PySlice's row convention plus origin.
+
+    OVITO stores the three lattice vectors in the COLUMNS of a 3x4 matrix, with
+    the cell origin in the 4th column. PySlice (and the ASE path) store lattice
+    vectors as ROWS, so the 3x3 vector block is transposed. Returns
+    ``(box_matrix_rows, origin)``.
+    """
+    cell_np = np.asarray(matrix, dtype=np.float32)
+    h_matrix = cell_np[:3, :3].T
+    origin = (cell_np[:3, 3].copy() if cell_np.shape[1] > 3
+              else np.zeros(3, dtype=np.float32))
+    return h_matrix, origin
+
+
 class Loader:
     """Load a file or ASE object into the internal ``Trajectory`` representation.
 
@@ -308,7 +324,11 @@ except RuntimeError as exc:
 validate_frame_data(frame0_data, 0)
 
 n_atoms = len(frame0_data.particles.positions)
-h_matrix = np.array(frame0_data.cell.matrix, dtype=np.float32)[:3, :3]
+# OVITO stores lattice vectors in the columns of a 3x4 matrix (4th column is
+# the origin); transpose to PySlice's row convention and keep the origin.
+cell_np = np.array(frame0_data.cell.matrix, dtype=np.float32)
+h_matrix = cell_np[:3, :3].T
+cell_origin = cell_np[:3, 3].copy() if cell_np.shape[1] > 3 else np.zeros(3, dtype=np.float32)
 has_velocities = (
     hasattr(frame0_data.particles, "velocities")
     and frame0_data.particles.velocities is not None
@@ -334,6 +354,9 @@ for i in range(n_frames):
                 velocities[i] = np.array(frame_data.particles.velocities, dtype=np.float32)
     except Exception as exc:
         print(f"Failed to load frame {i}: {exc}", file=sys.stderr)
+
+if np.any(cell_origin != 0):
+    positions -= cell_origin
 
 pt = getattr(frame0_data.particles, "particle_types", None)
 type_ids = []
@@ -437,9 +460,12 @@ np.savez(
 
         self._validate_frame_data(frame0_data, 0)
 
-        # Extract basic info
+        # Extract basic info. OVITO stores the lattice vectors in the COLUMNS of
+        # a 3x4 matrix (the 4th column is the cell origin). Transpose to the
+        # row-vector convention used everywhere else in PySlice (and by the ASE
+        # path), and keep the origin so positions can be referenced to it.
         n_atoms = len(frame0_data.particles.positions)
-        h_matrix = np.array(frame0_data.cell.matrix, dtype=np.float32)[:3, :3]
+        h_matrix, cell_origin = _ovito_cell_to_row_convention(frame0_data.cell.matrix)
 
         has_velocities = (hasattr(frame0_data.particles, 'velocities') and
                          frame0_data.particles.velocities is not None)
@@ -466,6 +492,11 @@ np.savez(
             except Exception as e:
                 logger.error(f"Failed to load frame {i}: {e}")
                 continue
+
+        # Reference positions to the cell origin so they live in [0, L), matching
+        # the multislice grid (which starts at 0).
+        if np.any(cell_origin != 0):
+            positions -= cell_origin
 
         # Get per-atom type IDs and the element names OVITO embeds for each type.
         pt = getattr(frame0_data.particles, 'particle_types', None)

@@ -747,3 +747,49 @@ def test_cache_versions_are_derived_from_source(tmp_path):
     assert wf_v.startswith("v3-") and len(wf_v) > len("v3-")
     assert tacaw_v.startswith("v1-") and len(tacaw_v) > len("v1-")
     assert wf_v != tacaw_v
+
+
+def test_slice_positions_translates_atoms_into_new_box():
+    # slice_positions shrinks the box to the range width; the kept atoms must be
+    # translated by the range lower bound so they land inside [0, width), not
+    # left at their original coordinates outside the new box.
+    pos = np.array([[[1.0, 1.0, 1.0], [6.0, 6.0, 6.0], [7.5, 2.0, 3.0]]], dtype=float)
+    traj = Trajectory(
+        atom_types=np.array([14, 14, 14]), positions=pos,
+        velocities=np.zeros_like(pos), box_matrix=np.diag([10.0, 10.0, 10.0]),
+        timestep=0.1)
+    sliced = traj.slice_positions(x_range=(5.0, 8.0))
+    assert sliced.n_atoms == 2
+    assert sliced.box_matrix[0, 0] == 3.0
+    xs = sliced.positions[0, :, 0]
+    assert np.all((xs >= 0.0) & (xs <= 3.0))          # atoms 6.0, 7.5 -> 1.0, 2.5
+    np.testing.assert_allclose(sorted(xs), [1.0, 2.5])
+
+
+def test_ovito_cell_matrix_transposed_to_row_convention():
+    from pyslice.io.loader import _ovito_cell_to_row_convention
+    a = np.array([10.0, 0.0, 0.0]); b = np.array([2.0, 10.0, 0.0])
+    c = np.array([1.0, 1.5, 10.0]); origin = np.array([-5.0, 0.0, 0.0])
+    ovito_matrix = np.column_stack([a, b, c, origin])  # vectors in columns, origin last
+    box, got_origin = _ovito_cell_to_row_convention(ovito_matrix)
+    # rows are the lattice vectors (ASE / PySlice convention), not columns
+    np.testing.assert_allclose(box[0], a)
+    np.testing.assert_allclose(box[1], b)
+    np.testing.assert_allclose(box[2], c)
+    np.testing.assert_allclose(got_origin, origin)
+    # a plain orthorhombic zero-origin cell is unchanged by the transpose
+    orth = np.column_stack([np.diag([8.0, 6.0, 4.0]), np.zeros(3)])
+    box2, o2 = _ovito_cell_to_row_convention(orth)
+    np.testing.assert_allclose(box2, np.diag([8.0, 6.0, 4.0]))
+    np.testing.assert_allclose(o2, np.zeros(3))
+
+
+def test_npt_barostat_params_have_physical_units():
+    from ase import units
+    from pyslice.md.molecular_dynamics import MDCalculator
+    externalstress, pfactor = MDCalculator._npt_barostat_params(1.01325, 100.0)
+    # externalstress is ~1 atm in eV/A^3, not 1.01325 eV/A^3 (~162 GPa)
+    np.testing.assert_allclose(externalstress / units.bar, 1.01325, rtol=1e-6)
+    assert externalstress < 1e-6                       # ~6.3e-7, not ~1
+    # pfactor = ptime^2 * B (was 75*fs**2, ~1e5x too small)
+    np.testing.assert_allclose(pfactor, (75 * units.fs) ** 2 * (100.0 * units.GPa))

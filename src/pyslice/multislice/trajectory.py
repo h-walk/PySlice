@@ -273,24 +273,30 @@ class Trajectory:
         if mean_pos.shape[0] == 0:
             return self
 
-        # Apply filters
+        # Apply filters. The box is shrunk to each range's width, so the kept
+        # atoms must also be translated by the range lower bound; otherwise they
+        # keep their original coordinates and fall outside the new [0, width) box.
         atom_mask = np.ones(self.n_atoms, dtype=bool)
         new_box = self.box_matrix.copy()
+        origin_shift = np.zeros(3, dtype=self.positions.dtype)
 
         if x_range is not None:
             min_x, max_x = x_range
             atom_mask &= (mean_pos[:, 0] >= min_x) & (mean_pos[:, 0] <= max_x)
             new_box[0, 0] = max_x - min_x
+            origin_shift[0] = min_x
 
         if y_range is not None:
             min_y, max_y = y_range
             atom_mask &= (mean_pos[:, 1] >= min_y) & (mean_pos[:, 1] <= max_y)
             new_box[1, 1] = max_y - min_y
+            origin_shift[1] = min_y
 
         if z_range is not None:
             min_z, max_z = z_range
             atom_mask &= (mean_pos[:, 2] >= min_z) & (mean_pos[:, 2] <= max_z)
             new_box[2, 2] = max_z - min_z
+            origin_shift[2] = min_z
 
         # Check results
         n_filtered = np.sum(atom_mask)
@@ -304,10 +310,10 @@ class Trajectory:
         if n_filtered == self.n_atoms:
             return self
 
-        # Create filtered trajectory
+        # Create filtered trajectory, translating kept atoms into the new box.
         return Trajectory(
             atom_types=self.atom_types[atom_mask],
-            positions=self.positions[:, atom_mask, :],
+            positions=self.positions[:, atom_mask, :] - origin_shift,
             velocities=self.velocities[:, atom_mask, :],
             box_matrix=new_box,
             timestep=self.timestep
