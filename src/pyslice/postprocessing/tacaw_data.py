@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from .wf_data import WFData
 from ..data.pyslice_serial import PySliceSerial, Signal, Dimensions, Dimension, Metadata
-from pyslice.backend import Backend, to_numpy
+from pyslice.backend import Backend, to_numpy, source_files_version
 
 logger = logging.getLogger(__name__)
 
@@ -267,9 +267,13 @@ class TACAWData(PySliceSerial, Signal):
         with open(cache_meta, "w") as f:
             json.dump(meta, f)
 
-    # Bump when the TACAW FFT/normalisation changes so stale tacaw.npy caches
-    # are not reused across versions.
-    _TACAW_CACHE_VERSION = 1
+    # Derived automatically from the sources that determine the TACAW spectrum
+    # values, so a change to the FFT/normalisation invalidates stale tacaw.npy
+    # caches without a manual bump. "v1" allows a manual bump if ever needed.
+    _TACAW_CACHE_VERSION = "v1-" + source_files_version([
+        os.path.join(os.path.dirname(__file__), "tacaw_data.py"),
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "backend.py"),
+    ])
 
     def _tacaw_cache_meta(self, layer_index: int, fft_len: int) -> dict:
         """Identity of the cached spectrum: everything that changes its values."""

@@ -729,3 +729,21 @@ def test_tacaw_cache_distinguishes_layer_dtype_and_dataset(tmp_path):
     assert sc.dtype.kind == "c"                          # complex, not cached real intensity
     wf2 = _make_layered_wf(tmp_path, seed=2)             # different data, same cache_dir
     assert not np.allclose(s0, to_numpy(TACAWData(wf2, layer_index=0)._array))
+
+
+def test_cache_versions_are_derived_from_source(tmp_path):
+    from pyslice.backend import source_files_version
+    # the helper is content-sensitive and tolerates missing files
+    f = tmp_path / "a.py"
+    f.write_bytes(b"x = 1\n")
+    v1 = source_files_version([f])
+    f.write_bytes(b"x = 2\n")
+    assert source_files_version([f]) != v1
+    source_files_version([tmp_path / "does_not_exist.py"])  # must not raise
+    # both cache tags embed a source hash (not a bare manual constant) and are
+    # independent of each other
+    wf_v = MultisliceCalculator._CACHE_VERSION
+    tacaw_v = TACAWData._TACAW_CACHE_VERSION
+    assert wf_v.startswith("v3-") and len(wf_v) > len("v3-")
+    assert tacaw_v.startswith("v1-") and len(tacaw_v) > len("v1-")
+    assert wf_v != tacaw_v

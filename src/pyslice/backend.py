@@ -1,6 +1,7 @@
 # backend.py - Backend abstraction layer for NumPy/PyTorch support
 from __future__ import annotations
 
+import hashlib
 import os
 import logging
 from abc import ABC, abstractmethod
@@ -10,6 +11,27 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
+
+
+def source_files_version(paths, length: int = 8) -> str:
+    """Short content hash of the given source files.
+
+    Used to derive cache-version tags automatically: when any listed module's
+    source changes, the hash changes, so caches keyed on it are not reused with
+    stale physics. It errs toward over-invalidation (any edit, even a comment,
+    changes the hash) because recomputing is the safe failure mode. Missing or
+    unreadable files contribute a fixed marker instead of raising, so this never
+    breaks importing the package (e.g. from a zipapp).
+    """
+    h = hashlib.sha256()
+    for path in sorted(str(p) for p in paths):
+        h.update(path.encode())
+        try:
+            with open(path, "rb") as f:
+                h.update(f.read())
+        except OSError:
+            h.update(b"\x00<unreadable>")
+    return h.hexdigest()[:length]
 
 # ---------------------------------------------------------------------------
 # Optional torch import

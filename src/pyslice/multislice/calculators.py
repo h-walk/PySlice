@@ -11,7 +11,7 @@ from .multislice import Probe, PrismProbe, Propagate, create_batched_probes
 from .trajectory import Trajectory
 from ..postprocessing.wf_data import WFData
 from .sed import SED
-from pyslice.backend import make_backend, to_numpy, NumpyBackend
+from pyslice.backend import make_backend, to_numpy, NumpyBackend, source_files_version
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +50,16 @@ class MultisliceCalculator:
             30: 'Zn', 31: 'Ga', 32: 'Ge', 33: 'As', 34: 'Se', 35: 'Br', 36: 'Kr'
         }
 
-    # Bump whenever a change to propagation / potential / probe code alters the
-    # cached wavefunction VALUES, so that stale psi_data from an older version
-    # is not silently reloaded as if it were current.
-    _CACHE_VERSION = 2
+    # Derived automatically from the sources whose logic determines the cached
+    # wavefunction VALUES, so any change to propagation / potential / probe /
+    # backend code changes the key and stale psi_data is not silently reused.
+    # The "v3" prefix allows a manual bump for reasons outside these files.
+    _CACHE_VERSION = "v3-" + source_files_version([
+        os.path.join(os.path.dirname(__file__), "multislice.py"),
+        os.path.join(os.path.dirname(__file__), "potentials.py"),
+        os.path.join(os.path.dirname(__file__), "calculators.py"),
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "backend.py"),
+    ])
 
     def _generate_cache_key(self, trajectory, aperture, voltage_eV,
                             slice_thickness, sampling, probe_positions,
