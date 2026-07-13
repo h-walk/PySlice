@@ -216,6 +216,15 @@ class MultisliceCalculator:
         self.probe_positions = probe_positions
         self.save_path = save_path
         self.cleanup_temp_files = cleanup_temp_files
+        if slice_axis != 2:
+            # Propagation is hard-coded to the z axis; any other slice_axis
+            # silently produces wrong results (see Potential). Fail early with
+            # guidance rather than after a full run.
+            raise NotImplementedError(
+                "slice_axis != 2 is not supported (it would silently produce "
+                "wrong results). Permute your trajectory so the beam direction "
+                "is the z axis and use slice_axis=2."
+            )
         self.slice_axis = slice_axis
         self.return_layers = return_layers
         self.cache_wavefunctions = cache_wavefunctions

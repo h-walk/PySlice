@@ -581,6 +581,21 @@ def test_pad_real_space_preserves_field_for_odd_and_even_grids(tmp_path, n):
     assert rel_err < 1e-10
 
 
+def test_slice_axis_other_than_z_is_rejected(tmp_path, monkeypatch):
+    # slice_axis != 2 was silently wrong (propagation is z-locked); it must now
+    # fail loudly at both entry points.
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(NotImplementedError, match="slice_axis"):
+        MultisliceCalculator(force_cpu=True).setup(
+            _make_tiny_trajectory(), aperture=5, voltage_eV=60e3, sampling=1.0,
+            slice_thickness=1.0, slice_axis=1)
+    with pytest.raises(NotImplementedError, match="slice_axis"):
+        Potential(np.arange(3.0), np.arange(3.0), np.arange(3.0),
+                  positions=np.array([[1.0, 1.0, 1.0]]),
+                  atom_types=np.array([14]), backend=NumpyBackend(),
+                  kind="gauss", slice_axis=0)
+
+
 def test_pyproject_sdist_ships_package_source():
     # The sdist must declare the package source; otherwise hatchling shipped a
     # data-only sdist and every sdist-based install produced an empty package.
