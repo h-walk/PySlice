@@ -581,6 +581,21 @@ def test_pad_real_space_preserves_field_for_odd_and_even_grids(tmp_path, n):
     assert rel_err < 1e-10
 
 
+def test_pyproject_sdist_ships_package_source():
+    # The sdist must declare the package source; otherwise hatchling shipped a
+    # data-only sdist and every sdist-based install produced an empty package.
+    import tomllib
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[1]
+    cfg = tomllib.loads((root / "pyproject.toml").read_text())
+    build = cfg["tool"]["hatch"]["build"]
+    sdist_include = build["targets"]["sdist"]["include"]
+    assert any("src/pyslice" in p for p in sdist_include), sdist_include
+    # no lingering global data-only include and no dead setuptools placeholder
+    assert "include" not in build
+    assert "setuptools" not in cfg["tool"]
+
+
 def _make_wf_data(tmp_path, n_time, backend=None):
     backend = NumpyBackend() if backend is None else backend
     probe = SimpleNamespace(
