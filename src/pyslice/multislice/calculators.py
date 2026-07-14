@@ -464,7 +464,14 @@ class MultisliceCalculator:
             print("filtered to", len(self.probe_indices), "probe positions")
 
         nc, npt, nx, ny = self.base_probe._array.shape
-        self.n_probes = nc*len(self.probe_positions)
+        n_scan_positions = len(self.probe_positions)
+        self.n_probes = nc*n_scan_positions
+        # Real-space frame caches store one row per incoherent-copy/scan pair.
+        # PRISM caches instead store one row per propagated Fourier component.
+        expected_cache_rows = (
+            len(self.base_probe.probe_positions) if self.prism
+            else self.n_probes
+        )
         # Storage: [probe, frame, x, y, layer] - matches WFData expected format
         self.n_layers = len(_stored_layers)
         stores_exit_wave_only = self._stores_exit_wave_only(_stored_layers)
@@ -540,14 +547,20 @@ class MultisliceCalculator:
                     self.cache_wavefunctions and not force_rerun,
                     b,
                     expected_n_layers=self.n_layers,
-                    expected_n_probes=self.n_probes,
+                    expected_n_probes=expected_cache_rows,
                 )
                 if cache_exists and not self.prism and self.ADF:
                     # Keep the layer axis so each stored thickness gets its own
                     # ADF image (previously all layers were summed together).
                     intensities = b.einsum('pxyln,xy->pl', b.absolute(frame_data)**2, self.ADFmask)
+                    n_copies = frame_data.shape[0] // n_scan_positions
                     intensities = b.sum(
-                        b.reshape(intensities, (nc, npt, self.n_layers)), axis=0)
+                        b.reshape(
+                            intensities,
+                            (n_copies, n_scan_positions, self.n_layers),
+                        ),
+                        axis=0,
+                    )
                     for out_idx in range(self.n_layers):
                         self.ADF._array[out_idx] += intensities[self.ADFindex, out_idx]
 
@@ -676,7 +689,7 @@ class MultisliceCalculator:
                     if self.ADF:
                         kwarg["ADF"] = (self.ADF, self.ADFmask, self.ADFindex)
                     if self.returns_wavefunctions:
-                        kwarg["load_into"] = self.wavefunction_data[:, frame_idx, :, :, 0]
+                        kwarg["load_into"] = self.wavefunction_data[:, frame_idx, :, :, :]
                     self.base_probe.calculateProbesFromS(frame_data, self.probe_positions, **kwarg, chunksize=self.loop_probes)
                 elif self.returns_wavefunctions:
                     if self.use_memmap:
@@ -751,9 +764,13 @@ class MultisliceCalculator:
 
         if self.ADF:
             self.ADF._array /= self.n_frames  # per-thickness time average
-            # Depth (Å) of each ADF image (the z of its stored slice), and
+            # Each stored wave is captured after that slice's transmission, so
+            # its depth is the far boundary (i + 1) * dz, not the slice's
+            # coordinate sample zs[i]. The final layer must equal specimen lz.
             # collapse to a plain 2D image when a single thickness was stored.
-            self.ADF.thicknesses = to_numpy(self.zs)[list(_stored_layers)]
+            dz = float(self.lz) / len(self.zs)
+            self.ADF.thicknesses = (
+                np.asarray(_stored_layers, dtype=float) + 1.0) * dz
             self.ADF._set_dimensions(
                 self.ADF.thicknesses if self.n_layers > 1 else None,
                 layer_name='thickness', layer_units='Å')

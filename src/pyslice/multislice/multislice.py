@@ -803,25 +803,31 @@ class PrismProbe:
         blowing up RAM with a full (n_positions × nkx × nky) intermediate.
 
         array shape on input: (n_sinusoids, nkx, nky, n_layers, 1)
-            reshaped to:      (nx_cropped, ny_cropped, nkx, nky)
+            reshaped to:      (nx_cropped, ny_cropped, nkx, nky, n_layers)
         """
         b = self._backend
 
-        if load_into is None and not ADF:
-            result = b.zeros(
-                (len(positions), b.ceil(self.nx / self.kth), b.ceil(self.ny / self.kth)),
-                dtype=b.complex_dtype,
-            )
-        elif not ADF:
+        npt, nkx, nky, n_layers, _ = array.shape
+        adf_data = None
+        if ADF:
+            adf_data, ADFmask, ADFindex = ADF
+
+        if load_into is not None:
             result = load_into
+        elif adf_data is None:
+            result_shape = (len(positions), nkx, nky)
+            if n_layers > 1:
+                result_shape += (n_layers,)
+            result = b.zeros(result_shape, dtype=b.complex_dtype)
         else:
-            ADF, ADFmask, ADFindex = ADF
             result = None
 
-        npt, nkx, nky, _, _ = array.shape
         # Reshape from (sinusoid_index, kx, ky, layer, 1)
-        # to (nx_cropped, ny_cropped, kx, ky) for einsum below.
-        array = b.reshape(array, (self.nx_cropped, self.ny_cropped, nkx, nky))
+        # to (nx_cropped, ny_cropped, kx, ky, layer) for einsum below.
+        array = b.reshape(
+            array,
+            (self.nx_cropped, self.ny_cropped, nkx, nky, n_layers),
+        )
 
         chunksize = max(1, chunksize)
         for n, (x, y) in enumerate(tqdm(positions)):
@@ -849,18 +855,25 @@ class PrismProbe:
 
             # Reconstruct the exit wave:  Σ_{kx_n, ky_n} factors · S_n(kx, ky)
             # Indices: p=probe chunk, k=sparse kx, q=sparse ky, x=full kx, y=full ky
-            chunked = b.einsum('pkq,kqxy->pxy', factors, array)
+            chunked = b.einsum('pkq,kqxyl->pxyl', factors, array)
 
             if isinstance(result, np.memmap):
                 chunked = to_numpy(chunked)
 
-            if ADF:
+            if adf_data is not None:
                 intensities = b.einsum(
-                    'pxy,xy->p', b.absolute(chunked)**2, ADFmask)
-                for intensity, pp in zip(intensities, range(n, n + chunksize)):
-                    ADF._array[ADFindex == pp] += intensity
-            else:
-                result[n:n + chunksize, :, :] = chunked
+                    'pxyl,xy->pl', b.absolute(chunked)**2, ADFmask)
+                for probe_intensities, pp in zip(
+                    intensities, range(n, n + chunksize)
+                ):
+                    for layer_index, intensity in enumerate(probe_intensities):
+                        adf_data._array[layer_index][ADFindex == pp] += intensity
+
+            if result is not None:
+                if len(result.shape) == 3:
+                    result[n:n + chunksize, :, :] = chunked[:, :, :, 0]
+                else:
+                    result[n:n + chunksize, :, :, :] = chunked
 
         return result
 

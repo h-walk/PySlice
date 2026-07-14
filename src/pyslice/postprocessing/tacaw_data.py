@@ -86,6 +86,22 @@ class TACAWData(PySliceSerial, Signal):
         self._array      = None
         self._frequencies = None
 
+        self.n_scan_positions = len(self.probe_positions)
+        if self.n_scan_positions == 0:
+            raise ValueError("TACAWData requires at least one probe position")
+        n_wave_rows = int(self._wf_array.shape[0])
+        if n_wave_rows % self.n_scan_positions != 0:
+            raise ValueError(
+                "Wavefunction probe rows must be an integer multiple of the "
+                f"{self.n_scan_positions} scan positions; got {n_wave_rows} rows."
+            )
+        self.n_copies = n_wave_rows // self.n_scan_positions
+        if self.keep_complex and self.n_copies > 1:
+            raise ValueError(
+                "keep_complex=True cannot combine incoherent decoherence copies; "
+                "use keep_complex=False to sum their spectral intensities."
+            )
+
         self._fft_from_wf_data(layer_index)
         if self.apply_bose:
             self.apply_bose_correction(self.temperature_K)
@@ -229,7 +245,7 @@ class TACAWData(PySliceSerial, Signal):
         if self.chunkFFT:
             # Memory-conservative path: loop over kx
             dtype = b.complex_dtype if self.keep_complex else b.float_dtype
-            shape = (wf_layer.shape[0], fft_len,
+            shape = (self.n_scan_positions, fft_len,
                      wf_layer.shape[2], wf_layer.shape[3])
             if self.use_memmap:
                 self._array = b.memmap(shape, dtype=dtype,
@@ -245,6 +261,7 @@ class TACAWData(PySliceSerial, Signal):
                     wf_fft  = b.fftshift(b.fft(sl - wf_mean, axes=1), axes=1)
                     if not self.keep_complex:
                         wf_fft = b.absolute(wf_fft) ** 2
+                        wf_fft = self._fold_incoherent_copies(wf_fft)
                     self._array[:, :, kx_i, :] += wf_fft
         else:
             # Standard path: FFT over full time window
@@ -255,12 +272,15 @@ class TACAWData(PySliceSerial, Signal):
                 wf_fft  = b.fftshift(b.fft(sl - wf_mean, axes=1), axes=1)
                 if not self.keep_complex:
                     wf_fft = b.absolute(wf_fft) ** 2
+                    wf_fft = self._fold_incoherent_copies(wf_fft)
                 self._array = wf_fft if self._array is None else self._array + wf_fft
 
         # Persist to cache
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         np.save(cache_freq,  to_numpy(self._frequencies))
-        if not self.use_memmap:
+        if isinstance(self._array, np.memmap):
+            self._array.flush()
+        else:
             np.save(cache_tacaw, to_numpy(self._array))
         # Completion marker written LAST, so its presence guarantees a fully
         # written tacaw.npy that matches this metadata.
@@ -277,7 +297,7 @@ class TACAWData(PySliceSerial, Signal):
 
     def _tacaw_cache_meta(self, layer_index: int, fft_len: int) -> dict:
         """Identity of the cached spectrum: everything that changes its values."""
-        n_probes = int(self._wf_array.shape[0])
+        n_probes = self.n_scan_positions
         nkx = int(self._wf_array.shape[2])
         nky = int(self._wf_array.shape[3])
         return {
@@ -286,6 +306,7 @@ class TACAWData(PySliceSerial, Signal):
             "keep_complex": bool(self.keep_complex),
             "fft_len": int(fft_len),
             "n_chunks": int(self.n_chunks),
+            "n_copies": int(self.n_copies),
             "array_shape": [n_probes, int(fft_len), nkx, nky],
             "wf_dtype": str(getattr(self._wf_array, "dtype", "")),
             "wf_fingerprint": self._array_fingerprint(
@@ -294,6 +315,17 @@ class TACAWData(PySliceSerial, Signal):
             "kx_fingerprint": self._array_fingerprint(self._kxs),
             "ky_fingerprint": self._array_fingerprint(self._kys),
         }
+
+    def _fold_incoherent_copies(self, intensity):
+        """Sum copy-major spectral intensities onto physical scan positions."""
+        if self.n_copies == 1:
+            return intensity
+        b = self._backend
+        folded_shape = (
+            self.n_copies,
+            self.n_scan_positions,
+        ) + tuple(int(s) for s in intensity.shape[1:])
+        return b.sum(b.reshape(intensity, folded_shape), axis=0)
 
     @staticmethod
     def _array_fingerprint(arr) -> str:

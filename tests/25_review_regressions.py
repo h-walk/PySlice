@@ -243,6 +243,57 @@ def test_prism_loop_probes_smoke_preserves_backend(tmp_path, monkeypatch):
     assert to_numpy(wave.array).shape[0] == 2
 
 
+@pytest.mark.parametrize("use_memmap", [False, True])
+def test_prism_adf_reconstructs_default_and_multilayer_outputs(
+    tmp_path, monkeypatch, use_memmap
+):
+    def run(subdir, return_layers):
+        work = tmp_path / subdir
+        work.mkdir()
+        monkeypatch.chdir(work)
+        calc = MultisliceCalculator(force_cpu=True)
+        calc.setup(
+            _make_tiny_trajectory(), aperture=30, voltage_eV=60e3,
+            sampling=1.0, slice_thickness=1.0,
+            probe_xs=[1.0, 2.0], probe_ys=[1.0], prism=2,
+            loop_probes=1, cache_wavefunctions=False, ADF=(5, 40),
+            return_layers=return_layers, use_memmap=use_memmap)
+        return calc, calc.run(force_rerun=True)
+
+    _, (wave, adf) = run("exit", -1)
+    assert to_numpy(wave.array).shape == (2, 1, 5, 5, 1)
+    assert np.any(np.abs(to_numpy(wave.array)) > 0)
+    assert to_numpy(adf.array).shape == (2, 1)
+
+    calc, (wave_all, adf_all) = run("all", "all")
+    assert to_numpy(wave_all.array).shape == (2, 1, 5, 5, calc.nz)
+    assert np.all(np.any(np.abs(to_numpy(wave_all.array)) > 0, axis=(0, 1, 2, 3)))
+    assert to_numpy(adf_all.array).shape == (calc.nz, 2, 1)
+
+
+def test_prism_cache_validates_component_rows_not_scan_positions(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    def calculator():
+        calc = MultisliceCalculator(force_cpu=True)
+        calc.setup(
+            _make_tiny_trajectory(), aperture=5, voltage_eV=60e3,
+            sampling=1.0, slice_thickness=1.0,
+            probe_xs=[1.0, 2.0], probe_ys=[1.0], prism=2,
+            loop_probes=1, cache_wavefunctions=True)
+        return calc
+
+    first = calculator()
+    expected = to_numpy(first.run(force_rerun=True).array).copy()
+
+    def should_not_propagate(*args, **kwargs):
+        raise AssertionError("valid PRISM component cache was not reused")
+
+    second = calculator()
+    monkeypatch.setattr(calculators_module, "Propagate", should_not_propagate)
+    np.testing.assert_allclose(to_numpy(second.run().array), expected)
+
+
 def test_tacaw_real_space_dispersion_uses_inverse_fft(tmp_path):
     tacaw = TACAWData(_make_wf_data(tmp_path, n_time=4), force_rerun=True)
     reciprocal = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.complex128)
@@ -764,6 +815,99 @@ def test_tacaw_cache_distinguishes_timestep_and_hashes_every_value(tmp_path):
     assert TACAWData._array_fingerprint(large) != fingerprint
 
 
+@pytest.mark.parametrize("chunk_fft", [False, True])
+def test_tacaw_incoherently_folds_decoherence_copies(tmp_path, chunk_fft):
+    backend = NumpyBackend()
+    n_copies, n_scan, nt = 3, 2, 8
+    time = np.arange(nt, dtype=float) * 0.1
+    rows = []
+    for copy in range(n_copies):
+        for scan in range(n_scan):
+            amplitude = 1.0 + copy + scan / 2
+            rows.append(amplitude * np.cos(2 * np.pi * (copy + 1) * time))
+    waves = np.asarray(rows, dtype=np.complex128)[:, :, None, None, None]
+    probe = SimpleNamespace(
+        eV=60e3, wavelength=0.05, mrad=5.0,
+        _array=np.zeros((n_copies, n_scan, 1, 1), dtype=np.complex128))
+    wf = WFData(
+        probe_positions=[(0.0, 0.0), (1.0, 0.0)],
+        probe_xs=[0.0, 1.0], probe_ys=[0.0], time=time,
+        kxs=np.array([0.0]), kys=np.array([0.0]),
+        xs=np.array([0.0]), ys=np.array([0.0]), layer=np.array([0]),
+        array=waves, probe=probe, backend=backend,
+        cache_dir=tmp_path / str(chunk_fft))
+
+    raw = waves[:, :, :, :, 0]
+    raw_fft = np.fft.fftshift(
+        np.fft.fft(raw - raw.mean(axis=1, keepdims=True), axis=1), axes=1)
+    expected = (np.abs(raw_fft) ** 2).reshape(
+        n_copies, n_scan, nt, 1, 1).sum(axis=0)
+
+    tacaw = TACAWData(wf, chunkFFT=chunk_fft, force_rerun=True)
+    assert tacaw.array.shape == (n_scan, nt, 1, 1)
+    np.testing.assert_allclose(tacaw.array, expected)
+    np.testing.assert_allclose(TACAWData(wf, chunkFFT=chunk_fft).array, expected)
+
+    with pytest.raises(ValueError, match="keep_complex"):
+        TACAWData(wf, keep_complex=True, force_rerun=True)
+
+
+def test_calculator_decoherence_flows_into_folded_tacaw(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    positions = np.tile(
+        np.array([[[1.5, 1.5, 1.5]]], dtype=np.float32), (4, 1, 1))
+    trajectory = Trajectory(
+        atom_types=np.array([14]), positions=positions,
+        velocities=np.zeros_like(positions),
+        box_matrix=np.diag([4.0, 4.0, 3.0]), timestep=0.1)
+    calc = MultisliceCalculator(force_cpu=True)
+    calc.setup(
+        trajectory, aperture=20, voltage_eV=60e3, sampling=1.0,
+        slice_thickness=1.0, probe_xs=[1.0, 2.0], probe_ys=[1.0],
+        cache_wavefunctions=False)
+    calc.base_probe.addTemporalDecoherence(2.0, 3)
+    wf = calc.run(force_rerun=True)
+    assert to_numpy(wf.array).shape[:2] == (6, 4)
+
+    raw = to_numpy(wf.array[:, :, :, :, -1])
+    raw_fft = np.fft.fftshift(
+        np.fft.fft(raw - raw.mean(axis=1, keepdims=True), axis=1), axes=1)
+    expected = (np.abs(raw_fft) ** 2).reshape(
+        3, 2, *raw_fft.shape[1:]).sum(axis=0)
+    tacaw = TACAWData(wf, force_rerun=True)
+    assert tacaw.array.shape[0] == 2
+    np.testing.assert_allclose(tacaw.array, expected)
+
+
+@pytest.mark.parametrize("chunk_fft", [False, True])
+def test_tacaw_memmap_writes_a_complete_reusable_cache(tmp_path, chunk_fft):
+    backend = NumpyBackend()
+    nt = 8
+    cache_dir = tmp_path / str(chunk_fft)
+    cache_dir.mkdir()
+    source = backend.memmap(
+        (2, nt, 1, 1, 1), dtype=np.complex128,
+        filename=cache_dir / "wavefunctions.npy")
+    time = np.arange(nt, dtype=float) * 0.1
+    source[0, :, 0, 0, 0] = np.cos(2 * np.pi * time)
+    source[1, :, 0, 0, 0] = 2 * np.cos(4 * np.pi * time)
+    source.flush()
+    probe = SimpleNamespace(
+        eV=60e3, wavelength=0.05, mrad=5.0,
+        _array=np.zeros((2, 1, 1, 1), dtype=np.complex128))
+    wf = WFData(
+        probe_positions=[(0.0, 0.0)], probe_xs=[0.0], probe_ys=[0.0],
+        time=time, kxs=np.array([0.0]), kys=np.array([0.0]),
+        xs=np.array([0.0]), ys=np.array([0.0]), layer=np.array([0]),
+        array=source, probe=probe, backend=backend, cache_dir=cache_dir)
+
+    first = TACAWData(wf, chunkFFT=chunk_fft, force_rerun=True).array.copy()
+    assert (cache_dir / "tacaw.npy").exists()
+    assert (cache_dir / "tacaw_meta.json").exists()
+    second = TACAWData(wf, chunkFFT=chunk_fft).array
+    np.testing.assert_allclose(second, first)
+
+
 def test_cache_versions_are_derived_from_source(tmp_path):
     from pyslice.backend import source_files_version
     # the helper is content-sensitive and tolerates missing files
@@ -959,6 +1103,11 @@ def test_adf_depth_resolved_stack_not_layer_sum(tmp_path, monkeypatch):
     stack = to_numpy(adf_all.array)
     assert stack.ndim == 3 and stack.shape[1:] == (3, 3)
     assert stack.shape[0] == len(adf_all.thicknesses)
+    # Stored waves are captured after each slice transmission, so their depth
+    # is the far boundary of that slice: first > 0 and exit == specimen depth.
+    expected_depths = np.linspace(4.0 / len(stack), 4.0, len(stack))
+    np.testing.assert_allclose(adf_all.thicknesses, expected_depths)
+    np.testing.assert_allclose(adf.thicknesses, [4.0])
     np.testing.assert_allclose(stack[-1], to_numpy(adf.array), atol=1e-6)  # exit == default
     assert not np.allclose(stack[0], stack[-1])          # genuinely per-thickness
     assert not np.allclose(stack[-1], stack.sum(0))      # not the old layer-sum
@@ -1027,7 +1176,8 @@ def test_decoherence_default_wavefunction_storage_keeps_every_copy(tmp_path, mon
     calc.setup(
         traj, aperture=30, voltage_eV=100e3, sampling=0.25,
         slice_thickness=1.0, probe_xs=[2., 4., 6.], probe_ys=[2., 4., 6.],
-        ADF=(45, 150), cache_wavefunctions=True)  # default return_layers=-1
+        ADF=(45, 150), cache_wavefunctions=True,
+        loop_probes=2)  # default return_layers=-1
     calc.base_probe.addTemporalDecoherence(2.0, 3)
     wf, adf = calc.run(force_rerun=True)
     assert wf.array.shape[0] == 3 * 9
@@ -1041,11 +1191,30 @@ def test_decoherence_default_wavefunction_storage_keeps_every_copy(tmp_path, mon
     cached_calc.setup(
         traj, aperture=30, voltage_eV=100e3, sampling=0.25,
         slice_thickness=1.0, probe_xs=[2., 4., 6.], probe_ys=[2., 4., 6.],
-        ADF=(45, 150), cache_wavefunctions=True)
+        ADF=(45, 150), cache_wavefunctions=True, loop_probes=2)
     cached_calc.base_probe.addTemporalDecoherence(2.0, 3)
     cached_wf, cached_adf = cached_calc.run()
     assert cached_wf.array.shape[0] == 3 * 9
     np.testing.assert_allclose(to_numpy(cached_adf.array), expected, rtol=1e-7)
+
+
+def test_cached_looped_adf_uses_full_scan_count(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    traj = _make_tiny_trajectory()
+
+    def calculator():
+        calc = MultisliceCalculator(force_cpu=True)
+        calc.setup(
+            traj, aperture=20, voltage_eV=60e3, sampling=0.5,
+            slice_thickness=1.0, probe_xs=[1.0, 2.0],
+            probe_ys=[1.0, 2.0], loop_probes=2, ADF=(5, 40),
+            cache_wavefunctions=True)
+        return calc
+
+    first = calculator()
+    expected = to_numpy(first.run(force_rerun=True)[1].array).copy()
+    second = calculator()
+    np.testing.assert_allclose(to_numpy(second.run()[1].array), expected)
 
 
 def test_decoherence_weights_preserve_total_probe_dose():
