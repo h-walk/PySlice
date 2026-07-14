@@ -853,3 +853,50 @@ def test_multiframe_cif_loads_all_frames_and_index_selects(tmp_path):
     np.testing.assert_allclose(strided.positions[:, 0, 0], [0, 2, 4])
     assert strided.timestep == 1.0                    # step rescales timestep
     assert load(1).n_frames == 1
+
+
+def _adf_run(tmp_path, monkeypatch, **setup_kw):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(tmp_path)
+    s = np.array([[[4., 4., 1.0], [3., 5., 2.5]]], dtype=np.float32)
+    traj = Trajectory(atom_types=np.array([14, 14]), positions=s,
+                      velocities=np.zeros_like(s), box_matrix=np.diag([8., 8., 4.]),
+                      timestep=0.1)
+    calc = MultisliceCalculator(force_cpu=True)
+    calc.setup(traj, aperture=30, voltage_eV=100e3, sampling=0.25, slice_thickness=1.0,
+               probe_xs=[2., 4., 6.], probe_ys=[2., 4., 6.], ADF=(45, 150),
+               cache_wavefunctions=False, **setup_kw)
+    return calc.run(force_rerun=True)
+
+
+def test_adf_depth_resolved_stack_not_layer_sum(tmp_path, monkeypatch):
+    # Default: a single exit-wave ADF, kept 2D for back-compat.
+    _, adf = _adf_run(tmp_path, monkeypatch)
+    assert to_numpy(adf.array).shape == (3, 3)
+    # return_layers='all': one ADF per thickness (a stack), NOT a sum over layers.
+    _, adf_all = _adf_run(tmp_path / "all", monkeypatch, return_layers="all")
+    stack = to_numpy(adf_all.array)
+    assert stack.ndim == 3 and stack.shape[1:] == (3, 3)
+    assert stack.shape[0] == len(adf_all.thicknesses)
+    np.testing.assert_allclose(stack[-1], to_numpy(adf.array), atol=1e-6)  # exit == default
+    assert not np.allclose(stack[0], stack[-1])          # genuinely per-thickness
+    assert not np.allclose(stack[-1], stack.sum(0))      # not the old layer-sum
+
+
+def test_adf_sums_decoherence_copies(tmp_path, monkeypatch):
+    def total(deco):
+        s = np.array([[[4., 4., 1.0], [3., 5., 2.5]]], dtype=np.float32)
+        traj = Trajectory(atom_types=np.array([14, 14]), positions=s,
+                          velocities=np.zeros_like(s), box_matrix=np.diag([8., 8., 4.]),
+                          timestep=0.1)
+        monkeypatch.chdir(tmp_path)
+        calc = MultisliceCalculator(force_cpu=True)
+        calc.setup(traj, aperture=30, voltage_eV=100e3, sampling=0.25, slice_thickness=1.0,
+                   probe_xs=[2., 4., 6.], probe_ys=[2., 4., 6.], ADF=(45, 150),
+                   cache_wavefunctions=False, return_layers=None)
+        if deco:
+            calc.base_probe.addTemporalDecoherence(2.0, 3)  # nc = 3
+        return float(np.sum(np.abs(to_numpy(calc.run(force_rerun=True)[1].array))))
+    # summed copies -> ~1; the old zip() dropped all but the first (-2 sigma tail) -> ~3e-4
+    ratio = total(True) / total(False)
+    assert 0.9 < ratio < 1.1, ratio

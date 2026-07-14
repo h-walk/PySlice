@@ -495,7 +495,10 @@ class MultisliceCalculator:
             self.ADF = HAADFData(wf)
             self.ADFmask = b.absolute(self.ADF.getMask(**kwargs))  # HAADFData infers mask dtype from _wf_array dtype, but we'll absolute^2 later
             self.ADFindex = b.astype(b.absolute(self.ADF._wf_array[0, :, :, 0, 0, 0, 0]), int)
-            self.ADF._array = b.zeros(self.ADFindex.shape, dtype=self.complex_dtype)
+            # One ADF image per stored layer (thickness). Collapsed to a plain 2D
+            # image below when only one thickness is stored (the default).
+            self.ADF._array = b.zeros((self.n_layers,) + tuple(self.ADFindex.shape),
+                                      dtype=self.complex_dtype)
 
         # If tacaw.npy already exists and no per-frame cache will be written,
         # there is nothing to reload or recompute. Pass force_rerun=True to
@@ -535,8 +538,11 @@ class MultisliceCalculator:
                     expected_n_layers=self.n_layers,
                 )
                 if cache_exists and not self.prism and self.ADF:
-                    intensities = b.einsum('pxyln,xy->p', b.absolute(frame_data)**2, self.ADFmask)
-                    self.ADF._array += intensities[self.ADFindex]
+                    # Keep the layer axis so each stored thickness gets its own
+                    # ADF image (previously all layers were summed together).
+                    intensities = b.einsum('pxyln,xy->pl', b.absolute(frame_data)**2, self.ADFmask)
+                    for out_idx in range(self.n_layers):
+                        self.ADF._array[out_idx] += intensities[self.ADFindex, out_idx]
 
                 if not os.path.exists(self.output_dir / f"kx.npy"):
                     np.save(self.output_dir / f"kx.npy", to_numpy(self.kxs[self.keep_kxs_indices]))
@@ -622,8 +628,16 @@ class MultisliceCalculator:
                                 frame_data[selected, :, :, out_idx, 0] = diffraction_patterns  # load p,x,y --> p,x,y,l,1 indices
                             if self.ADF and not self.prism:
                                 intensities = b.einsum('pxy,xy->p', b.absolute(diffraction_patterns[:, :, :])**2, self.ADFmask)
+                                # The batch is (nc, npt) flattened as c*npt+p, so
+                                # fold the decoherence copies back and sum them
+                                # (the detector sees the incoherent sum). The old
+                                # zip() truncated to the first copy only.
+                                n_copies = intensities.shape[0] // len(selected)
+                                if n_copies > 1:
+                                    intensities = b.sum(
+                                        b.reshape(intensities, (n_copies, len(selected))), axis=0)
                                 for i, pp in zip(intensities, selected):
-                                    self.ADF._array[self.ADFindex==pp] += i
+                                    self.ADF._array[out_idx][self.ADFindex == pp] += i
                         if pbar2 is not None:
                             pbar2.update(len(selected))
 
@@ -716,7 +730,12 @@ class MultisliceCalculator:
             logger.info(f"Cache files saved in: {self.output_dir}")
 
         if self.ADF:
-            self.ADF._array /= self.n_frames  # haadf_data divides by nc,nt,nl (from _wf_array's c,x,y,t,kx,ky,l)
+            self.ADF._array /= self.n_frames  # per-thickness time average
+            # Depth (Å) of each ADF image (the z of its stored slice), and
+            # collapse to a plain 2D image when a single thickness was stored.
+            self.ADF.thicknesses = to_numpy(self.zs)[list(_stored_layers)]
+            if self.n_layers == 1:
+                self.ADF._array = self.ADF._array[0]
             return wf_data, self.ADF
 
         return wf_data

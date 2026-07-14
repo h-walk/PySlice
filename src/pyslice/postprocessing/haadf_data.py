@@ -52,6 +52,9 @@ class HAADFData(PySliceSerial, Signal):
 
         # Store reference to source WFData array for ADF calculation
         self._wf_array = wf_data.reshaped() # nprobes,x,y,t,kx,ky,l indices
+        # Identity of each stored layer (thickness); used when calculateADF
+        # returns one ADF image per layer.
+        self.layers = getattr(wf_data, '_layer', None)
 
         # Initialize ADF as None, will be computed by calculateADF
         self._array = None
@@ -159,7 +162,11 @@ class HAADFData(PySliceSerial, Signal):
 
         nc,_,_,nt,_,_,nl = self._wf_array.shape
         wf_intensity = b.absolute(self._wf_array)**2 ; mask = b.absolute(mask)
-        self._array = b.einsum('cxytkql,kq->xy', wf_intensity, mask) / (nc*nt*nl)
+        # One ADF image per stored layer (thickness). Only the exit wave
+        # physically reaches the detector, but storing several layers gives ADF
+        # vs thickness. Collapse to a plain 2D image for the single-layer case.
+        stack = b.einsum('cxytkql,kq->lxy', wf_intensity, mask) / (nc*nt)
+        self._array = stack[0] if nl == 1 else stack
 
         xs_np = to_numpy(self._xs)
         ys_np = to_numpy(self._ys)
@@ -177,12 +184,14 @@ class HAADFData(PySliceSerial, Signal):
 
         return self.data  # Return numpy array for backward compatibility
 
-    def plot(self, filename=None, title=None):
+    def plot(self, filename=None, title=None, layer=-1):
         """
         Plot the HAADF image.
 
         Args:
             filename: If provided, save plot to this file instead of displaying
+            layer: Which thickness to plot when the ADF is a per-layer stack
+                (default -1, i.e. the exit wave). Ignored for a single-layer ADF.
         """
         import matplotlib.pyplot as plt
 
@@ -190,7 +199,10 @@ class HAADFData(PySliceSerial, Signal):
             raise RuntimeError("calculateADF() must be called before plotting")
 
         fig, ax = plt.subplots()
-        array = self.array.T[::-1,:]  # imshow convention: y,x. our convention: x,y, and flip y (0,0 upper-left)
+        img = to_numpy(self._array)
+        if img.ndim == 3:            # (n_layers, x, y) stack -> pick a thickness
+            img = img[layer]
+        array = img.T[::-1,:]  # imshow convention: y,x. our convention: x,y, and flip y (0,0 upper-left)
         xs = to_numpy(self._xs)
         ys = to_numpy(self._ys)
 
