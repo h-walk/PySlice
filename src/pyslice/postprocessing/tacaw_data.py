@@ -288,24 +288,25 @@ class TACAWData(PySliceSerial, Signal):
             "n_chunks": int(self.n_chunks),
             "array_shape": [n_probes, int(fft_len), nkx, nky],
             "wf_dtype": str(getattr(self._wf_array, "dtype", "")),
-            "wf_fingerprint": self._wf_fingerprint(),
+            "wf_fingerprint": self._array_fingerprint(
+                self._wf_array[:, :, :, :, layer_index]),
+            "time_fingerprint": self._array_fingerprint(self._time),
+            "kx_fingerprint": self._array_fingerprint(self._kxs),
+            "ky_fingerprint": self._array_fingerprint(self._kys),
         }
 
-    def _wf_fingerprint(self) -> str:
-        """Content fingerprint of the source wavefunction array.
-
-        Samples up to ~1M elements strided across the whole array (so it detects
-        any global difference, unlike a frame-0-style sample) and hashes them
-        with the shape — enough to tell a different dataset in the same cache_dir
-        apart from this one without a full multi-GB scan.
-        """
-        arr = self._wf_array
+    @staticmethod
+    def _array_fingerprint(arr) -> str:
+        """Hash every value without materialising a potentially huge CPU copy."""
         flat = arr.reshape(-1)
         n = int(flat.shape[0])
-        step = max(1, n // (1 << 20))
-        sample = np.ascontiguousarray(to_numpy(flat[::step]))
-        payload = repr(tuple(int(s) for s in arr.shape)).encode() + sample.tobytes()
-        return hashlib.md5(payload).hexdigest()
+        digest = hashlib.sha256()
+        digest.update(repr(tuple(int(s) for s in arr.shape)).encode())
+        digest.update(str(getattr(arr, "dtype", "")).encode())
+        for start in range(0, n, 1 << 20):
+            block = np.ascontiguousarray(to_numpy(flat[start:start + (1 << 20)]))
+            digest.update(block.tobytes())
+        return digest.hexdigest()
 
     def fft_from_wf_data(self, layer_index: Optional[int] = None):
         """Public alias for backward compatibility."""

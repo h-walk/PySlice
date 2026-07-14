@@ -700,6 +700,21 @@ def test_wavefunction_cache_key_uses_full_trajectory(tmp_path, monkeypatch):
     assert key(ycomp) != k                             # differs only in frame-0 y
 
 
+def test_wavefunction_cache_key_partitions_skip_vacuum(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    traj = _make_tiny_trajectory()
+
+    def key(skip_vacuum):
+        calc = MultisliceCalculator(force_cpu=True)
+        calc.setup(
+            traj, aperture=30, voltage_eV=60e3, sampling=0.25,
+            slice_thickness=1.0, probe_xs=[1.0, 2.0], probe_ys=[1.0],
+            min_dk=0.25, skip_vacuum=skip_vacuum)
+        return calc.cache_key
+
+    assert key(False) != key(True)
+
+
 def _make_layered_wf(cache_dir, n_layers=2, seed=0):
     nt = 16
     t = np.arange(nt) * 0.1
@@ -729,6 +744,24 @@ def test_tacaw_cache_distinguishes_layer_dtype_and_dataset(tmp_path):
     assert sc.dtype.kind == "c"                          # complex, not cached real intensity
     wf2 = _make_layered_wf(tmp_path, seed=2)             # different data, same cache_dir
     assert not np.allclose(s0, to_numpy(TACAWData(wf2, layer_index=0)._array))
+
+
+def test_tacaw_cache_distinguishes_timestep_and_hashes_every_value(tmp_path):
+    wf = _make_layered_wf(tmp_path, seed=1)
+    first = TACAWData(wf, layer_index=0)
+    frequencies = first.frequencies.copy()
+
+    # The FFT values alone do not identify their frequency axis: identical
+    # samples at a different timestep must not inherit the old frequencies.
+    wf._time = wf._time * 2
+    second = TACAWData(wf, layer_index=0)
+    np.testing.assert_allclose(second.frequencies, frequencies / 2)
+
+    # A single changed value must never hide between stride-sampled elements.
+    large = np.zeros((1 << 20) + 3, dtype=np.complex128)
+    fingerprint = TACAWData._array_fingerprint(large)
+    large[(1 << 19) + 1] = 1
+    assert TACAWData._array_fingerprint(large) != fingerprint
 
 
 def test_cache_versions_are_derived_from_source(tmp_path):
@@ -764,6 +797,18 @@ def test_slice_positions_translates_atoms_into_new_box():
     xs = sliced.positions[0, :, 0]
     assert np.all((xs >= 0.0) & (xs <= 3.0))          # atoms 6.0, 7.5 -> 1.0, 2.5
     np.testing.assert_allclose(sorted(xs), [1.0, 2.5])
+
+
+def test_slice_positions_applies_crop_when_every_atom_survives():
+    pos = np.array([[[6.0, 1.0, 1.0], [7.5, 2.0, 3.0]]], dtype=float)
+    traj = Trajectory(
+        atom_types=np.array([14, 14]), positions=pos,
+        velocities=np.zeros_like(pos), box_matrix=np.diag([10.0, 10.0, 10.0]),
+        timestep=0.1)
+    sliced = traj.slice_positions(x_range=(5.0, 8.0))
+    assert sliced is not traj
+    assert sliced.box_matrix[0, 0] == 3.0
+    np.testing.assert_allclose(sliced.positions[0, :, 0], [1.0, 2.5])
 
 
 def test_ovito_cell_matrix_transposed_to_row_convention():
@@ -855,6 +900,42 @@ def test_multiframe_cif_loads_all_frames_and_index_selects(tmp_path):
     assert load(1).n_frames == 1
 
 
+def test_loader_cache_tracks_source_parser_and_mapping_inputs(tmp_path, monkeypatch):
+    source = tmp_path / "trajectory.fake"
+    source.write_text("1")
+    calls = []
+
+    def fake_parse(self):
+        calls.append((source.read_text(), self.atomic_numbers))
+        x = float(source.read_text())
+        positions = np.array([[[x, 0.0, 0.0]]], dtype=np.float32)
+        atom_type = 14 if self.atomic_numbers is None else self.atomic_numbers[1]
+        return Trajectory(
+            atom_types=np.array([atom_type]), positions=positions,
+            velocities=np.zeros_like(positions), box_matrix=np.eye(3) * 10,
+            timestep=self.timestep)
+
+    monkeypatch.setattr(Loader, "_load_via_ovito", fake_parse)
+    assert Loader(str(source)).load().positions[0, 0, 0] == 1
+    assert Loader(str(source)).load().positions[0, 0, 0] == 1
+    assert len(calls) == 1                              # unchanged cache hit
+
+    source.write_text("2")
+    assert Loader(str(source)).load().positions[0, 0, 0] == 2
+    assert len(calls) == 2                              # source invalidated
+
+    mapped = Loader(str(source), atom_mapping={1: "C"}).load()
+    assert mapped.atom_types.tolist() == [6]
+    assert len(calls) == 3                              # mapping invalidated
+    assert Loader(str(source), atom_mapping={1: 6}).load().atom_types.tolist() == [6]
+    assert len(calls) == 3                              # canonical mapping cache hit
+
+    # Legacy existence-only caches have no provenance and must be reparsed.
+    Loader(str(source))._get_cache_files()["metadata"].unlink()
+    Loader(str(source)).load()
+    assert len(calls) == 4
+
+
 def _adf_run(tmp_path, monkeypatch, **setup_kw):
     tmp_path.mkdir(parents=True, exist_ok=True)
     monkeypatch.chdir(tmp_path)
@@ -883,8 +964,38 @@ def test_adf_depth_resolved_stack_not_layer_sum(tmp_path, monkeypatch):
     assert not np.allclose(stack[-1], stack.sum(0))      # not the old layer-sum
 
 
+def test_adf_depth_stack_exposes_a_layer_dimension(monkeypatch):
+    import pyslice.postprocessing.haadf_data as haadf_module
+
+    class FakeDimension:
+        def __init__(self, **kwargs):
+            self.name = kwargs['name']
+            self.values = np.asarray(kwargs['values'])
+            self.units = kwargs.get('units')
+
+    class FakeDimensions:
+        def __init__(self, dimensions, nav_dimensions, sig_dimensions):
+            self.dimensions = dimensions
+            self.nav_dimensions = nav_dimensions
+            self.sig_dimensions = sig_dimensions
+
+    class FakeMetadata:
+        def __init__(self, values):
+            self.Simulation = SimpleNamespace(**values['Simulation'])
+
+    monkeypatch.setattr(haadf_module, 'Dimension', FakeDimension)
+    monkeypatch.setattr(haadf_module, 'Dimensions', FakeDimensions)
+    monkeypatch.setattr(haadf_module, 'Metadata', FakeMetadata)
+
+    wf = _make_layered_wf(None, n_layers=2)
+    adf = haadf_module.HAADFData(wf)
+    adf.calculateADF(inner_mrad=0, outer_mrad=1e6)
+    assert [d.name for d in adf.dimensions.dimensions] == ['layer', 'x', 'y']
+    np.testing.assert_array_equal(adf.dimensions.dimensions[0].values, [0, 1])
+
+
 def test_adf_sums_decoherence_copies(tmp_path, monkeypatch):
-    def total(deco):
+    def total(n_copies):
         s = np.array([[[4., 4., 1.0], [3., 5., 2.5]]], dtype=np.float32)
         traj = Trajectory(atom_types=np.array([14, 14]), positions=s,
                           velocities=np.zeros_like(s), box_matrix=np.diag([8., 8., 4.]),
@@ -894,9 +1005,76 @@ def test_adf_sums_decoherence_copies(tmp_path, monkeypatch):
         calc.setup(traj, aperture=30, voltage_eV=100e3, sampling=0.25, slice_thickness=1.0,
                    probe_xs=[2., 4., 6.], probe_ys=[2., 4., 6.], ADF=(45, 150),
                    cache_wavefunctions=False, return_layers=None)
-        if deco:
-            calc.base_probe.addTemporalDecoherence(2.0, 3)  # nc = 3
+        if n_copies:
+            calc.base_probe.addTemporalDecoherence(2.0, n_copies)
         return float(np.sum(np.abs(to_numpy(calc.run(force_rerun=True)[1].array))))
-    # summed copies -> ~1; the old zip() dropped all but the first (-2 sigma tail) -> ~3e-4
-    ratio = total(True) / total(False)
-    assert 0.9 < ratio < 1.1, ratio
+    baseline = total(None)
+    # Correct quadrature is independent of the number of samples. N=3 happened
+    # to pass before because its central sample dominated; N=5/7 exposed the
+    # missing normalisation as a dose increase.
+    for n_copies in (3, 5, 7):
+        ratio = total(n_copies) / baseline
+        assert 0.9 < ratio < 1.1, (n_copies, ratio)
+
+
+def test_decoherence_default_wavefunction_storage_keeps_every_copy(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    s = np.array([[[4., 4., 1.0], [3., 5., 2.5]]], dtype=np.float32)
+    traj = Trajectory(
+        atom_types=np.array([14, 14]), positions=s, velocities=np.zeros_like(s),
+        box_matrix=np.diag([8., 8., 4.]), timestep=0.1)
+    calc = MultisliceCalculator(force_cpu=True)
+    calc.setup(
+        traj, aperture=30, voltage_eV=100e3, sampling=0.25,
+        slice_thickness=1.0, probe_xs=[2., 4., 6.], probe_ys=[2., 4., 6.],
+        ADF=(45, 150), cache_wavefunctions=True)  # default return_layers=-1
+    calc.base_probe.addTemporalDecoherence(2.0, 3)
+    wf, adf = calc.run(force_rerun=True)
+    assert wf.array.shape[0] == 3 * 9
+    assert adf.array.shape == (3, 3)
+    assert np.isfinite(to_numpy(wf.array)).all()
+
+    # A second calculator must fold all cached copies into the same detector
+    # result; the old cache path indexed only the first copy.
+    expected = to_numpy(adf.array).copy()
+    cached_calc = MultisliceCalculator(force_cpu=True)
+    cached_calc.setup(
+        traj, aperture=30, voltage_eV=100e3, sampling=0.25,
+        slice_thickness=1.0, probe_xs=[2., 4., 6.], probe_ys=[2., 4., 6.],
+        ADF=(45, 150), cache_wavefunctions=True)
+    cached_calc.base_probe.addTemporalDecoherence(2.0, 3)
+    cached_wf, cached_adf = cached_calc.run()
+    assert cached_wf.array.shape[0] == 3 * 9
+    np.testing.assert_allclose(to_numpy(cached_adf.array), expected, rtol=1e-7)
+
+
+def test_decoherence_weights_preserve_total_probe_dose():
+    baseline_probe = _make_deferred_probe((4.0, 4.0))
+    baseline_probe.applyShifts()
+    baseline = np.sum(np.abs(to_numpy(baseline_probe._array)) ** 2)
+
+    for n_copies in (3, 5, 7):
+        probe = _make_deferred_probe((4.0, 4.0))
+        probe.addTemporalDecoherence(2.0, n_copies)
+        total = np.sum(np.abs(to_numpy(probe._array)) ** 2)
+        np.testing.assert_allclose(total, baseline, rtol=1e-7)
+
+    probe = _make_deferred_probe((4.0, 4.0))
+    probe.addSpatialDecoherence(50.0, 7)
+    total = np.sum(np.abs(to_numpy(probe._array)) ** 2)
+    np.testing.assert_allclose(total, baseline, rtol=1e-7)
+
+    with pytest.raises(ValueError, match="positive"):
+        probe.addTemporalDecoherence(0, 3)
+    with pytest.raises(ValueError, match="positive integer"):
+        probe.addSpatialDecoherence(1, 0)
+
+    # One quadrature point denotes the distribution centre, not its -2 sigma
+    # endpoint (numpy.linspace(start, stop, 1) returns start).
+    temporal_one = _make_deferred_probe((4.0, 4.0))
+    temporal_one.addTemporalDecoherence(2.0, 1)
+    np.testing.assert_allclose(to_numpy(temporal_one.eVs), [temporal_one.eV])
+    spatial_one = _make_deferred_probe((4.0, 4.0))
+    reference = to_numpy(spatial_one._array).copy()
+    spatial_one.addSpatialDecoherence(50.0, 1)
+    np.testing.assert_allclose(to_numpy(spatial_one._array), reference, atol=1e-12)

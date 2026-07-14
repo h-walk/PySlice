@@ -62,11 +62,7 @@ class HAADFData(PySliceSerial, Signal):
         self._ys = wf_data.probe_ys
 
         if Dimensions is not None:
-            # Build placeholder dimensions (will be updated after calculateADF)
-            self.dimensions = Dimensions([
-                Dimension(name='x', space='position', units='Å', values=np.array([0])),
-                Dimension(name='y', space='position', units='Å', values=np.array([0])),
-            ], nav_dimensions=[0, 1], sig_dimensions=[])
+            self._set_dimensions()
 
             # Build metadata
             metadata_dict = {
@@ -83,6 +79,37 @@ class HAADFData(PySliceSerial, Signal):
             }
             self.metadata = Metadata(metadata_dict)
             self.sea_type="Signal"
+
+    def _set_dimensions(self, layer_values=None, layer_name='layer',
+                        layer_units=None):
+        """Synchronise Signal dimensions with the current ADF array shape."""
+        if Dimensions is None:
+            return
+        dimensions = []
+        if layer_values is not None:
+            layer_kwargs = {
+                'name': layer_name,
+                'space': 'position',
+                'values': to_numpy(layer_values),
+            }
+            if layer_units is not None:
+                layer_kwargs['units'] = layer_units
+            dimensions.append(Dimension(**layer_kwargs))
+        dimensions.extend([
+            Dimension(name='x', space='position', units='Å',
+                      values=to_numpy(self._xs)),
+            Dimension(name='y', space='position', units='Å',
+                      values=to_numpy(self._ys)),
+        ])
+        dims = Dimensions(
+            dimensions,
+            nav_dimensions=list(range(len(dimensions))),
+            sig_dimensions=[],
+        )
+        # PySEA uses the public dimensions during normal operation and the
+        # local copy during serialisation/deserialisation. Keep both congruent.
+        self.dimensions = dims
+        self._local_dimensions = dims
 
     @property
     def data(self):
@@ -165,17 +192,21 @@ class HAADFData(PySliceSerial, Signal):
         # One ADF image per stored layer (thickness). Only the exit wave
         # physically reaches the detector, but storing several layers gives ADF
         # vs thickness. Collapse to a plain 2D image for the single-layer case.
-        stack = b.einsum('cxytkql,kq->lxy', wf_intensity, mask) / (nc*nt)
+        # Probe copies already carry normalised intensity weights; sum them,
+        # then average only over time. Dividing by nc would make the signal
+        # vanish as more quadrature points are used.
+        stack = b.einsum('cxytkql,kq->lxy', wf_intensity, mask) / nt
         self._array = stack[0] if nl == 1 else stack
 
         xs_np = to_numpy(self._xs)
         ys_np = to_numpy(self._ys)
 
         if Dimensions is not None:
-            self._local_dimensions = Dimensions([
-                Dimension(name='x', space='position', units='Å', values=xs_np),
-                Dimension(name='y', space='position', units='Å', values=ys_np),
-            ], nav_dimensions=[0, 1], sig_dimensions=[])
+            layer_values = None
+            if nl > 1:
+                layer_values = (self.layers if self.layers is not None
+                                else np.arange(nl))
+            self._set_dimensions(layer_values)
 
             # Update metadata with detector settings
             #if hasattr(self.signal.metadata, 'Simulation'):

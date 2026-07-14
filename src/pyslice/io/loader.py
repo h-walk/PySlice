@@ -1,6 +1,7 @@
 """Load structures and trajectories into PySlice ``Trajectory`` objects."""
 import numpy as np
 from pathlib import Path
+import hashlib
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ from typing import Optional, Dict, Union
 
 from ..multislice.trajectory import Trajectory
 from ..multislice.potentials import get_z_from_element
+from ..backend import source_files_version
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +75,10 @@ class Loader:
     inputs handled through ASE.  Loaded arrays are cached next to the source
     file as ``*.npy`` files so repeated loads avoid parser overhead.
     """
+
+    # The cache stores parser output, so parser changes must invalidate old
+    # arrays just as surely as changes to the source file or import options do.
+    _CACHE_VERSION = "v1-" + source_files_version([__file__])
 
     def __init__(self,
                  filename: Optional[str] = None,
@@ -202,7 +208,33 @@ class Loader:
             'positions': cache_base.with_suffix(cache_base.suffix + '.positions.npy'),
             'velocities': cache_base.with_suffix(cache_base.suffix + '.velocities.npy'),
             'atom_types': cache_base.with_suffix(cache_base.suffix + '.atom_types.npy'),
-            'box_matrix': cache_base.with_suffix(cache_base.suffix + '.box_matrix.npy')
+            'box_matrix': cache_base.with_suffix(cache_base.suffix + '.box_matrix.npy'),
+            'metadata': cache_base.with_suffix(cache_base.suffix + '.cache.json'),
+        }
+
+    def _cache_identity(self) -> dict:
+        """Return all inputs that can change the cached parser output."""
+        digest = hashlib.sha256()
+        with open(self.filepath, "rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+
+        mapping = None
+        if self.atomic_numbers is not None:
+            mapping = sorted(
+                [int(atom_type), int(atomic_number)]
+                for atom_type, atomic_number in self.atomic_numbers.items()
+            )
+        # Keep this as canonical JSON text. OVITO keyword values are normally
+        # JSON-compatible; default=repr still gives uncommon custom values a
+        # deterministic cache partition instead of disabling caching entirely.
+        ovito_options = json.dumps(
+            self.ovitokwargs, sort_keys=True, separators=(",", ":"), default=repr)
+        return {
+            "cache_version": self._CACHE_VERSION,
+            "source_sha256": digest.hexdigest(),
+            "atom_mapping": mapping,
+            "ovito_options": ovito_options,
         }
 
     def _load_from_cache(self) -> Optional[Trajectory]:
@@ -213,6 +245,11 @@ class Loader:
             return None
 
         try:
+            with open(cache_files['metadata']) as f:
+                if json.load(f) != self._cache_identity():
+                    logger.info("Ignoring stale cache for %s", self.filepath.name)
+                    return None
+
             logger.info(f"Loading from cache for {self.filepath.name}")
 
             pos = np.load(cache_files['positions'])
@@ -249,6 +286,13 @@ class Loader:
         np.save(cache_files['velocities'], trajectory.velocities)
         np.save(cache_files['atom_types'], trajectory.atom_types)
         np.save(cache_files['box_matrix'], trajectory.box_matrix)
+        # Written last: the metadata file is the completion marker for the
+        # four-array cache, as well as its provenance record.
+        metadata_tmp = cache_files['metadata'].with_suffix(
+            cache_files['metadata'].suffix + '.tmp')
+        with open(metadata_tmp, 'w') as f:
+            json.dump(self._cache_identity(), f, sort_keys=True)
+        metadata_tmp.replace(cache_files['metadata'])
 
     def load(self) -> Trajectory:
         """Load structure/trajectory from file or ASE Atoms object and return as Trajectory."""

@@ -501,16 +501,26 @@ class Probe:
         is always: temporal → spatial → shift.
         """
         b = self._backend
+        if sigma_eV <= 0:
+            raise ValueError("sigma_eV must be positive")
+        if not isinstance(N, (int, np.integer)) or N < 1:
+            raise ValueError("N must be a positive integer")
         nc, npt, nx, ny = self._array.shape
         if self.temporal_decoherence is not None:
             logger.warning("addTemporalDecoherence called twice — overwriting previous.")
         self.temporal_decoherence = (sigma_eV, N)
 
-        self.eVs        = b.asarray(b.linspace(self.eV - 2*sigma_eV,
-                                                self.eV + 2*sigma_eV, N),
+        energy_samples = ([self.eV] if N == 1 else
+                          b.linspace(self.eV - 2*sigma_eV,
+                                     self.eV + 2*sigma_eV, N))
+        self.eVs        = b.asarray(energy_samples,
                                     dtype=b.float_dtype)
         self.wavelengths = wavelength(self.eVs, b)
         amplitudes       = b.exp(-(self.eV - self.eVs)**2 / sigma_eV**2)
+        # These copies are combined incoherently, so their intensity weights
+        # must sum to one. Without this normalisation the total dose grew with
+        # N (and happened to look correct only for N=3, whose centre dominates).
+        amplitudes /= b.sqrt(b.sum(amplitudes**2))
 
         # Rebuilding the template from scratch discards any prior positioning,
         # so allow the applyShifts() call below to run again.
@@ -540,13 +550,20 @@ class Probe:
         the expanded nc dimension has the correct associated value.
         """
         b = self._backend
+        if sigma_dz <= 0:
+            raise ValueError("sigma_dz must be positive")
+        if not isinstance(N, (int, np.integer)) or N < 1:
+            raise ValueError("N must be a positive integer")
         if self.spatial_decoherence is not None:
             logger.warning("addSpatialDecoherence called twice — overwriting previous.")
         self.spatial_decoherence = (sigma_dz, N)
 
-        dzs        = b.asarray(b.linspace(-2*sigma_dz, 2*sigma_dz, N),
+        defocus_samples = ([0.0] if N == 1 else
+                           b.linspace(-2*sigma_dz, 2*sigma_dz, N))
+        dzs        = b.asarray(defocus_samples,
                                dtype=b.float_dtype)
         amplitudes = b.exp(-dzs**2 / sigma_dz**2)
+        amplitudes /= b.sqrt(b.sum(amplitudes**2))
 
         nc, npt, nx, ny = self._array.shape
         self.defocus(dzs)   # expands: (nc,1,nx,ny) → (N·nc,1,nx,ny)

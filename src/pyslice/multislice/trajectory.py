@@ -307,10 +307,9 @@ class Trajectory:
             if z_range: ranges_desc.append(f"Z∈[{z_range[0]:.2f},{z_range[1]:.2f}]")
             raise ValueError(f"Filter {' AND '.join(ranges_desc)} resulted in 0 atoms")
 
-        if n_filtered == self.n_atoms:
-            return self
-
-        # Create filtered trajectory, translating kept atoms into the new box.
+        # Create the cropped trajectory even when every atom survives. A range
+        # request changes the coordinate origin and box; returning self in that
+        # case silently discarded the requested crop.
         return Trajectory(
             atom_types=self.atom_types[atom_mask],
             positions=self.positions[:, atom_mask, :] - origin_shift,

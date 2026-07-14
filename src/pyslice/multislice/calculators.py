@@ -64,7 +64,8 @@ class MultisliceCalculator:
     def _generate_cache_key(self, trajectory, aperture, voltage_eV,
                             slice_thickness, sampling, probe_positions,
                             spatial_decoherence, temporal_decoherence,
-                            probe_array=None, stored_layer_indices=None):
+                            probe_array=None, stored_layer_indices=None,
+                            skip_vacuum=False):
         """Generate a short hash for parameters that affect wavefunction output.
 
         The trajectory is hashed in full (every frame, atom and component)
@@ -94,6 +95,7 @@ class MultisliceCalculator:
             'min_dk': self.min_dk,
             'prism': self.prism,
             'slice_axis': self.slice_axis,
+            'skip_vacuum': bool(skip_vacuum),
             'backend': 'torch' if not isinstance(self._backend, NumpyBackend) else 'numpy',
         }
         if stored_layer_indices is not None:
@@ -387,6 +389,7 @@ class MultisliceCalculator:
             self.base_probe.spatial_decoherence, self.base_probe.temporal_decoherence,
             self.base_probe._array,
             self._cache_key_stored_layers(self._stored_layers),
+            self.skip_vacuum,
         )
         self.output_dir = Path("psi_data/" + ("torch" if not isinstance(b, NumpyBackend) else "numpy") + "_"+self.cache_key)
 
@@ -436,7 +439,8 @@ class MultisliceCalculator:
                                              self.slice_thickness, self.sampling, self.probe_positions,
                                              self.base_probe.spatial_decoherence, self.base_probe.temporal_decoherence,
                                              self.base_probe._array,
-                                             self._cache_key_stored_layers(_stored_layers))
+                                             self._cache_key_stored_layers(_stored_layers),
+                                             self.skip_vacuum)
         if self.cache_key != cache_key:
             self.cache_key = cache_key
         self.output_dir = Path("psi_data/" + ("torch" if b.xp is not np else "numpy") + "_"+cache_key)
@@ -536,11 +540,14 @@ class MultisliceCalculator:
                     self.cache_wavefunctions and not force_rerun,
                     b,
                     expected_n_layers=self.n_layers,
+                    expected_n_probes=self.n_probes,
                 )
                 if cache_exists and not self.prism and self.ADF:
                     # Keep the layer axis so each stored thickness gets its own
                     # ADF image (previously all layers were summed together).
                     intensities = b.einsum('pxyln,xy->pl', b.absolute(frame_data)**2, self.ADFmask)
+                    intensities = b.sum(
+                        b.reshape(intensities, (nc, npt, self.n_layers)), axis=0)
                     for out_idx in range(self.n_layers):
                         self.ADF._array[out_idx] += intensities[self.ADFindex, out_idx]
 
@@ -566,7 +573,11 @@ class MultisliceCalculator:
 
                     nc, npt, nx, ny = self.base_probe._array.shape; npt = len(self.base_probe.probe_positions)
                     n_slices = len(self.zs)
-                    n_waves = len(self.base_probe.probe_positions)
+                    # Real-space propagation flattens decoherence copies into
+                    # the wave axis. PRISM stores its Fourier components here
+                    # instead and reconstructs real-space probes afterwards.
+                    n_waves = (len(self.base_probe.probe_positions)
+                               if self.prism else self.n_probes)
 
                     # frame_data is always: p,x,y,l,1 (self.wavefunction_data expects p,t,x,y,l, since we loop time. recall Propagate gave l,p,x,y)
                     if self.returns_wavefunctions or self.cache_wavefunctions or self.prism:
@@ -625,7 +636,16 @@ class MultisliceCalculator:
                                 diffraction_patterns = to_numpy(diffraction_patterns)
                                 selected = to_numpy(selected)
                             if self.returns_wavefunctions or self.cache_wavefunctions or self.prism:
-                                frame_data[selected, :, :, out_idx, 0] = diffraction_patterns  # load p,x,y --> p,x,y,l,1 indices
+                                # Propagation flattens (copy, selected-probe) in
+                                # copy-major order. Expand the selected position
+                                # indices across copies to preserve that layout.
+                                if self.use_memmap:
+                                    selected_rows = np.reshape(
+                                        np.arange(nc)[:, None] * npt + selected[None, :], (-1,))
+                                else:
+                                    selected_rows = b.reshape(
+                                        b.arange(nc)[:, None] * npt + selected[None, :], (-1,))
+                                frame_data[selected_rows, :, :, out_idx, 0] = diffraction_patterns
                             if self.ADF and not self.prism:
                                 intensities = b.einsum('pxy,xy->p', b.absolute(diffraction_patterns[:, :, :])**2, self.ADFmask)
                                 # The batch is (nc, npt) flattened as c*npt+p, so
@@ -734,6 +754,9 @@ class MultisliceCalculator:
             # Depth (Å) of each ADF image (the z of its stored slice), and
             # collapse to a plain 2D image when a single thickness was stored.
             self.ADF.thicknesses = to_numpy(self.zs)[list(_stored_layers)]
+            self.ADF._set_dimensions(
+                self.ADF.thicknesses if self.n_layers > 1 else None,
+                layer_name='thickness', layer_units='Å')
             if self.n_layers == 1:
                 self.ADF._array = self.ADF._array[0]
             return wf_data, self.ADF
@@ -743,7 +766,8 @@ class MultisliceCalculator:
 
 logging_tracker = []
 
-def checkCache(cache_file, cache_wavefunctions, b, expected_n_layers=None):
+def checkCache(cache_file, cache_wavefunctions, b, expected_n_layers=None,
+               expected_n_probes=None):
     global logging_tracker
     if cache_wavefunctions and cache_file.exists():
         frame_data = np.load(cache_file)
@@ -753,6 +777,12 @@ def checkCache(cache_file, cache_wavefunctions, b, expected_n_layers=None):
                 frame_data.shape[-2],
                 cache_file,
                 expected_n_layers,
+            )
+            return False, 0
+        if expected_n_probes is not None and frame_data.shape[0] != expected_n_probes:
+            logging.warning(
+                "Ignoring cache with %d probes at %s; expected %d",
+                frame_data.shape[0], cache_file, expected_n_probes,
             )
             return False, 0
         parent = str(cache_file.parent)
