@@ -4,6 +4,7 @@ from pathlib import Path
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -31,6 +32,40 @@ def _ovito_cell_to_row_convention(matrix):
     return h_matrix, origin
 
 
+def _parse_index(index):
+    """Parse a frame selector into an ``int`` or ``slice``.
+
+    Accepts an int, a ``slice``, or an ASE-like string:
+    ``":"`` (all), ``":3"`` (first 3), ``"-3:"`` (last 3), ``"::2"`` (every
+    other), ``"3:5"`` (Python slice, 3 and 4), ``"3-5"`` (inclusive range, 3 to
+    5), or a bare integer like ``"1"`` / ``"-1"``.
+    """
+    if isinstance(index, (int, np.integer)):
+        return int(index)
+    if isinstance(index, slice):
+        return index
+    if not isinstance(index, str):
+        raise ValueError(
+            f"index must be an int, slice or str; got {type(index).__name__}")
+    s = index.strip()
+    if ":" in s:
+        parts = s.split(":")
+        if len(parts) > 3:
+            raise ValueError(f"invalid slice index {index!r}")
+        parts = (parts + ["", "", ""])[:3]
+        to_int = lambda x: int(x) if x.strip() else None
+        return slice(to_int(parts[0]), to_int(parts[1]), to_int(parts[2]))
+    m = re.fullmatch(r"(\d+)\s*-\s*(\d+)", s)
+    if m:  # inclusive dash-range, e.g. "3-5" -> frames 3, 4, 5
+        return slice(int(m.group(1)), int(m.group(2)) + 1)
+    try:
+        return int(s)
+    except ValueError:
+        raise ValueError(
+            f"Unrecognised index {index!r}. Use ':', '3-5', ':3', '-3:', "
+            "'::2', an int, or a slice.")
+
+
 class Loader:
     """Load a file or ASE object into the internal ``Trajectory`` representation.
 
@@ -47,7 +82,8 @@ class Loader:
                  atomic_numbers: Optional[Dict[int, int]] = None,
                  element_names: Optional[Dict[int, str]] = None,
                  ovitokwargs: Optional[Dict[str,str]] = None,
-                 atoms = None ):
+                 atoms = None,
+                 index: Union[int, str, slice] = ":" ):
         """
         Initialize a trajectory loader.
 
@@ -61,6 +97,10 @@ class Loader:
             element_names: Deprecated; use atom_mapping instead.
             ovitokwargs: Additional keyword arguments forwarded to OVITO import.
             atoms: ASE Atoms object or trajectory. If provided, file loading is skipped.
+            index: Which frames/images to load, ASE-like. Default ":" loads all.
+                Accepts an int, a slice, or a string: ":", ":3", "-3:", "::2",
+                "3:5" (Python slice) or "3-5" (inclusive range). A step (e.g.
+                "::2") rescales the trajectory timestep accordingly.
         """
         if timestep is not None and timestep <= 0:
             raise ValueError("timestep must be positive if specified.")
@@ -80,6 +120,10 @@ class Loader:
 
         # Process atom mapping
         self.atomic_numbers = self._process_atom_mapping(atom_mapping)
+
+        # Frame selection (applied after loading; default ":" = all frames)
+        self.index = index
+        self._index = _parse_index(index)
 
     def _process_atom_mapping(self, mapping: Optional[Dict[int, Union[int, str]]]) -> Optional[Dict[int, int]]:
         """Convert atom mapping to atomic numbers."""
@@ -211,26 +255,41 @@ class Loader:
         # If atoms object provided, convert directly
         if self.atoms is not None:
             logger.info("Converting ASE Atoms object to Trajectory")
-            return self.ase2Trajectory(self.atoms)
+            return self._apply_frame_index(self.ase2Trajectory(self.atoms))
 
-        # Try cache first
+        # Try cache first (the cache always holds every frame; `index` is applied
+        # as a view below, so different selections share one cache).
         trajectory = self._load_from_cache()
-        if trajectory is not None:
+        if trajectory is None:
+            # Load via OVITO or ASE
+            # CIF files use ASE because OVITO's CIF parser is limited (e.g., fails on multi-block CIF files)
+            if self.filepath.suffix in [".cif"]:
+                logger.info(f"Loading {self.filepath.name} via ASE")
+                trajectory = self._load_via_ase()
+            else:
+                logger.info(f"Loading {self.filepath.name} via OVITO")
+                trajectory = self._load_via_ovito()
+            self._save_to_cache(trajectory)
+
+        return self._apply_frame_index(trajectory)
+
+    def _apply_frame_index(self, trajectory: Trajectory) -> Trajectory:
+        """Select frames per ``self._index`` (int or slice); ``:`` is a no-op."""
+        n = trajectory.n_frames
+        frame_ids = np.atleast_1d(np.arange(n)[self._index])
+        if frame_ids.size == 0:
+            raise ValueError(
+                f"index {self.index!r} selected no frames from a {n}-frame source")
+        if frame_ids.size == n and np.array_equal(frame_ids, np.arange(n)):
             return trajectory
-
-        # Load via OVITO or ASE
-        # CIF files use ASE because OVITO's CIF parser is limited (e.g., fails on multi-block CIF files)
-        if self.filepath.suffix in [".cif"]:
-            logger.info(f"Loading {self.filepath.name} via ASE")
-            trajectory = self._load_via_ase()
-        else:
-            logger.info(f"Loading {self.filepath.name} via OVITO")
-            trajectory = self._load_via_ovito()
-
-        # Save to cache
-        self._save_to_cache(trajectory)
-
-        return trajectory
+        step = self._index.step if isinstance(self._index, slice) and self._index.step else 1
+        return Trajectory(
+            atom_types=trajectory.atom_types,
+            positions=trajectory.positions[frame_ids],
+            velocities=trajectory.velocities[frame_ids],
+            box_matrix=trajectory.box_matrix,
+            timestep=trajectory.timestep * abs(step),
+        )
 
     def _validate_frame_data(self, frame_data, frame_num: int = 0) -> None:
         """Validate OVITO frame data."""
@@ -525,7 +584,11 @@ np.savez(
 
     def _load_via_ase(self) -> Trajectory:
         from ase.io import read as aseread
-        atoms = aseread(str(self.filepath))
+        # index=":" reads EVERY image: ase.io.read defaults to index=-1 (last
+        # frame only), which silently dropped all but the last block of a
+        # multi-frame/multi-block CIF. Frame selection is applied afterwards via
+        # self._index so the cache still stores the full trajectory.
+        atoms = aseread(str(self.filepath), index=":")
         return self.ase2Trajectory(atoms)
 
     def ase2Trajectory(self, atoms):

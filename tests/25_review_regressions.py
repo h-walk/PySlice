@@ -812,3 +812,44 @@ def test_counts_samples_from_intensity_not_amplitude():
     hits = to_numpy(wf._array).ravel()
     ratio = hits[1] / hits[0]
     assert 8.3 < ratio < 9.7, ratio          # intensity 9:1, not amplitude 3:1
+
+
+def test_loader_parse_index_forms():
+    from pyslice.io.loader import _parse_index
+    assert _parse_index(":") == slice(None, None, None)
+    assert _parse_index(":3") == slice(None, 3, None)
+    assert _parse_index("-3:") == slice(-3, None, None)
+    assert _parse_index("::2") == slice(None, None, 2)
+    assert _parse_index("3:5") == slice(3, 5, None)
+    assert _parse_index("3-5") == slice(3, 6, None)   # inclusive dash range
+    assert _parse_index("1") == 1
+    assert _parse_index(-1) == -1
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        _parse_index("nonsense")
+
+
+def test_multiframe_cif_loads_all_frames_and_index_selects(tmp_path):
+    ase_io = pytest.importorskip("ase.io")
+    from ase import Atoms
+    frames = [Atoms("H", positions=[[float(i), 0.0, 0.0]], cell=[10, 10, 10], pbc=True)
+              for i in range(6)]
+    cif = tmp_path / "traj.cif"
+    ase_io.write(str(cif), frames)
+    from pyslice.io.loader import Loader
+
+    def load(index):
+        return Loader(str(cif), timestep=0.5, index=index).load()
+
+    # default reads every image (previously only the last one survived)
+    full = load(":")
+    assert full.n_frames == 6
+    np.testing.assert_allclose(full.positions[:, 0, 0], np.arange(6))
+    # selectors
+    assert load(":3").n_frames == 3
+    np.testing.assert_allclose(load("-3:").positions[:, 0, 0], [3, 4, 5])
+    np.testing.assert_allclose(load("3-5").positions[:, 0, 0], [3, 4, 5])  # inclusive
+    strided = load("::2")
+    np.testing.assert_allclose(strided.positions[:, 0, 0], [0, 2, 4])
+    assert strided.timestep == 1.0                    # step rescales timestep
+    assert load(1).n_frames == 1
