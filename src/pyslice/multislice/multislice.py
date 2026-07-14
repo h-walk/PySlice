@@ -267,6 +267,11 @@ class Probe:
         # Pixel offsets used when probe is cropped to a sub-region.
         self.offsets = np.zeros((len(self.probe_positions), 2), dtype=int)
 
+        # Whether applyShifts() has already positioned the probes.  Re-applying
+        # the position phase ramp would displace each probe by the requested
+        # offset a second time, so applyShifts() is a no-op once this is set.
+        self._shifts_applied = False
+
         if not defer_shifts:
             self.applyShifts()
 
@@ -361,8 +366,10 @@ class Probe:
         """
         b = self._backend
         nc, npt, nx, ny = self._array.shape
-        if npt > 1:
-            # Shifts have already been applied — nothing to do.
+        if self._shifts_applied or npt > 1:
+            # Shifts already applied — re-applying would displace each probe by
+            # its requested offset a second time (compounding on every frame in
+            # run()).  npt > 1 additionally guards an already-expanded array.
             return
 
         # Broadcast the single template probe to all npt positions.
@@ -382,11 +389,19 @@ class Probe:
 
         for i, (px, py) in enumerate(self.probe_positions):
             if px - self.lx / 2 == 0 and py - self.ly / 2 == 0:
-                continue   # already centred
+                # Already centred: no phase ramp needed, but a cropped probe's
+                # window still begins at the crop origin (i1, j1), not the grid
+                # corner (0, 0), so record that offset for Propagate.
+                if self.cropping:
+                    self.offsets[i, 0] = self.nx // 2 - self.cropping // 2
+                    self.offsets[i, 1] = self.ny // 2 - self.cropping // 2
+                continue
             self._array[:, i, :, :], (dpx, dpy) = self.placeProbe(
                 self._array[:, i, :, :], px, py)
             self.offsets[i, 0] = int(dpx)
             self.offsets[i, 1] = int(dpy)
+
+        self._shifts_applied = True
 
     def placeProbe(self, array, x: float, y: float):
         """
@@ -486,17 +501,30 @@ class Probe:
         is always: temporal → spatial → shift.
         """
         b = self._backend
+        if sigma_eV <= 0:
+            raise ValueError("sigma_eV must be positive")
+        if not isinstance(N, (int, np.integer)) or N < 1:
+            raise ValueError("N must be a positive integer")
         nc, npt, nx, ny = self._array.shape
         if self.temporal_decoherence is not None:
             logger.warning("addTemporalDecoherence called twice — overwriting previous.")
         self.temporal_decoherence = (sigma_eV, N)
 
-        self.eVs        = b.asarray(b.linspace(self.eV - 2*sigma_eV,
-                                                self.eV + 2*sigma_eV, N),
+        energy_samples = ([self.eV] if N == 1 else
+                          b.linspace(self.eV - 2*sigma_eV,
+                                     self.eV + 2*sigma_eV, N))
+        self.eVs        = b.asarray(energy_samples,
                                     dtype=b.float_dtype)
         self.wavelengths = wavelength(self.eVs, b)
         amplitudes       = b.exp(-(self.eV - self.eVs)**2 / sigma_eV**2)
+        # These copies are combined incoherently, so their intensity weights
+        # must sum to one. Without this normalisation the total dose grew with
+        # N (and happened to look correct only for N=3, whose centre dominates).
+        amplitudes /= b.sqrt(b.sum(amplitudes**2))
 
+        # Rebuilding the template from scratch discards any prior positioning,
+        # so allow the applyShifts() call below to run again.
+        self._shifts_applied = False
         self._array = b.zeros((N, 1, nx, ny), dtype=b.complex_dtype)
         for n, eV_n in enumerate(self.eVs):
             lam_n = wavelength(eV_n, b)
@@ -522,13 +550,20 @@ class Probe:
         the expanded nc dimension has the correct associated value.
         """
         b = self._backend
+        if sigma_dz <= 0:
+            raise ValueError("sigma_dz must be positive")
+        if not isinstance(N, (int, np.integer)) or N < 1:
+            raise ValueError("N must be a positive integer")
         if self.spatial_decoherence is not None:
             logger.warning("addSpatialDecoherence called twice — overwriting previous.")
         self.spatial_decoherence = (sigma_dz, N)
 
-        dzs        = b.asarray(b.linspace(-2*sigma_dz, 2*sigma_dz, N),
+        defocus_samples = ([0.0] if N == 1 else
+                           b.linspace(-2*sigma_dz, 2*sigma_dz, N))
+        dzs        = b.asarray(defocus_samples,
                                dtype=b.float_dtype)
         amplitudes = b.exp(-dzs**2 / sigma_dz**2)
+        amplitudes /= b.sqrt(b.sum(amplitudes**2))
 
         nc, npt, nx, ny = self._array.shape
         self.defocus(dzs)   # expands: (nc,1,nx,ny) → (N·nc,1,nx,ny)
@@ -600,6 +635,11 @@ class Probe:
             new_probe.probe_positions = np.asarray(self.probe_positions)[sel, :]
         else:
             new_probe._array = b.clone(self._array)
+
+        # Inherit positioning state: a copy of an already-shifted probe must not
+        # be shifted again, while a copy of the unshifted template (the
+        # loop_probes path) still needs applyShifts().
+        new_probe._shifts_applied = self._shifts_applied
 
         return new_probe
 
@@ -763,25 +803,31 @@ class PrismProbe:
         blowing up RAM with a full (n_positions × nkx × nky) intermediate.
 
         array shape on input: (n_sinusoids, nkx, nky, n_layers, 1)
-            reshaped to:      (nx_cropped, ny_cropped, nkx, nky)
+            reshaped to:      (nx_cropped, ny_cropped, nkx, nky, n_layers)
         """
         b = self._backend
 
-        if load_into is None and not ADF:
-            result = b.zeros(
-                (len(positions), b.ceil(self.nx / self.kth), b.ceil(self.ny / self.kth)),
-                dtype=b.complex_dtype,
-            )
-        elif not ADF:
+        npt, nkx, nky, n_layers, _ = array.shape
+        adf_data = None
+        if ADF:
+            adf_data, ADFmask, ADFindex = ADF
+
+        if load_into is not None:
             result = load_into
+        elif adf_data is None:
+            result_shape = (len(positions), nkx, nky)
+            if n_layers > 1:
+                result_shape += (n_layers,)
+            result = b.zeros(result_shape, dtype=b.complex_dtype)
         else:
-            ADF, ADFmask, ADFindex = ADF
             result = None
 
-        npt, nkx, nky, _, _ = array.shape
         # Reshape from (sinusoid_index, kx, ky, layer, 1)
-        # to (nx_cropped, ny_cropped, kx, ky) for einsum below.
-        array = b.reshape(array, (self.nx_cropped, self.ny_cropped, nkx, nky))
+        # to (nx_cropped, ny_cropped, kx, ky, layer) for einsum below.
+        array = b.reshape(
+            array,
+            (self.nx_cropped, self.ny_cropped, nkx, nky, n_layers),
+        )
 
         chunksize = max(1, chunksize)
         for n, (x, y) in enumerate(tqdm(positions)):
@@ -809,18 +855,25 @@ class PrismProbe:
 
             # Reconstruct the exit wave:  Σ_{kx_n, ky_n} factors · S_n(kx, ky)
             # Indices: p=probe chunk, k=sparse kx, q=sparse ky, x=full kx, y=full ky
-            chunked = b.einsum('pkq,kqxy->pxy', factors, array)
+            chunked = b.einsum('pkq,kqxyl->pxyl', factors, array)
 
             if isinstance(result, np.memmap):
                 chunked = to_numpy(chunked)
 
-            if ADF:
+            if adf_data is not None:
                 intensities = b.einsum(
-                    'pxy,xy->p', b.absolute(chunked)**2, ADFmask)
-                for intensity, pp in zip(intensities, range(n, n + chunksize)):
-                    ADF._array[ADFindex == pp] += intensity
-            else:
-                result[n:n + chunksize, :, :] = chunked
+                    'pxyl,xy->pl', b.absolute(chunked)**2, ADFmask)
+                for probe_intensities, pp in zip(
+                    intensities, range(n, n + chunksize)
+                ):
+                    for layer_index, intensity in enumerate(probe_intensities):
+                        adf_data._array[layer_index][ADFindex == pp] += intensity
+
+            if result is not None:
+                if len(result.shape) == 3:
+                    result[n:n + chunksize, :, :] = chunked[:, :, :, 0]
+                else:
+                    result[n:n + chunksize, :, :, :] = chunked
 
         return result
 
@@ -1032,11 +1085,19 @@ def Propagate(
             # probe position without allocating a full (npt, nx, ny) array.
             nx_full, ny_full = potential_slice.shape
             xr = b.arange(nx_full); yr = b.arange(ny_full)
-            xi = b.zeros((len(sigma), probe.cropping), dtype=int)
-            yi = b.zeros((len(sigma), probe.cropping), dtype=int)
-            for p, (ox, oy) in enumerate(probe.offsets):
-                xi[p, :] = b.roll(xr, -ox)[:probe.cropping]
-                yi[p, :] = b.roll(yr, -oy)[:probe.cropping]
+            n_batch = len(sigma)
+            npt_off = probe.offsets.shape[0]
+            xi = b.zeros((n_batch, probe.cropping), dtype=int)
+            yi = b.zeros((n_batch, probe.cropping), dtype=int)
+            # The batch axis flattens (nc, npt) as c*npt + p (see reshape above),
+            # so batch row bi belongs to probe position bi % npt and must use
+            # that position's window offset — shared across all nc coherent
+            # copies.  (Previously only the first npt rows were filled, so every
+            # decoherence copy beyond the first read the grid-corner window.)
+            for bi in range(n_batch):
+                ox, oy = probe.offsets[bi % npt_off]
+                xi[bi, :] = b.roll(xr, -int(ox), 0)[:probe.cropping]
+                yi[bi, :] = b.roll(yr, -int(oy), 0)[:probe.cropping]
             # Advanced indexing: pot_stack[p, i, j] = potential_slice[xi[p,i], yi[p,j]]
             pot_stack = potential_slice[xi[:, :, None], yi[:, None, :]]
             t = b.exp(1j * sigma[:, None, None] * pot_stack)

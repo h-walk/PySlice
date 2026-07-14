@@ -210,6 +210,19 @@ class Potential:
         # Slice-axis geometry
         # ----------------------------------------------------------------
         self.slice_axis = slice_axis
+        if slice_axis != 2:
+            # The propagator, slice spacing (dz), slice loop and reciprocal grid
+            # in Propagate are all hard-coded to the z axis, and the (nx, ny)
+            # reciprocal grid here is built from the x/y axes regardless of
+            # slice_axis. A non-z value therefore lays the wrong coordinate onto
+            # the grid and propagates with the wrong spacing, silently producing
+            # wrong results. Permute the trajectory/grid so the beam direction
+            # is z (axis 2) and keep the default slice_axis=2.
+            raise NotImplementedError(
+                "slice_axis != 2 is not supported (it would silently produce "
+                "wrong results). Permute your trajectory so the beam direction "
+                "is the z axis and use slice_axis=2."
+            )
         inplane = [a for a in range(3) if a != slice_axis]
         self.inplane_axis1, self.inplane_axis2 = inplane
 

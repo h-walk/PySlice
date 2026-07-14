@@ -11,7 +11,7 @@ from .multislice import Probe, PrismProbe, Propagate, create_batched_probes
 from .trajectory import Trajectory
 from ..postprocessing.wf_data import WFData
 from .sed import SED
-from pyslice.backend import make_backend, to_numpy, NumpyBackend
+from pyslice.backend import make_backend, to_numpy, NumpyBackend, source_files_version
 
 logger = logging.getLogger(__name__)
 
@@ -50,24 +50,53 @@ class MultisliceCalculator:
             30: 'Zn', 31: 'Ga', 32: 'Ge', 33: 'As', 34: 'Se', 35: 'Br', 36: 'Kr'
         }
 
+    # Derived automatically from the sources whose logic determines the cached
+    # wavefunction VALUES, so any change to propagation / potential / probe /
+    # backend code changes the key and stale psi_data is not silently reused.
+    # The "v3" prefix allows a manual bump for reasons outside these files.
+    _CACHE_VERSION = "v3-" + source_files_version([
+        os.path.join(os.path.dirname(__file__), "multislice.py"),
+        os.path.join(os.path.dirname(__file__), "potentials.py"),
+        os.path.join(os.path.dirname(__file__), "calculators.py"),
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "backend.py"),
+    ])
+
     def _generate_cache_key(self, trajectory, aperture, voltage_eV,
                             slice_thickness, sampling, probe_positions,
                             spatial_decoherence, temporal_decoherence,
-                            probe_array=None, stored_layer_indices=None):
-        """Generate a short hash for parameters that affect wavefunction output."""
-        firstNAtoms = [str(np.round(v, 4)) for v in trajectory.positions[0, :100, 0]]  # first timestep's first 10 atom's x positions
+                            probe_array=None, stored_layer_indices=None,
+                            skip_vacuum=False):
+        """Generate a short hash for parameters that affect wavefunction output.
+
+        The trajectory is hashed in full (every frame, atom and component)
+        rather than sampled from frame 0, so runs that differ only in later
+        frames or in y/z — e.g. a temperature/seed sweep from the same initial
+        structure — get distinct caches instead of silently sharing one.
+        """
+        def _hash_array(a):
+            return hashlib.md5(
+                np.ascontiguousarray(to_numpy(a)).tobytes()).hexdigest()
+
         params = {
-            'firstNAtoms': ",".join(firstNAtoms),  # WHY? prevents the same script from re-using psi_data when positions change
+            'cache_version': self._CACHE_VERSION,
+            'traj_positions': _hash_array(trajectory.positions),
             'n_frames': trajectory.n_frames,
             'n_atoms': trajectory.n_atoms,
-            'box_matrix': trajectory.box_matrix.tolist(),
-            'atom_types': trajectory.atom_types.tolist(),
+            'box_matrix': np.asarray(trajectory.box_matrix).tolist(),
+            'atom_types': np.asarray(trajectory.atom_types).tolist(),
             'aperture': aperture,
             'voltage_eV': voltage_eV,
             'slice_thickness': slice_thickness,
             'sampling': sampling,
-            'probe_positions': probe_positions,
-            'backend': 'torch' if self._backend.xp is not np else 'numpy',
+            'probe_positions': np.asarray(probe_positions).tolist(),
+            'kth': self.kth,
+            'max_kx': self.max_kx,
+            'max_ky': self.max_ky,
+            'min_dk': self.min_dk,
+            'prism': self.prism,
+            'slice_axis': self.slice_axis,
+            'skip_vacuum': bool(skip_vacuum),
+            'backend': 'torch' if not isinstance(self._backend, NumpyBackend) else 'numpy',
         }
         if stored_layer_indices is not None:
             params['stored_layer_indices'] = tuple(stored_layer_indices)
@@ -76,8 +105,9 @@ class MultisliceCalculator:
         if temporal_decoherence is not None:
             params['temporal_decoherence'] = temporal_decoherence
         if probe_array is not None:
-            probe_np = np.ascontiguousarray(to_numpy(probe_array).ravel()[:1000])
-            params['probe_hash'] = hashlib.md5(probe_np.tobytes()).hexdigest()
+            # Hashing the full probe array captures defocus, aberrations,
+            # decoherence and the aperture/crop geometry baked into the probe.
+            params['probe_hash'] = _hash_array(probe_array)
         param_str = str(sorted(params.items()))
         return hashlib.md5(param_str.encode()).hexdigest()[:12]
 
@@ -216,6 +246,15 @@ class MultisliceCalculator:
         self.probe_positions = probe_positions
         self.save_path = save_path
         self.cleanup_temp_files = cleanup_temp_files
+        if slice_axis != 2:
+            # Propagation is hard-coded to the z axis; any other slice_axis
+            # silently produces wrong results (see Potential). Fail early with
+            # guidance rather than after a full run.
+            raise NotImplementedError(
+                "slice_axis != 2 is not supported (it would silently produce "
+                "wrong results). Permute your trajectory so the beam direction "
+                "is the z axis and use slice_axis=2."
+            )
         self.slice_axis = slice_axis
         self.return_layers = return_layers
         self.cache_wavefunctions = cache_wavefunctions
@@ -258,14 +297,49 @@ class MultisliceCalculator:
 
         # Preferred to pass probe_xs and probe_ys from which we will define a grid
         if self.probe_xs is not None and self.probe_ys is not None:
+            if self.probe_positions is not None:
+                logger.warning(
+                    "Both probe_xs/probe_ys and probe_positions were supplied; "
+                    "probe_positions is ignored in favour of the "
+                    "probe_xs x probe_ys grid."
+                )
             x, y = np.meshgrid(self.probe_xs, self.probe_ys)
             self.probe_positions = np.reshape([x, y], (2, len(x.flat))).T  # x,y looped indices to match what multislice.Probe does
 
-        # If probe_positions provided but not probe_xs/probe_ys, derive them
+        # If probe_positions provided but not probe_xs/probe_ys, derive the scan
+        # coordinates.  probe_xs/probe_ys are the unique coordinates used to
+        # reshape the flat probe axis into a 2D image (WFData.reshaped / HAADF),
+        # which assumes the meshgrid flattening order (x fastest, y outer).
         elif self.probe_positions is not None:
-            positions = np.asarray(self.probe_positions)
+            positions = np.asarray(self.probe_positions, dtype=float)
+            if positions.ndim != 2 or positions.shape[1] != 2:
+                raise ValueError(
+                    "probe_positions must be a sequence of (x, y) pairs with "
+                    f"shape (N, 2); got array of shape {positions.shape}."
+                )
             self.probe_xs = sorted(list(set(positions[:, 0])))
             self.probe_ys = sorted(list(set(positions[:, 1])))
+            gx, gy = np.meshgrid(self.probe_xs, self.probe_ys)
+            grid = np.reshape([gx, gy], (2, gx.size)).T
+            pos_set = {(round(px, 6), round(py, 6)) for px, py in positions}
+            grid_set = {(round(px, 6), round(py, 6)) for px, py in grid}
+            if len(positions) == len(grid) and pos_set == grid_set:
+                # The points tile a full rectangular grid: canonicalise their
+                # order to the meshgrid flattening so the 2D image maps correctly
+                # regardless of the order they were passed in (e.g. a nested
+                # [(x, y) for x in xs for y in ys] loop).
+                self.probe_positions = grid
+            else:
+                # Arbitrary point set (e.g. site-resolved TACAW on selected
+                # columns): simulate exactly as given.  Per-probe spectra are
+                # correct, but 2D image reshaping cannot apply.
+                self.probe_positions = positions
+                logger.warning(
+                    "probe_positions (%d points) do not form a full %d x %d "
+                    "grid; per-probe spectra are correct but image reshaping "
+                    "(HAADFData/spectrum_image) will not apply.",
+                    len(positions), len(self.probe_xs), len(self.probe_ys),
+                )
 
         # Set up default probe position if not provided
         if self.probe_positions is None:
@@ -278,7 +352,12 @@ class MultisliceCalculator:
         else:
             # OR, we'll propagate our series of real-space probes.
             # need to make sure they're on the correct device, and defer_shifts=True means the calculator controls when to expand the probe cube (see loop_probes)
-            self.base_probe = Probe(xs, ys, self.aperture, self.voltage_eV, backend=b, probe_xs=self.probe_xs, probe_ys=self.probe_ys, probe_positions=self.probe_positions, cropping=self.probe_cropping, defer_shifts=True)
+            # Pass the canonical probe_positions directly (already meshed in the
+            # probe_xs/probe_ys branch above).  Passing probe_xs/probe_ys here
+            # would make Probe rebuild an outer-product grid, so an explicit
+            # position list would be silently replaced by that grid and desync
+            # n_probes from the actually-simulated probes (shape-mismatch crash).
+            self.base_probe = Probe(xs, ys, self.aperture, self.voltage_eV, backend=b, probe_positions=self.probe_positions, cropping=self.probe_cropping, defer_shifts=True)
 
         defocus_values = to_numpy(self.defocus)
         if np.ndim(defocus_values) != 0:
@@ -310,6 +389,7 @@ class MultisliceCalculator:
             self.base_probe.spatial_decoherence, self.base_probe.temporal_decoherence,
             self.base_probe._array,
             self._cache_key_stored_layers(self._stored_layers),
+            self.skip_vacuum,
         )
         self.output_dir = Path("psi_data/" + ("torch" if not isinstance(b, NumpyBackend) else "numpy") + "_"+self.cache_key)
 
@@ -359,7 +439,8 @@ class MultisliceCalculator:
                                              self.slice_thickness, self.sampling, self.probe_positions,
                                              self.base_probe.spatial_decoherence, self.base_probe.temporal_decoherence,
                                              self.base_probe._array,
-                                             self._cache_key_stored_layers(_stored_layers))
+                                             self._cache_key_stored_layers(_stored_layers),
+                                             self.skip_vacuum)
         if self.cache_key != cache_key:
             self.cache_key = cache_key
         self.output_dir = Path("psi_data/" + ("torch" if b.xp is not np else "numpy") + "_"+cache_key)
@@ -383,7 +464,14 @@ class MultisliceCalculator:
             print("filtered to", len(self.probe_indices), "probe positions")
 
         nc, npt, nx, ny = self.base_probe._array.shape
-        self.n_probes = nc*len(self.probe_positions)
+        n_scan_positions = len(self.probe_positions)
+        self.n_probes = nc*n_scan_positions
+        # Real-space frame caches store one row per incoherent-copy/scan pair.
+        # PRISM caches instead store one row per propagated Fourier component.
+        expected_cache_rows = (
+            len(self.base_probe.probe_positions) if self.prism
+            else self.n_probes
+        )
         # Storage: [probe, frame, x, y, layer] - matches WFData expected format
         self.n_layers = len(_stored_layers)
         stores_exit_wave_only = self._stores_exit_wave_only(_stored_layers)
@@ -418,7 +506,10 @@ class MultisliceCalculator:
             self.ADF = HAADFData(wf)
             self.ADFmask = b.absolute(self.ADF.getMask(**kwargs))  # HAADFData infers mask dtype from _wf_array dtype, but we'll absolute^2 later
             self.ADFindex = b.astype(b.absolute(self.ADF._wf_array[0, :, :, 0, 0, 0, 0]), int)
-            self.ADF._array = b.zeros(self.ADFindex.shape, dtype=self.complex_dtype)
+            # One ADF image per stored layer (thickness). Collapsed to a plain 2D
+            # image below when only one thickness is stored (the default).
+            self.ADF._array = b.zeros((self.n_layers,) + tuple(self.ADFindex.shape),
+                                      dtype=self.complex_dtype)
 
         # If tacaw.npy already exists and no per-frame cache will be written,
         # there is nothing to reload or recompute. Pass force_rerun=True to
@@ -456,10 +547,22 @@ class MultisliceCalculator:
                     self.cache_wavefunctions and not force_rerun,
                     b,
                     expected_n_layers=self.n_layers,
+                    expected_n_probes=expected_cache_rows,
                 )
                 if cache_exists and not self.prism and self.ADF:
-                    intensities = b.einsum('pxyln,xy->p', b.absolute(frame_data)**2, self.ADFmask)
-                    self.ADF._array += intensities[self.ADFindex]
+                    # Keep the layer axis so each stored thickness gets its own
+                    # ADF image (previously all layers were summed together).
+                    intensities = b.einsum('pxyln,xy->pl', b.absolute(frame_data)**2, self.ADFmask)
+                    n_copies = frame_data.shape[0] // n_scan_positions
+                    intensities = b.sum(
+                        b.reshape(
+                            intensities,
+                            (n_copies, n_scan_positions, self.n_layers),
+                        ),
+                        axis=0,
+                    )
+                    for out_idx in range(self.n_layers):
+                        self.ADF._array[out_idx] += intensities[self.ADFindex, out_idx]
 
                 if not os.path.exists(self.output_dir / f"kx.npy"):
                     np.save(self.output_dir / f"kx.npy", to_numpy(self.kxs[self.keep_kxs_indices]))
@@ -483,7 +586,11 @@ class MultisliceCalculator:
 
                     nc, npt, nx, ny = self.base_probe._array.shape; npt = len(self.base_probe.probe_positions)
                     n_slices = len(self.zs)
-                    n_waves = len(self.base_probe.probe_positions)
+                    # Real-space propagation flattens decoherence copies into
+                    # the wave axis. PRISM stores its Fourier components here
+                    # instead and reconstructs real-space probes afterwards.
+                    n_waves = (len(self.base_probe.probe_positions)
+                               if self.prism else self.n_probes)
 
                     # frame_data is always: p,x,y,l,1 (self.wavefunction_data expects p,t,x,y,l, since we loop time. recall Propagate gave l,p,x,y)
                     if self.returns_wavefunctions or self.cache_wavefunctions or self.prism:
@@ -542,11 +649,28 @@ class MultisliceCalculator:
                                 diffraction_patterns = to_numpy(diffraction_patterns)
                                 selected = to_numpy(selected)
                             if self.returns_wavefunctions or self.cache_wavefunctions or self.prism:
-                                frame_data[selected, :, :, out_idx, 0] = diffraction_patterns  # load p,x,y --> p,x,y,l,1 indices
+                                # Propagation flattens (copy, selected-probe) in
+                                # copy-major order. Expand the selected position
+                                # indices across copies to preserve that layout.
+                                if self.use_memmap:
+                                    selected_rows = np.reshape(
+                                        np.arange(nc)[:, None] * npt + selected[None, :], (-1,))
+                                else:
+                                    selected_rows = b.reshape(
+                                        b.arange(nc)[:, None] * npt + selected[None, :], (-1,))
+                                frame_data[selected_rows, :, :, out_idx, 0] = diffraction_patterns
                             if self.ADF and not self.prism:
                                 intensities = b.einsum('pxy,xy->p', b.absolute(diffraction_patterns[:, :, :])**2, self.ADFmask)
+                                # The batch is (nc, npt) flattened as c*npt+p, so
+                                # fold the decoherence copies back and sum them
+                                # (the detector sees the incoherent sum). The old
+                                # zip() truncated to the first copy only.
+                                n_copies = intensities.shape[0] // len(selected)
+                                if n_copies > 1:
+                                    intensities = b.sum(
+                                        b.reshape(intensities, (n_copies, len(selected))), axis=0)
                                 for i, pp in zip(intensities, selected):
-                                    self.ADF._array[self.ADFindex==pp] += i
+                                    self.ADF._array[out_idx][self.ADFindex == pp] += i
                         if pbar2 is not None:
                             pbar2.update(len(selected))
 
@@ -565,7 +689,7 @@ class MultisliceCalculator:
                     if self.ADF:
                         kwarg["ADF"] = (self.ADF, self.ADFmask, self.ADFindex)
                     if self.returns_wavefunctions:
-                        kwarg["load_into"] = self.wavefunction_data[:, frame_idx, :, :, 0]
+                        kwarg["load_into"] = self.wavefunction_data[:, frame_idx, :, :, :]
                     self.base_probe.calculateProbesFromS(frame_data, self.probe_positions, **kwarg, chunksize=self.loop_probes)
                 elif self.returns_wavefunctions:
                     if self.use_memmap:
@@ -639,7 +763,19 @@ class MultisliceCalculator:
             logger.info(f"Cache files saved in: {self.output_dir}")
 
         if self.ADF:
-            self.ADF._array /= self.n_frames  # haadf_data divides by nc,nt,nl (from _wf_array's c,x,y,t,kx,ky,l)
+            self.ADF._array /= self.n_frames  # per-thickness time average
+            # Each stored wave is captured after that slice's transmission, so
+            # its depth is the far boundary (i + 1) * dz, not the slice's
+            # coordinate sample zs[i]. The final layer must equal specimen lz.
+            # collapse to a plain 2D image when a single thickness was stored.
+            dz = float(self.lz) / len(self.zs)
+            self.ADF.thicknesses = (
+                np.asarray(_stored_layers, dtype=float) + 1.0) * dz
+            self.ADF._set_dimensions(
+                self.ADF.thicknesses if self.n_layers > 1 else None,
+                layer_name='thickness', layer_units='Å')
+            if self.n_layers == 1:
+                self.ADF._array = self.ADF._array[0]
             return wf_data, self.ADF
 
         return wf_data
@@ -647,7 +783,8 @@ class MultisliceCalculator:
 
 logging_tracker = []
 
-def checkCache(cache_file, cache_wavefunctions, b, expected_n_layers=None):
+def checkCache(cache_file, cache_wavefunctions, b, expected_n_layers=None,
+               expected_n_probes=None):
     global logging_tracker
     if cache_wavefunctions and cache_file.exists():
         frame_data = np.load(cache_file)
@@ -657,6 +794,12 @@ def checkCache(cache_file, cache_wavefunctions, b, expected_n_layers=None):
                 frame_data.shape[-2],
                 cache_file,
                 expected_n_layers,
+            )
+            return False, 0
+        if expected_n_probes is not None and frame_data.shape[0] != expected_n_probes:
+            logging.warning(
+                "Ignoring cache with %d probes at %s; expected %d",
+                frame_data.shape[0], cache_file, expected_n_probes,
             )
             return False, 0
         parent = str(cache_file.parent)

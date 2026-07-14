@@ -156,9 +156,14 @@ class WFData(PySliceSerial, Signal):
         b = self._backend
         npt, nt, nx, ny, nl = self._array.shape
         if self.probability is None:
-            self.probability = self._array
-            ary = self._array / b.sum(b.absolute(self._array))
-            ary = b.absolute(b.reshape(ary, (npt * nt * nx * ny * nl,)))
+            # Detection probability is proportional to intensity |psi|^2, not
+            # amplitude |psi|. Sampling from |psi| (as before) over-counts weak
+            # features: a pixel 100x weaker in intensity was only 10x less likely
+            # to be hit. Build the sampling CDF from the normalized intensity.
+            intensity = b.reshape(b.absolute(self._array) ** 2,
+                                  (npt * nt * nx * ny * nl,))
+            ary = intensity / b.sum(intensity)
+            self.probability = ary
             self.buckets = b.zeros(len(ary) + 1, type_match=ary)
             self.buckets[1:] = b.cumsum(ary)
         detector_hits = b.asarray(b.randfloats(N))
@@ -304,16 +309,42 @@ class WFData(PySliceSerial, Signal):
         b = self._backend
         self._xs -= b.mean(self._xs)
         self._ys -= b.mean(self._ys)
+
+    def _row_wavelengths(self):
+        """Return one wavelength for each flattened copy/probe row."""
+        b = self._backend
+        wavelengths = getattr(self.probe, "wavelengths", None)
+        if wavelengths is None:
+            return b.zeros(self._array.shape[0]) + self.probe.wavelength
+
+        wavelengths = b.asarray(wavelengths)
+        n_copies = len(wavelengths)
+        n_positions = len(self.probe_positions)
+        n_rows = self._array.shape[0]
+        if n_copies * n_positions != n_rows:
+            raise ValueError(
+                "wavefunction rows do not match the probe copy and position "
+                f"counts ({n_rows} != {n_copies} * {n_positions})"
+            )
+        return b.reshape(
+            wavelengths[:, None] * b.ones(n_positions)[None, :], (n_rows,)
+        )
+
     def pad_real_space(self,add_x=0,add_y=0):
         b = self._backend
         dx = self._xs[1]-self._xs[0] ; dy = self._ys[1]-self._ys[0]
         pix_x = int(round(add_x/dx)) ; pix_y = int(round(add_y/dy))
         npt, nt, nx, ny, nl = self._array.shape
-        array = b.ifft2(self._array,axes=(-3,-2)) # npt, nt, nx, ny, nl indices. iFFT x,y
+        # self._array is an fftshifted spectrum, so undo the shift before the
+        # inverse transform and re-apply it after (as applyMask does).  Omitting
+        # these leaves a fractional-bin phase ramp that cancels only for even
+        # grid sizes; for odd nx/ny it smears the padded spectrum (Dirichlet
+        # leakage, up to ~10% amplitude error).
+        array = b.ifft2(b.ifftshift(self._array, axes=(-3,-2)), axes=(-3,-2)) # npt, nt, nx, ny, nl indices. iFFT x,y
         new = b.zeros((npt, nt, nx+pix_x*2, ny+pix_y*2, nl), type_match = self._array)
         i1=pix_x ; i2=pix_x+nx ; j1=pix_y ; j2=pix_y+ny
         new[:,:,i1:i2,j1:j2,:] += array
-        self._array = b.fft2(new,axes=(-3,-2))
+        self._array = b.fftshift(b.fft2(new,axes=(-3,-2)), axes=(-3,-2))
         # xs=[0,1,2,3,4], dx=1, add 3. new should be -3,-2,-1,0,1,2,3,4,5,6,7. from x[0]-N*dx, to x[-1]+N*dx, and length len(xs)+2*N
         self._xs = b.linspace( self._xs[0]-dx*pix_x , self._xs[-1]+dx*pix_x , nx+pix_x*2 )
         self._ys = b.linspace( self._ys[0]-dy*pix_y , self._ys[-1]+dy*pix_y , ny+pix_y*2 )
@@ -321,22 +352,75 @@ class WFData(PySliceSerial, Signal):
         self._kys = b.fftshift(b.fftfreq(ny+pix_y*2, dy))  # k-space in 1/Å
 
 
-    def propagate_through_lens(self,f):
+    def propagate_through_lens(
+        self,
+        f: float,
+        center: Optional[Tuple[float, float]] = None,
+    ):
+        """Apply a thin lens to the specimen exit wave.
+
+        Parameters
+        ----------
+        f
+            Lens focal length in Angstroms.
+        center
+            ``(x, y)`` position of the optical axis in Angstroms. By default,
+            the lens is centred on the sampled simulation grid.
+
+        Stored waves from earlier specimen depths are historical snapshots,
+        not waves that have passed through the downstream lens, so only the
+        final layer is modified.
+        """
+        if f == 0:
+            raise ValueError("f must be nonzero")
+
         b = self._backend
-        array = b.ifft2(self._array[:, :, :, :, -1])
-        xs = b.asarray(self._xs)#-self.probe_positions[-1][0]
-        ys = b.asarray(self._ys)#-self.probe_positions[-1][1]
-        x_grid, y_grid = b.meshgrid(xs,ys, indexing='ij')
-        k = 2*b.pi / self.probe.wavelength
-        L = b.exp(-1j * k / 2 / f * ( x_grid ** 2 + y_grid ** 2 ) )
-        array = L[None,None,:,:] * array
-        self._array[:,:,:,:,-1] = b.fft2(array)
+        xs = b.asarray(self._xs)
+        ys = b.asarray(self._ys)
+        if center is None:
+            center_x, center_y = b.mean(xs), b.mean(ys)
+        else:
+            try:
+                center_x, center_y = center
+            except (TypeError, ValueError):
+                raise ValueError("center must be an (x, y) pair") from None
+
+        x_grid, y_grid = b.meshgrid(
+            xs - center_x, ys - center_y, indexing="ij"
+        )
+        wavelengths = self._row_wavelengths()
+        lens = b.exp(
+            -1j * (2 * b.pi / wavelengths[:, None, None]) / (2 * f)
+            * (x_grid[None, :, :] ** 2 + y_grid[None, :, :] ** 2)
+        )
+
+        # WFData stores fftshifted reciprocal-space waves. Undo that shift for
+        # the real-space lens operation, then restore the storage convention.
+        exit_wave = b.ifft2(
+            b.ifftshift(self._array[:, :, :, :, -1], axes=(-2, -1)),
+            axes=(-2, -1),
+        )
+        exit_wave *= lens[:, None, :, :]
+        self._array[:, :, :, :, -1] = b.fftshift(
+            b.fft2(exit_wave, axes=(-2, -1)), axes=(-2, -1)
+        )
 
     def propagate_free_space(self, dz: float):
+        """Propagate the specimen exit wave through free space by ``dz`` Angstroms.
+
+        Earlier stored layers describe waves inside the specimen and are left
+        unchanged; only the final exit wave enters the downstream free space.
+        """
         b = self._backend
         kx_grid, ky_grid = b.meshgrid(self._kxs, self._kys, indexing='ij')
-        P = b.exp(-1j * b.pi * self.probe.wavelength * dz * (kx_grid ** 2 + ky_grid ** 2))
-        self._array = P[None, None, :, :, None] * self._array
+        wavelengths = self._row_wavelengths()
+        P = b.exp(
+            -1j * b.pi * wavelengths[:, None, None] * dz
+            * (kx_grid[None, :, :] ** 2 + ky_grid[None, :, :] ** 2)
+        )
+        self._array[:, :, :, :, -1] = (
+            P[:, None, :, :] * self._array[:, :, :, :, -1]
+        )
 
     def addSpatialDecoherence(self, sigma_dz: float, N: int):
         b = self._backend
