@@ -793,3 +793,22 @@ def test_npt_barostat_params_have_physical_units():
     assert externalstress < 1e-6                       # ~6.3e-7, not ~1
     # pfactor = ptime^2 * B (was 75*fs**2, ~1e5x too small)
     np.testing.assert_allclose(pfactor, (75 * units.fs) ** 2 * (100.0 * units.GPa))
+
+
+def test_counts_samples_from_intensity_not_amplitude():
+    # Shot-noise counting must draw from |psi|^2 (intensity), not |psi|. Two
+    # pixels with amplitudes 1 and 3 (intensities 1 and 9) must be hit ~9:1.
+    from types import SimpleNamespace
+    arr = np.array([1.0, 3.0], dtype=np.complex128).reshape(1, 1, 1, 2, 1)
+    probe = SimpleNamespace(
+        eV=1e5, wavelength=0.037, mrad=30.0,
+        _array=NumpyBackend().asarray(np.zeros((1, 1, 2, 2), dtype=np.complex128)))
+    wf = WFData(
+        probe_positions=[(0.0, 0.0)], probe_xs=[0.0], probe_ys=[0.0],
+        time=np.zeros(1), kxs=np.arange(1.0), kys=np.arange(2.0),
+        xs=np.arange(1.0), ys=np.arange(2.0), layer=np.array([0]),
+        array=arr, probe=probe, backend=NumpyBackend(), cache_dir=".")
+    wf.counts(2_000_000)
+    hits = to_numpy(wf._array).ravel()
+    ratio = hits[1] / hits[0]
+    assert 8.3 < ratio < 9.7, ratio          # intensity 9:1, not amplitude 3:1

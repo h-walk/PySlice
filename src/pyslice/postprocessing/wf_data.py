@@ -156,9 +156,14 @@ class WFData(PySliceSerial, Signal):
         b = self._backend
         npt, nt, nx, ny, nl = self._array.shape
         if self.probability is None:
-            self.probability = self._array
-            ary = self._array / b.sum(b.absolute(self._array))
-            ary = b.absolute(b.reshape(ary, (npt * nt * nx * ny * nl,)))
+            # Detection probability is proportional to intensity |psi|^2, not
+            # amplitude |psi|. Sampling from |psi| (as before) over-counts weak
+            # features: a pixel 100x weaker in intensity was only 10x less likely
+            # to be hit. Build the sampling CDF from the normalized intensity.
+            intensity = b.reshape(b.absolute(self._array) ** 2,
+                                  (npt * nt * nx * ny * nl,))
+            ary = intensity / b.sum(intensity)
+            self.probability = ary
             self.buckets = b.zeros(len(ary) + 1, type_match=ary)
             self.buckets[1:] = b.cumsum(ary)
         detector_hits = b.asarray(b.randfloats(N))
