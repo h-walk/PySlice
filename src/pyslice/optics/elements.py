@@ -7,7 +7,7 @@ objects before applying the optics to a wavefunction.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Mapping, Optional
 from copy import deepcopy
 import math
 import numpy as np
@@ -49,6 +49,11 @@ class Lens(OpticalElement):
     chooses it from the exact symmetric ABCD factorization, making the complete
     entrance-to-exit paraxial wave operator exact up to global phase.
     ``rotation_rad`` then applies the lens's Larmor image rotation.
+
+    ``aberrations`` are local Cnm wave-aberration coefficients owned by this
+    lens. ``aberration_plane`` places their reciprocal-space phase screen at
+    the entrance, principal plane, or exit. The exit default preserves the
+    historical RayTEM adapter convention.
     """
 
     f_A: float
@@ -58,6 +63,8 @@ class Lens(OpticalElement):
     principal_plane_drift_A: float = 0.0
     rotation_rad: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
+    aberrations: dict[str, Any] = field(default_factory=dict)
+    aberration_plane: Literal["entrance", "principal", "exit"] = "exit"
 
     def __post_init__(self):
         if self.thickness_A < 0:
@@ -66,6 +73,27 @@ class Lens(OpticalElement):
             raise ValueError("Lens focal length f_A must be non-zero.")
         if not math.isfinite(float(self.principal_plane_drift_A)):
             raise ValueError("principal_plane_drift_A must be finite.")
+        if not isinstance(self.aberrations, Mapping):
+            raise TypeError("Lens aberrations must be a Cnm coefficient mapping.")
+        self.aberrations = deepcopy(dict(self.aberrations))
+        invalid = [
+            key
+            for key in self.aberrations
+            if not (
+                isinstance(key, str)
+                and len(key) == 3
+                and key.startswith("C")
+                and key[1:].isdigit()
+            )
+        ]
+        if invalid:
+            raise ValueError(
+                f"Invalid lens aberration keys {invalid!r}; expected Cnm labels."
+            )
+        if self.aberration_plane not in {"entrance", "principal", "exit"}:
+            raise ValueError(
+                "aberration_plane must be 'entrance', 'principal', or 'exit'."
+            )
 
     @property
     def is_active(self) -> bool:
@@ -74,18 +102,22 @@ class Lens(OpticalElement):
     def apply(self, wf):
         drift_A = float(self.principal_plane_drift_A)
 
-        if not self.is_active:
-            if drift_A:
-                wf.propagate_free_space(2.0 * drift_A)
-            return wf
+        def apply_aberrations_at(plane):
+            if self.aberrations and self.aberration_plane == plane:
+                wf.aberrate(deepcopy(self.aberrations))
+
+        apply_aberrations_at("entrance")
 
         if drift_A:
             wf.propagate_free_space(drift_A)
-        wf.propagate_through_lens(float(self.f_A))
+        if self.is_active:
+            wf.propagate_through_lens(float(self.f_A))
+        apply_aberrations_at("principal")
         if drift_A:
             wf.propagate_free_space(drift_A)
         if self.rotation_rad:
             wf.rotate_real_space(float(self.rotation_rad))
+        apply_aberrations_at("exit")
         return wf
 
 
@@ -185,27 +217,6 @@ class Aberration(OpticalElement):
         return wf
 
 
-class ThinLens(Lens):
-    """Convenience class for an ideal zero-thickness round lens."""
-
-    def __init__(
-        self,
-        f_A: float,
-        name: str = "",
-        z_A: Optional[float] = None,
-        metadata: Optional[dict[str, Any]] = None,
-    ):
-        super().__init__(
-            f_A=f_A,
-            name=name,
-            z_A=z_A,
-            thickness_A=0.0,
-            principal_plane_drift_A=0.0,
-            rotation_rad=0.0,
-            metadata={} if metadata is None else metadata,
-        )
-
-
 @dataclass
 class Aperture(OpticalElement):
     """Circular aperture in real or reciprocal space."""
@@ -231,7 +242,6 @@ __all__ = [
     "OpticalElement",
     "FreeSpace",
     "Lens",
-    "ThinLens",
     "SeparableParaxialMap",
     "BeamTilt",
     "Aberration",

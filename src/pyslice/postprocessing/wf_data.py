@@ -328,12 +328,10 @@ class WFData(PySliceSerial, Signal):
         raw = self._array[:, :, :, :, -1]   # p,t,kx,ky
         npt, nt, nkx, nky = raw.shape
         accum = b.zeros((nkx, nky))
-
         probe_indices = np.arange(npt) if whichProbe == "mean" else (
             [whichProbe] if isinstance(whichProbe, int) else whichProbe)
-        time_indices  = np.arange(nt)  if whichTimestep == "mean" else (
+        time_indices = np.arange(nt) if whichTimestep == "mean" else (
             [whichTimestep] if isinstance(whichTimestep, int) else whichTimestep)
-
         for p in probe_indices:
             for t in time_indices:
                 layer = b.absolute(raw[p, t, :, :])
@@ -417,7 +415,6 @@ class WFData(PySliceSerial, Signal):
 
         b = self._backend
         array = b.absolute(b.ifft2(self._array[:, :, :, :, -1]))
-
         if whichProbe == "mean":
             array = b.mean(array, axis=0)
         else:
@@ -544,6 +541,7 @@ class WFData(PySliceSerial, Signal):
         )
 
         wavelength_A = float(to_numpy(self.probe.wavelength))
+        physical_norm = float(np.sum(real_totals)) * dx * dy
         return {
             "shape": (nx, ny),
             "sampling_A": (dx, dy),
@@ -554,7 +552,7 @@ class WFData(PySliceSerial, Signal):
                 wavelength_A * kx_limit * 1e3,
                 wavelength_A * ky_limit * 1e3,
             ),
-            "physical_norm": float(np.sum(real_totals)) * dx * dy,
+            "physical_norm": physical_norm,
         }
 
     @track_pyslice_action
@@ -637,13 +635,12 @@ class WFData(PySliceSerial, Signal):
         xs = b.asarray(self._xs)#-self.probe_positions[-1][0]
         ys = b.asarray(self._ys)#-self.probe_positions[-1][1]
         x_grid, y_grid = b.meshgrid(xs,ys, indexing='ij')
-        k = 2*b.pi / self.probe.wavelength
         phase = b.zeros(x_grid.shape, type_match=x_grid)
         if f_x is not None and np.isfinite(float(f_x)):
             phase += x_grid ** 2 / float(f_x)
         if f_y is not None and np.isfinite(float(f_y)):
             phase += y_grid ** 2 / float(f_y)
-        L = b.exp(-1j * k / 2 * phase)
+        L = b.exp(-1j * b.pi / self.probe.wavelength * phase)
         array = L[None, None, :, :, None] * array
         self._array = b.fft2(array, axes=(2, 3))
 
@@ -655,10 +652,8 @@ class WFData(PySliceSerial, Signal):
     def propagate_anisotropic_free_space(self, dz_x: float, dz_y: float):
         b = self._backend
         kx_grid, ky_grid = b.meshgrid(self._kxs, self._kys, indexing='ij')
-        P = b.exp(
-            -1j * b.pi * self.probe.wavelength
-            * (float(dz_x) * kx_grid ** 2 + float(dz_y) * ky_grid ** 2)
-        )
+        phase = float(dz_x) * kx_grid ** 2 + float(dz_y) * ky_grid ** 2
+        P = b.exp(-1j * b.pi * self.probe.wavelength * phase)
         self._array = P[None, None, :, :, None] * self._array
 
     @track_pyslice_action
@@ -669,13 +664,27 @@ class WFData(PySliceSerial, Signal):
         x_grid, y_grid = b.meshgrid(
             b.asarray(self._xs), b.asarray(self._ys), indexing='ij'
         )
-        phase = 2j * b.pi / self.probe.wavelength * (
-            float(theta_x) * x_grid + float(theta_y) * y_grid
-        )
-        self._array = b.fft2(
-            b.exp(phase)[None, None, :, :, None] * array,
-            axes=(2, 3),
-        )
+        ramp = float(theta_x) * x_grid + float(theta_y) * y_grid
+        phase = b.exp(2j * b.pi / self.probe.wavelength * ramp)
+        array = phase[None, None, :, :, None] * array
+        self._array = b.fft2(array, axes=(2, 3))
+
+    @track_pyslice_action
+    def apply_angular_aperture(self, semiangle_mrad: float):
+        """Apply a circular pupil defined by physical convergence semi-angle.
+
+        Unlike a fixed reciprocal-space mask, the cutoff is specified as a
+        physical angle and converted using ``k_max = alpha / wavelength``.
+        """
+        semiangle = float(semiangle_mrad)
+        if not np.isfinite(semiangle) or semiangle <= 0:
+            raise ValueError("semiangle_mrad must be positive and finite.")
+        alpha_rad = semiangle * 1e-3
+        b = self._backend
+        radii = b.sqrt(self._kxs[:, None] ** 2 + self._kys[None, :] ** 2)
+        cutoff = alpha_rad / float(to_numpy(self.probe.wavelength))
+        mask = radii <= cutoff
+        self._array *= mask[None, None, :, :, None]
 
     @track_pyslice_action
     def rotate_real_space(self, angle_rad: float):
@@ -784,6 +793,10 @@ class WFData(PySliceSerial, Signal):
     @track_pyslice_action
     def aberrate(self, aberrations: dict):
         dP = aberrationFunction(
-            self._kxs, self._kys, self.probe.wavelength, aberrations, self._backend
+            self._kxs,
+            self._kys,
+            self.probe.wavelength,
+            aberrations,
+            self._backend,
         )
-        self._array[:, :, :, :, :] *= dP[None, None, :, :, None]
+        self._array *= dP[None, None, :, :, None]

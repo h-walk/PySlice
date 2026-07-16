@@ -4,6 +4,7 @@ import pytest
 from pyslice.backend import NumpyBackend
 from pyslice.multislice.multislice import Probe
 from pyslice.optics.column import OpticalColumn
+from pyslice.optics.aberrations import ProbeAberrationModel
 from pyslice.optics.elements import BeamTilt, FreeSpace, Lens
 from pyslice.postprocessing.haadf_data import HAADFData
 from pyslice.postprocessing.tacaw_data import TACAWData
@@ -115,6 +116,27 @@ def test_optical_column_records_each_user_level_wave_operation():
     assert operations.count("WFData.propagate_free_space") == 1
     assert operations.count("WFData.propagate_through_lens") == 1
     assert operations.count("WFData.apply_beam_tilt") == 1
+
+
+def test_probe_aberrations_record_system_level_and_wave_operations():
+    wf = WFData.from_probe(
+        extent_A=32.0,
+        sampling=1.0,
+        voltage_eV=100e3,
+        aperture=5.0,
+    )
+    model = ProbeAberrationModel(
+        {"C30": 1e5},
+        semiangle_mrad=4.0,
+        metadata={"source": "Ronchigram fit"},
+    )
+
+    model.apply(wf)
+
+    operations = _record_operations(wf)
+    assert "WFData.aberrate" in operations
+    assert "WFData.apply_angular_aperture" in operations
+    assert "ProbeAberrationModel.apply" in operations
 
 
 def test_tacawdata_records_wfdata_parent(tmp_path):

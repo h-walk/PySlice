@@ -145,32 +145,103 @@ wf_data.plot(powerscaling=0.125)  # Diffraction pattern
 
 ### Standalone RayTEM Wave Optics
 
-`simulate_raytem_wave` propagates a coherent, sample-free electron wave through
-an existing RayTEM configuration. RayTEM supplies the column geometry and
-calibrated elements; the call supplies the electron energy and wave grid because
-a ray bundle does not uniquely define a coherent field.
+`simulate_raytem_wave` propagates one coherent, sample-free electron wave
+through an existing RayTEM configuration. RayTEM supplies the column geometry
+and calibrated elements; the entrance wave remains explicit because a ray
+bundle does not uniquely define wave phase.
 
 ```python
-from pyslice import simulate_raytem_wave
+from pyslice import (
+    GaussianWaveSource,
+    ProbeAberrationModel,
+    simulate_raytem_wave,
+)
+
+# Illustrative values: use an instrument-appropriate entrance wave.
+source = GaussianWaveSource(
+    voltage_eV=100e3,
+    rms_size_A=(500, 500),
+    curvature_inv_A=(0.0, 0.0),
+    center_A=(0, 0),
+    tilt_mrad=(0, 0),
+)
 
 result = simulate_raytem_wave(
     "macstem.json",
     start="gun",
-    stop="CCD",
-    voltage_eV=100e3,
+    stop="CL3",
+    source=source,
     extent_A=4096,
     sampling_A=8,
-    convergence_mrad=0.05,
+    record=False,
 )
 
 result.output.plot_realspace()
-result.plane("CL3").wave.plot_realspace()
 print(result.sampling_report())
 ```
 
+Ronchigram measurements normally describe the effective probe-forming system,
+not individual lenses. Supply those measured coefficients as one model at their
+reference plane:
+
+```python
+# Illustrative values only. Cnm values are Angstroms; orientations are radians.
+ronchi = ProbeAberrationModel(
+    coefficients_A={
+        "C12": (200.0, 0.3),
+        "C21": (500.0, -0.1),
+        "C30": 1.0e6,
+    },
+    semiangle_mrad=10.0,
+    reference_plane="sample",
+    reference_side="entrance",
+    metadata={"source": "Ronchigram fit"},
+)
+
+result = simulate_raytem_wave(
+    "macstem.json",
+    start="gun",
+    stop="sample",
+    source=source,
+    probe_aberrations=ronchi,
+    extent_A=4096,
+    sampling_A=8,
+    record=False,
+)
+```
+
+The aberration phase and angular pupil are applied at the reference plane after
+the upstream probe-forming column. The simulation warns when the unwrapped
+aberration phase changes by more than pi/2 between adjacent reciprocal-grid
+pixels; increase the field of view to refine angular sampling. The current
+model expects already fitted coherent Cnm coefficients. Partial coherence,
+energy spread, and chromatic averaging are intentionally outside this API.
+
+RayTEM elements may also carry local Cnm coefficients. Round lenses own these
+coefficients directly and apply them at an explicit `aberration_plane`:
+`"entrance"`, `"principal"`, or `"exit"` (the compatibility default). The
+standalone `Aberration` element remains available for deliberate phase screens
+that do not belong to a lens. A measured `ProbeAberrationModel` suppresses
+upstream element-local coefficients by default because a Ronchigram fit usually
+already contains their net effect; downstream lens aberrations remain active.
+Set `replaces_upstream_element_aberrations=False` only when the system-level
+coefficients are a residual correction that should compose with those upstream
+models.
+
+`examples/raytem_column_aberrations.py` provides a complete MACSTEM example:
+it decorates CL1–CL3, OL1–OL2, and PL1–PL4 with distinct synthetic Cnm models,
+imports them as lens-owned coefficients, and verifies their ownership across
+the gun-to-CCD column. It can optionally write the decorated RayTEM JSON with
+`--write-config`. The coefficients are illustrative, not a calibration.
+
+The Gaussian source exposes only the parameters needed to define one coherent
+wave: voltage, RMS intensity width, wavefront curvature, centroid, and tilt.
+Source values in examples are validation inputs, not calibrated MACSTEM
+predictions.
+
 Named planes are retained by default so the sampling audit can catch a beam
-that clips the grid before later refocusing. Set `record=False` when only the
-terminal wave is needed and retaining every plane would be too memory-intensive.
+that clips the grid before later refocusing. Use `record=False` when only the
+terminal wave is needed.
 
 The adapter converts RayTEM millimeters to Angstroms and supports drifts, round
 lenses and Larmor rotation, steering, thin quadrupoles, regular prisms,

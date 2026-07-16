@@ -1,4 +1,4 @@
-"""Propagate a standalone coherent wave through a RayTEM configuration.
+"""Propagate a coherent beam through a RayTEM column.
 
 Example
 -------
@@ -8,9 +8,14 @@ PYSLICE_BACKEND=numpy python examples/raytem_wave.py microscope.json gun CCD
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
-from pyslice import simulate_raytem_wave
+from pyslice import (
+    GaussianWaveSource,
+    ProbeAberrationModel,
+    simulate_raytem_wave,
+)
 
 
 def main() -> None:
@@ -22,16 +27,39 @@ def main() -> None:
     parser.add_argument("--extent-a", type=float, default=4096.0)
     parser.add_argument("--sampling-a", type=float, default=8.0)
     parser.add_argument("--convergence-mrad", type=float, default=0.05)
+    parser.add_argument("--rms-size-a", type=float)
+    parser.add_argument("--curvature-inv-a", type=float, default=0.0)
+    parser.add_argument(
+        "--probe-aberrations-json",
+        type=Path,
+        help="JSON keyword arguments for ProbeAberrationModel",
+    )
     args = parser.parse_args()
+
+    source = None
+    if args.rms_size_a is not None:
+        source = GaussianWaveSource(
+            voltage_eV=args.voltage_ev,
+            rms_size_A=args.rms_size_a,
+            curvature_inv_A=args.curvature_inv_a,
+        )
+    probe_aberrations = None
+    if args.probe_aberrations_json is not None:
+        probe_aberrations = ProbeAberrationModel(
+            **json.loads(args.probe_aberrations_json.read_text())
+        )
 
     result = simulate_raytem_wave(
         args.config,
         start=args.start,
         stop=args.stop,
-        voltage_eV=args.voltage_ev,
+        voltage_eV=None if source is not None else args.voltage_ev,
+        source=source,
+        probe_aberrations=probe_aberrations,
         extent_A=args.extent_a,
         sampling_A=args.sampling_a,
-        convergence_mrad=args.convergence_mrad,
+        convergence_mrad=0.0 if source is not None else args.convergence_mrad,
+        record=False,
     )
 
     print(result.column.summary())

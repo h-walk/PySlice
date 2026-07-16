@@ -1,13 +1,17 @@
 """Adapters from RayTEM ray configurations into PySlice wave optics."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable, Literal, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Iterable, Literal, Mapping, Optional
 import json
 import math
 import warnings
 import numpy as np
+
+if TYPE_CHECKING:
+    from .aberrations import ProbeAberrationModel
+    from .sources import GaussianWaveSource
 
 from .column import OpticalColumn, WavePropagation
 from .elements import (
@@ -21,17 +25,6 @@ from .elements import (
 
 RAYTEM_MM_TO_ANGSTROM = 1.0e7
 AnchorSide = Literal["entrance", "exit", "center"]
-RAYTEM_ABERRATION_CONTAINER_KEYS = (
-    "aberrations",
-    "aberration",
-    "cnm",
-    "Cnm",
-    "C_nm",
-    "aberration_coefficients",
-    "aberrationCoefficients",
-)
-
-
 @dataclass(frozen=True)
 class RayTEMElementRecord:
     """Flattened RayTEM element with absolute axial coordinates."""
@@ -410,41 +403,12 @@ def _is_cnm_key(key: Any) -> bool:
     return isinstance(key, str) and len(key) == 3 and key[0] == "C" and key[1:].isdigit()
 
 
-def _iter_aberration_items(container: Any):
-    if isinstance(container, Mapping):
-        yield from container.items()
-    elif isinstance(container, (list, tuple)):
-        for item in container:
-            if not isinstance(item, Mapping):
-                continue
-            key = item.get("key", item.get("name", item.get("label")))
-            if key is None:
-                n = item.get("n")
-                m = item.get("m")
-                if n is not None and m is not None:
-                    key = f"C{int(n)}{int(m)}"
-            value = item.get("value", item.get("coefficient", item.get("C")))
-            if value is None and "magnitude" in item:
-                value = item["magnitude"]
-            if key is not None and value is not None:
-                angle = item.get("phi0", item.get("phi", item.get("angle")))
-                yield key, value if angle is None else (value, angle)
-
-
 def _scale_aberration_value(value: Any, coefficient_scale_A: float):
-    if isinstance(value, Mapping):
-        coefficient = value.get("value", value.get("coefficient", value.get("C")))
-        if coefficient is None and "magnitude" in value:
-            coefficient = value["magnitude"]
-        if coefficient is None:
-            raise ValueError(f"Aberration mapping is missing a coefficient value: {value!r}")
-        angle = value.get("phi0", value.get("phi", value.get("angle", 0.0)))
-        return (float(coefficient) * coefficient_scale_A, float(angle))
     if isinstance(value, (list, tuple)):
-        if len(value) == 0:
-            raise ValueError("Aberration coefficient lists must not be empty.")
-        if len(value) == 1:
-            return float(value[0]) * coefficient_scale_A
+        if len(value) != 2:
+            raise ValueError(
+                "Oriented aberrations must be [coefficient, angle_rad]."
+            )
         return (float(value[0]) * coefficient_scale_A, float(value[1]))
     return float(value) * coefficient_scale_A
 
@@ -456,26 +420,25 @@ def raytem_aberrations(
 ) -> dict[str, Any]:
     """Extract PySlice Cnm aberrations from a RayTEM element/config mapping.
 
-    Current RayTEM microscope JSON files do not appear to emit aberration
-    coefficients, but this accepts the natural extension points:
-    ``aberrations={"C30": ...}``, ``cnm={...}``, or top-level ``Cnm`` keys.
-    Coefficients are scaled into Angstroms with ``coefficient_scale_A``; angular
-    offsets are left in radians.
+    RayTEM does not currently define an aberration schema, so the PySlice
+    extension is deliberately singular: ``aberrations`` must be a mapping from
+    Cnm labels to either a scalar coefficient or ``[coefficient, angle_rad]``.
+    Coefficients are scaled into Angstroms; angles remain in radians.
     """
-    aberrations: dict[str, Any] = {}
-
-    for container_key in RAYTEM_ABERRATION_CONTAINER_KEYS:
-        if container_key not in element or element[container_key] is None:
-            continue
-        for key, value in _iter_aberration_items(element[container_key]):
-            if _is_cnm_key(key):
-                aberrations[str(key)] = _scale_aberration_value(value, coefficient_scale_A)
-
-    for key, value in element.items():
-        if _is_cnm_key(key):
-            aberrations[str(key)] = _scale_aberration_value(value, coefficient_scale_A)
-
-    return aberrations
+    container = element.get("aberrations")
+    if container is None:
+        return {}
+    if not isinstance(container, Mapping):
+        raise TypeError("RayTEM 'aberrations' must be a Cnm coefficient mapping.")
+    invalid = [key for key in container if not _is_cnm_key(key)]
+    if invalid:
+        raise ValueError(
+            f"Invalid RayTEM aberration keys {invalid!r}; expected Cnm labels."
+        )
+    return {
+        str(key): _scale_aberration_value(value, coefficient_scale_A)
+        for key, value in container.items()
+    }
 
 
 def optical_column_from_raytem(
@@ -506,10 +469,11 @@ def optical_column_from_raytem(
         coordinates and do not change with these options; operations exactly at
         a numeric stop are excluded.
     include_aberrations:
-        If true, RayTEM elements carrying Cnm coefficients in an ``aberrations``
-        / ``cnm`` mapping or top-level ``C10``-style keys become PySlice
-        ``Aberration`` elements. Coefficients are converted from millimeters to
-        Angstroms.
+        If true, RayTEM elements carrying an ``aberrations`` Cnm mapping retain
+        those coefficients as local wave aberrations. Round lenses own their
+        coefficients directly; other records use explicit PySlice
+        ``Aberration`` phase screens. Coefficients are converted from
+        millimeters to Angstroms.
     aperture_space:
         RayTEM aperture radii are physical lengths, so only ``"real"`` is
         supported. A reciprocal cutoff requires focal-plane geometry and
@@ -599,7 +563,7 @@ def optical_column_from_raytem(
         if _is_drift(record.kind):
             if _element_is_upstream(z_A, length_A, current_A):
                 continue
-            if z_A > current_A:
+            if z_A > current_A and not _z_isclose(z_A, current_A):
                 elements.append(
                     FreeSpace(z_A - current_A, name=f"to {record.name or record.kind}")
                 )
@@ -637,25 +601,51 @@ def optical_column_from_raytem(
             # Skip lenses entirely upstream of the chosen start plane.
             if _element_is_upstream(z_A, length_A, current_A):
                 continue
-            if z_A > current_A:
+            if z_A > current_A and not _z_isclose(z_A, current_A):
                 elements.append(FreeSpace(z_A - current_A, name=f"to {record.name or record.kind}"))
                 current_A = z_A
 
             f = raytem_lens_focal_length(record.raw)
             if not math.isfinite(f):
-                if length_A:
+                if _calibrated_lens_strength(record.raw) == 0:
                     elements.append(
-                        FreeSpace(length_A, name=f"{record.name or record.kind} thickness")
-                    )
-                if aberrations:
-                    elements.append(
-                        Aberration(
-                            aberrations,
-                            name=record.name or f"{record.kind} aberrations",
-                            z_A=z_A + length_A,
-                            metadata={"raytem": dict(record.raw), "section": record.section},
+                        Lens(
+                            math.inf,
+                            name=record.name,
+                            z_A=z_A,
+                            thickness_A=length_A,
+                            principal_plane_drift_A=length_A / 2.0,
+                            rotation_rad=0.0,
+                            aberrations=aberrations,
+                            aberration_plane=record.raw.get(
+                                "aberration_plane", "exit"
+                            ),
+                            metadata={
+                                "raytem": dict(record.raw),
+                                "section": record.section,
+                            },
                         )
                     )
+                else:
+                    if length_A:
+                        elements.append(
+                            FreeSpace(
+                                length_A,
+                                name=f"{record.name or record.kind} thickness",
+                            )
+                        )
+                    if aberrations:
+                        elements.append(
+                            Aberration(
+                                aberrations,
+                                name=record.name or f"{record.kind} aberrations",
+                                z_A=z_A + length_A,
+                                metadata={
+                                    "raytem": dict(record.raw),
+                                    "section": record.section,
+                                },
+                            )
+                        )
                 current_A = z_A + length_A
                 continue
 
@@ -671,24 +661,19 @@ def optical_column_from_raytem(
                     thickness_A=length_A,
                     principal_plane_drift_A=principal_plane_drift_A,
                     rotation_rad=rotation,
+                    aberrations=aberrations,
+                    aberration_plane=record.raw.get(
+                        "aberration_plane", "exit"
+                    ),
                     metadata={"raytem": dict(record.raw), "section": record.section},
                 )
             )
-            if aberrations:
-                elements.append(
-                    Aberration(
-                        aberrations,
-                        name=record.name or f"{record.kind} aberrations",
-                        z_A=z_A + length_A,
-                        metadata={"raytem": dict(record.raw), "section": record.section},
-                    )
-                )
             current_A = z_A + length_A
 
         elif _is_quadrupole(record.kind) or _is_prism(record.kind):
             if _element_is_upstream(z_A, length_A, current_A):
                 continue
-            if z_A > current_A:
+            if z_A > current_A and not _z_isclose(z_A, current_A):
                 elements.append(FreeSpace(z_A - current_A, name=f"to {record.name or record.kind}"))
                 current_A = z_A
             if _is_quadrupole(record.kind):
@@ -719,7 +704,7 @@ def optical_column_from_raytem(
         elif _is_dipole(record.kind):
             if _element_is_upstream(z_A, length_A, current_A):
                 continue
-            if z_A > current_A:
+            if z_A > current_A and not _z_isclose(z_A, current_A):
                 elements.append(FreeSpace(z_A - current_A, name=f"to {record.name or record.kind}"))
                 current_A = z_A
             theta_x, theta_y = raytem_dipole_tilt(record.raw)
@@ -745,7 +730,7 @@ def optical_column_from_raytem(
             current_A = z_A + length_A
 
         elif include_apertures and _is_aperture(record.kind):
-            if z_A > current_A:
+            if z_A > current_A and not _z_isclose(z_A, current_A):
                 elements.append(FreeSpace(z_A - current_A, name=f"to {record.name or record.kind}"))
                 current_A = z_A
             radius = record.raw.get("radius")
@@ -770,7 +755,7 @@ def optical_column_from_raytem(
                 )
 
         elif aberrations:
-            if z_A > current_A:
+            if z_A > current_A and not _z_isclose(z_A, current_A):
                 elements.append(FreeSpace(z_A - current_A, name=f"to {record.name or record.kind}"))
                 current_A = z_A
             elements.append(
@@ -782,7 +767,7 @@ def optical_column_from_raytem(
                 )
             )
 
-    if stop_A > current_A:
+    if stop_A > current_A and not _z_isclose(stop_A, current_A):
         elements.append(FreeSpace(stop_A - current_A, name="to stop"))
 
     return OpticalColumn(
@@ -808,10 +793,12 @@ def simulate_raytem_wave(
     *,
     extent_A: float | tuple[float, float],
     sampling_A: float | tuple[float, float],
-    voltage_eV: float,
+    voltage_eV: Optional[float] = None,
     convergence_mrad: float = 0.0,
     defocus_A: float = 0.0,
     positions_A: Optional[list[tuple[float, float]]] = None,
+    source: Optional["GaussianWaveSource"] = None,
+    probe_aberrations: Optional["ProbeAberrationModel"] = None,
     start: str | float | int | None = None,
     stop: str | float | int | None = None,
     start_at: AnchorSide = "exit",
@@ -821,30 +808,127 @@ def simulate_raytem_wave(
 ) -> "WavePropagation":
     """Propagate a standalone coherent wave through a RayTEM configuration.
 
-    RayTEM defines the column geometry and calibrated first-order elements. The
-    wave source is explicit because a ray bundle does not uniquely determine a
-    coherent field. Named planes are recorded by default and can be retrieved
-    with ``result.plane(name)``. Set ``record=False`` to retain only the output
-    wave when the full plane history would use too much memory.
+    RayTEM defines the column geometry and calibrated first-order elements. Use
+    ``source=GaussianWaveSource(...)`` for a finite coherent Gaussian with an
+    explicit size and wavefront curvature. Otherwise ``voltage_eV`` and the
+    coherent-probe options define the entrance wave.
+    ``probe_aberrations=ProbeAberrationModel(...)`` applies measured effective
+    probe-forming aberrations at its named or numeric reference plane, normally
+    the specimen plane. By default that system model replaces element-local
+    aberrations upstream of its reference plane while preserving downstream
+    element aberrations, avoiding double counting. Named planes are recorded by
+    default and can be retrieved with ``result.plane(name)``. Set
+    ``record=False`` when the full plane history would use too much memory.
     """
     from ..postprocessing.wf_data import WFData
 
-    wave = WFData.from_probe(
-        extent_A=extent_A,
-        sampling=sampling_A,
-        voltage_eV=voltage_eV,
-        aperture=convergence_mrad,
-        defocus=defocus_A,
-        probe_positions=positions_A,
-        device=device,
-    )
-    column = optical_column_from_raytem(
-        path_or_data,
-        start=start,
-        stop=stop,
-        start_at=start_at,
-        stop_at=stop_at,
-    )
+    if source is not None:
+        if (
+            voltage_eV is not None
+            or convergence_mrad != 0.0
+            or defocus_A != 0.0
+            or positions_A is not None
+        ):
+            raise ValueError(
+                "source cannot be combined with voltage_eV, convergence_mrad, "
+                "defocus_A, or positions_A; configure those properties on the source."
+            )
+        if not hasattr(source, "to_wave"):
+            raise TypeError("source must provide a to_wave(...) method.")
+        wave = source.to_wave(
+            extent_A=extent_A,
+            sampling_A=sampling_A,
+            device=device,
+        )
+    else:
+        if voltage_eV is None:
+            raise ValueError("voltage_eV is required when source is not provided.")
+        wave = WFData.from_probe(
+            extent_A=extent_A,
+            sampling=sampling_A,
+            voltage_eV=voltage_eV,
+            aperture=convergence_mrad,
+            defocus=defocus_A,
+            probe_positions=positions_A,
+            device=device,
+        )
+    if probe_aberrations is None:
+        column = optical_column_from_raytem(
+            path_or_data,
+            start=start,
+            stop=stop,
+            start_at=start_at,
+            stop_at=stop_at,
+        )
+    else:
+        from .aberrations import ProbeAberrationModel
+
+        if not isinstance(probe_aberrations, ProbeAberrationModel):
+            raise TypeError(
+                "probe_aberrations must be a ProbeAberrationModel instance."
+            )
+        records = load_raytem_records(path_or_data)
+        if not records:
+            raise ValueError("RayTEM configuration contained no elements.")
+        min_z = min(record.z for record in records)
+        max_z = max(record.z + record.length for record in records)
+        start_z, _ = _resolve_anchor(records, start, side=start_at, default=min_z)
+        stop_z, _ = _resolve_anchor(records, stop, side=stop_at, default=max_z)
+        reference_z, _ = _resolve_anchor(
+            records,
+            probe_aberrations.reference_plane,
+            side=probe_aberrations.reference_side,
+            default=start_z,
+        )
+        if reference_z < start_z or reference_z > stop_z:
+            raise ValueError(
+                "Probe aberration reference plane lies outside the selected "
+                f"RayTEM segment [{start_z}, {stop_z}]: {reference_z}."
+            )
+        _validate_boundary_not_inside_element(
+            records, reference_z, "probe aberration reference"
+        )
+        upstream = optical_column_from_raytem(
+            path_or_data,
+            start=start,
+            stop=probe_aberrations.reference_plane,
+            start_at=start_at,
+            stop_at=probe_aberrations.reference_side,
+            include_aberrations=(
+                not probe_aberrations.replaces_upstream_element_aberrations
+            ),
+        )
+        downstream = optical_column_from_raytem(
+            path_or_data,
+            start=probe_aberrations.reference_plane,
+            stop=stop,
+            start_at=probe_aberrations.reference_side,
+            stop_at=stop_at,
+            include_aberrations=True,
+        )
+        metadata = dict(upstream.metadata)
+        metadata.update(
+            {
+                "stop": stop,
+                "stop_at": stop_at,
+                "stop_z_raytem": stop_z,
+                "probe_aberration_reference_z_raytem": reference_z,
+                "probe_aberration_model": asdict(probe_aberrations),
+                "upstream_element_aberrations_included": (
+                    not probe_aberrations.replaces_upstream_element_aberrations
+                ),
+                "downstream_element_aberrations_included": True,
+            }
+        )
+        column = OpticalColumn(
+            elements=[
+                *upstream.elements,
+                probe_aberrations,
+                *downstream.elements,
+            ],
+            name="RayTEM optical column with measured probe aberrations",
+            metadata=metadata,
+        )
     result = column.propagate(wave, record=record)
     report = result.sampling_report()
     real_edge = report["max_real_edge_power_fraction"]

@@ -178,6 +178,12 @@ class OpticalColumn:
                     value = getattr(element, attr)
                     if value is not None:
                         pieces.append(f"{attr}={value}")
+            aberrations = getattr(element, "aberrations", None)
+            if aberrations:
+                pieces.append(f"aberrations={aberrations}")
+                plane = getattr(element, "aberration_plane", None)
+                if plane is not None:
+                    pieces.append(f"aberration_plane={plane}")
             lines.append("  " + " | ".join(pieces))
         return "\n".join(lines)
 

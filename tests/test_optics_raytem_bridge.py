@@ -69,6 +69,47 @@ def test_lens_uses_principal_plane_drifts():
     ]
 
 
+@pytest.mark.parametrize(
+    ("plane", "expected"),
+    [
+        (
+            "entrance",
+            ["aberrate", "free", "lens", "free"],
+        ),
+        (
+            "principal",
+            ["free", "lens", "aberrate", "free"],
+        ),
+        (
+            "exit",
+            ["free", "lens", "free", "aberrate"],
+        ),
+    ],
+)
+def test_lens_owns_aberrations_at_explicit_plane(plane, expected):
+    wf = FakeWFData()
+
+    Lens(
+        f_A=10.0,
+        principal_plane_drift_A=2.0,
+        aberrations={"C30": 1000.0},
+        aberration_plane=plane,
+    ).apply(wf)
+
+    assert [call[0] for call in wf.calls] == expected
+    assert next(call for call in wf.calls if call[0] == "aberrate") == (
+        "aberrate",
+        {"C30": 1000.0},
+    )
+
+
+def test_lens_rejects_invalid_aberration_configuration():
+    with pytest.raises(ValueError, match="Invalid lens aberration keys"):
+        Lens(10.0, aberrations={"spherical": 1.0})
+    with pytest.raises(ValueError, match="aberration_plane"):
+        Lens(10.0, aberration_plane="middle")
+
+
 def test_thin_lens_is_single_phase_operation():
     wf = FakeWFData()
 
@@ -109,11 +150,10 @@ def test_aberration_element_calls_wfdata_aberrate():
     assert wf.calls == [("aberrate", {"C30": 1000.0, "C12": (100.0, 0.25)})]
 
 
-def test_raytem_aberrations_accept_nested_and_top_level_cnm_keys():
+def test_raytem_aberrations_use_one_explicit_cnm_mapping():
     extracted = raytem_aberrations(
         {
             "aberrations": {"C30": 2.0, "C12": [3.0, 0.25]},
-            "C10": 4.0,
         },
         coefficient_scale_A=10.0,
     )
@@ -121,8 +161,13 @@ def test_raytem_aberrations_accept_nested_and_top_level_cnm_keys():
     assert extracted == {
         "C30": 20.0,
         "C12": (30.0, 0.25),
-        "C10": 40.0,
     }
+    with pytest.raises(TypeError, match="must be a Cnm coefficient mapping"):
+        raytem_aberrations({"aberrations": [{"C30": 2.0}]})
+    with pytest.raises(ValueError, match="Invalid RayTEM aberration keys"):
+        raytem_aberrations({"aberrations": {"spherical": 2.0}})
+    with pytest.raises(ValueError, match="coefficient, angle_rad"):
+        raytem_aberrations({"aberrations": {"C12": [3.0]}})
 
 
 def test_raytem_json_converts_named_segment_to_optical_column():
@@ -160,7 +205,6 @@ def test_raytem_json_converts_named_segment_to_optical_column():
     assert [type(element).__name__ for element in column.elements] == [
         "FreeSpace",
         "Lens",
-        "Aberration",
         "FreeSpace",
     ]
     assert column.elements[0].dz_A == pytest.approx(3.0)
@@ -170,11 +214,12 @@ def test_raytem_json_converts_named_segment_to_optical_column():
         raytem_lens_focal_length({"strength": 5e6, "length": 1e-7})
         * RAYTEM_MM_TO_ANGSTROM
     )
-    assert column.elements[2].aberrations == {
+    assert column.elements[1].aberrations == {
         "C30": 2.0,
         "C12": (3.0, 0.25),
     }
-    assert column.elements[3].dz_A == pytest.approx(4.0)
+    assert column.elements[1].aberration_plane == "exit"
+    assert column.elements[2].dz_A == pytest.approx(4.0)
 
     wf = FakeWFData()
     column.apply(wf)
@@ -189,6 +234,47 @@ def test_raytem_json_converts_named_segment_to_optical_column():
         ("rotate", -0.5),
         ("aberrate", {"C30": 2.0, "C12": (3.0, 0.25)}),
         ("free", pytest.approx(4.0)),
+    ]
+
+
+def test_inactive_raytem_lens_still_owns_local_aberrations():
+    raytem_json = {
+        "Sections": [
+            {
+                "position": 0.0,
+                "Elements": [
+                    {
+                        "Element name": "L0",
+                        "kind": "QLens",
+                        "position": 0.0,
+                        "length": 0.2,
+                        "strength": 0.0,
+                        "aberrations": {"C30": 1e-4},
+                        "aberration_plane": "principal",
+                    },
+                    {
+                        "Element name": "stop",
+                        "kind": "Drift",
+                        "position": 0.2,
+                        "length": 0.0,
+                    },
+                ],
+            }
+        ]
+    }
+
+    column = optical_column_from_raytem(raytem_json, stop="stop")
+    lens = next(element for element in column.elements if isinstance(element, Lens))
+
+    assert not lens.is_active
+    assert lens.aberrations == {"C30": 1000.0}
+    assert lens.aberration_plane == "principal"
+    wf = FakeWFData()
+    lens.apply(wf)
+    assert wf.calls == [
+        ("free", 1e6),
+        ("aberrate", {"C30": 1000.0}),
+        ("free", 1e6),
     ]
 
 
@@ -525,6 +611,38 @@ def test_named_boundaries_preserve_transfer_order_at_a_shared_plane():
     assert [element.name for element in after_first_lens.elements] == ["L2"]
 
 
+def test_serialized_roundoff_does_not_create_phantom_free_space():
+    raytem_json = {
+        "Sections": [
+            {
+                "position": 0.0,
+                "Elements": [
+                    {
+                        "Element name": "start",
+                        "kind": "Drift",
+                        "position": 0.0,
+                        "length": 0.3,
+                    },
+                    {
+                        "Element name": "screen",
+                        "kind": "Drift",
+                        "position": 0.1 + 0.2,
+                        "length": 0.0,
+                    },
+                ],
+            }
+        ]
+    }
+
+    column = optical_column_from_raytem(
+        raytem_json,
+        start=0.0,
+        stop="screen",
+    )
+
+    assert [element.name for element in column.elements] == ["start"]
+
+
 @pytest.mark.parametrize(
     "segment",
     [
@@ -645,7 +763,7 @@ def test_raytem_reciprocal_aperture_mode_is_rejected():
         optical_column_from_raytem(raytem_json, aperture_space="reciprocal")
 
 
-def test_recorded_aberration_plane_stays_at_finite_lens_exit():
+def test_recorded_lens_with_owned_aberrations_stays_at_finite_lens_exit():
     raytem_json = {
         "Sections": [
             {
@@ -680,15 +798,13 @@ def test_recorded_aberration_plane_stays_at_finite_lens_exit():
     )
 
     lens = next(element for element in column.elements if isinstance(element, Lens))
-    aberration = next(
-        element for element in column.elements if isinstance(element, Aberration)
-    )
     expected_exit_A = lens.z_A + lens.thickness_A
-    assert aberration.z_A == pytest.approx(expected_exit_A)
+    assert lens.aberrations == {"C30": pytest.approx(1e3)}
+    assert lens.aberration_plane == "exit"
 
     propagation = column.propagate(FakeWFData(), record=True)
     plane_z = [plane.z_A for plane in propagation.planes]
     assert plane_z == sorted(plane_z)
     assert next(
-        plane.z_A for plane in propagation.planes if plane.element is aberration
+        plane.z_A for plane in propagation.planes if plane.element is lens
     ) == pytest.approx(expected_exit_A)
