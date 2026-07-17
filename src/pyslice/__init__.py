@@ -32,6 +32,7 @@ from .md.molecular_dynamics import (
     analyze_md_trajectory,
 )
 from .multislice.calculators import MultisliceCalculator, SEDCalculator
+from .multislice.distributed import assign_units, dist_env, run_tacaw_ensemble
 from .multislice.multislice import (
     Probe,
     PrismProbe,
@@ -45,7 +46,13 @@ from .multislice.potentials import Potential, grid_from_trajectory
 from .multislice.sed import SED
 from .multislice.trajectory import Trajectory
 from .postprocessing.haadf_data import HAADFData
-from .postprocessing.tacaw_data import SEDData, TACAWData, bose_correction_factor
+from .postprocessing.tacaw_data import (
+    SEDData,
+    TACAWAccumulator,
+    TACAWData,
+    bose_correction_factor,
+    reduce_tacaw_partials,
+)
 from .postprocessing.testtools import differ
 from .postprocessing.wf_data import WFData
 
@@ -79,6 +86,12 @@ __all__ = (
     "wavelength",
     "aberrationFunction",
     "calculateObject",
+    # Ensemble and distributed TACAW
+    "TACAWAccumulator",
+    "reduce_tacaw_partials",
+    "run_tacaw_ensemble",
+    "dist_env",
+    "assign_units",
     # Spectral-energy-density analysis
     "SED",
     "SEDData",
