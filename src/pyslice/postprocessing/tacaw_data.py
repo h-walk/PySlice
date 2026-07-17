@@ -187,18 +187,23 @@ class TACAWData(PySliceSerial, Signal):
             bins represent loss under PySlice's FFT convention.
         """
 
-        self._backend = wf_data._backend
+        # A list/tuple of WFData -> ensemble average over independent trajectories
+        # (Welch-segmented, streamed one trajectory at a time; see _compute_ensemble).
+        ensemble = isinstance(wf_data, (list, tuple))
+        ref = wf_data[0] if ensemble else wf_data
 
-        # Copy coordinate metadata from WFData
-        self.probe_positions = wf_data.probe_positions
-        self._time  = wf_data._time
-        self._kxs   = wf_data._kxs
-        self._kys   = wf_data._kys
-        self._xs    = wf_data._xs
-        self._ys    = wf_data._ys
-        self._layer = wf_data._layer
-        self.probe  = wf_data.probe
-        self.cache_dir   = wf_data.cache_dir
+        self._backend = ref._backend
+
+        # Copy coordinate metadata from the (reference) WFData
+        self.probe_positions = ref.probe_positions
+        self._time  = ref._time
+        self._kxs   = ref._kxs
+        self._kys   = ref._kys
+        self._xs    = ref._xs
+        self._ys    = ref._ys
+        self._layer = ref._layer
+        self.probe  = ref.probe
+        self.cache_dir   = ref.cache_dir
         self.keep_complex  = keep_complex
         if fft_batch_max_bytes is not None and (
                 isinstance(fft_batch_max_bytes, (bool, np.bool_))
@@ -208,7 +213,7 @@ class TACAWData(PySliceSerial, Signal):
         self.chunkFFT = bool(chunkFFT or fft_batch_max_bytes is not None)
         self._fft_batch_budget_explicit = fft_batch_max_bytes is not None
         self.fft_batch_max_bytes = 16 * 1024**2 if fft_batch_max_bytes is None else int(fft_batch_max_bytes)
-        self.use_memmap    = isinstance(wf_data._array, np.memmap)
+        self.use_memmap    = isinstance(ref._array, np.memmap)
         # segment_length supersedes chunk_size_time (kept as a back-compat alias)
         if segment_length is None and chunk_size_time is not None:
             segment_length = chunk_size_time
@@ -223,7 +228,7 @@ class TACAWData(PySliceSerial, Signal):
         self.gain_loss_folded = False
         self.source_fingerprint = getattr(wf_data, "source_fingerprint", None)
 
-        self._wf_array   = wf_data._array
+        self._wf_array   = ref._array
         self._array      = None
         self._frequencies = None
 
@@ -243,12 +248,19 @@ class TACAWData(PySliceSerial, Signal):
                 "use keep_complex=False to sum their spectral intensities."
             )
 
-        self._fft_from_wf_data(layer_index)
+        if ensemble:
+            self._compute_ensemble(list(wf_data), layer_index)
+        else:
+            self._fft_from_wf_data(layer_index)
         if requested_bose_correction:
             self.apply_bose_correction(self.temperature_K, fold=fold)
         elif fold:
             self.fold_gain_loss()
 
+        self._apply_signal_dimensions()
+
+    def _apply_signal_dimensions(self):
+        """Populate the PySEA Signal dimensions/metadata from the current array."""
         if Dimensions is not None:
             self.dimensions = Dimensions([
                 Dimension(name='probe',     space='position',
@@ -275,6 +287,80 @@ class TACAWData(PySliceSerial, Signal):
             })
             self.sea_type = "Signal"
         adopt_signal_state(self, 'TACAW')
+
+    # ------------------------------------------------------------------
+    # Ensemble (multi-trajectory) averaging
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _check_ensemble_compatible(ref, wf, i):
+        """Trajectories must share the k-grid, scan grid and time sampling."""
+        def close(a, b_):
+            a, b_ = to_numpy(a), to_numpy(b_)
+            return a.shape == b_.shape and np.allclose(a, b_)
+        if len(wf.probe_positions) != len(ref.probe_positions):
+            raise ValueError(f"trajectory {i}: probe count differs from trajectory 0")
+        if not (close(wf._kxs, ref._kxs) and close(wf._kys, ref._kys)):
+            raise ValueError(f"trajectory {i}: k-grid differs from trajectory 0")
+        if len(wf._time) != len(ref._time) or not np.isclose(
+                float(to_numpy(wf._time[1] - wf._time[0])),
+                float(to_numpy(ref._time[1] - ref._time[0]))):
+            raise ValueError(f"trajectory {i}: time sampling differs from trajectory 0")
+
+    def _compute_ensemble(self, wfs, layer_index):
+        """Average the Welch spectra of independent trajectories, streamed.
+
+        Each trajectory is reduced to its (segment-averaged) spectrum one at a
+        time and summed into a host accumulator weighted by its segment count,
+        so peak memory is one trajectory plus the accumulator regardless of how
+        many trajectories there are. Each trajectory's spectrum is itself cached
+        (its own tacaw.npy), so the intermediates are reusable.
+        """
+        if self.keep_complex:
+            raise ValueError("ensemble averaging requires intensities; use keep_complex=False")
+        b = self._backend
+        ref = wfs[0]
+        acc, total_k = None, 0
+        for i, wf in enumerate(wfs):
+            self._check_ensemble_compatible(ref, wf, i)
+            tac = TACAWData(wf, layer_index=layer_index,
+                            segment_length=self.segment_length, overlap=self.overlap,
+                            window=self.window, force_rerun=self.force_rerun)
+            spec = to_numpy(tac._array)          # host; (n_scan, nfreq, nkx, nky), real
+            k = int(tac.n_chunks)
+            acc = spec * k if acc is None else acc + spec * k   # weighted host sum
+            total_k += k
+            if self._frequencies is None:
+                self._frequencies = tac._frequencies
+        self.n_chunks = total_k
+        self._array = b.asarray(acc / total_k)
+
+    @classmethod
+    def _from_spectrum(cls, array, frequencies, meta):
+        """Build a TACAWData directly from a precomputed spectrum (no FFT).
+
+        Used by TACAWAccumulator.finalize() to wrap the reduced host array.
+        """
+        self = cls.__new__(cls)
+        self._backend = meta['_backend']
+        b = self._backend
+        self.probe_positions = meta['probe_positions']
+        self._time = meta['_time']; self._kxs = meta['_kxs']; self._kys = meta['_kys']
+        self._xs = meta['_xs']; self._ys = meta['_ys']; self._layer = meta['_layer']
+        self.probe = meta['probe']; self.cache_dir = meta['cache_dir']
+        self.keep_complex = False; self.chunkFFT = False; self.use_memmap = False
+        self.segment_length = meta.get('segment_length'); self.overlap = float(meta.get('overlap', 0.0))
+        self.window = meta.get('window'); self.chunk_size_time = None
+        self.force_rerun = False; self.temperature_K = None; self.apply_bose = False
+        self.gain_loss_folded = False; self.source_fingerprint = None; self.layer_index = None
+        self._wf_array = None; self.fft_batch_max_bytes = 16 * 1024**2
+        self._fft_batch_budget_explicit = False
+        self.n_scan_positions = len(self.probe_positions); self.n_copies = 1
+        self.n_chunks = int(meta.get('n_segments', 1))
+        self._array = b.asarray(array)
+        self._frequencies = b.asarray(frequencies)
+        self._apply_signal_dimensions()
+        return self
 
     # ------------------------------------------------------------------
     # Properties
@@ -1007,3 +1093,73 @@ class SEDData(TACAWData):
     def __init__(self, wf_data: WFData, layer_index: Optional[int] = None,
                  keep_complex: bool = False, force_rerun: bool = False) -> None:
         super().__init__(wf_data, layer_index, keep_complex, force_rerun=force_rerun)
+
+
+class TACAWAccumulator:
+    """Host-resident streaming accumulator for ensemble TACAW averaging.
+
+    Add trajectories (or probe-batch subsets) one at a time; each is reduced to
+    its Welch periodogram and summed into a host array, so peak memory is one
+    trajectory's working set plus the accumulator, regardless of the number of
+    trajectories. ``rows`` selects which probe rows a partial fills (probe
+    batching), and ``memmap_path`` puts the accumulator on disk for scans too
+    large for host RAM. This is the local, single-process reducer; a multi-GPU
+    driver simply sums several of these host accumulators (see the design note).
+
+    Example
+    -------
+    >>> acc = TACAWAccumulator(window='hann', segment_length=L, overlap=0.5)
+    >>> for wf in trajectory_wavefunctions:      # produced one at a time
+    ...     acc.add(wf); del wf
+    >>> tacaw = acc.finalize()                    # ensemble-averaged spectrum
+    """
+
+    def __init__(self, *, segment_length=None, overlap=0.0, window=None,
+                 layer_index=None, n_probes=None, dtype=np.float64, memmap_path=None):
+        self._kw = dict(segment_length=segment_length, overlap=overlap,
+                        window=window, layer_index=layer_index)
+        self.n_probes = n_probes
+        self.dtype = dtype
+        self.memmap_path = None if memmap_path is None else str(memmap_path)
+        self._acc = None
+        self._count = None
+        self._freqs = None
+        self._meta = None
+
+    def add(self, wf_data, rows=None):
+        """Reduce one trajectory (optionally a probe-batch) and add its periodogram.
+
+        rows: probe indices this partial fills; None -> all rows (a full-grid
+        trajectory). Trajectories/batches covering the same probe are averaged.
+        """
+        tac = TACAWData(wf_data, keep_complex=False, **self._kw)
+        spec = to_numpy(tac._array)            # (n_rows, nfreq, nkx, nky), real
+        k = int(tac.n_chunks)
+        if self._acc is None:
+            n = self.n_probes if self.n_probes is not None else spec.shape[0]
+            shape = (n,) + spec.shape[1:]
+            if self.memmap_path is not None:
+                self._acc = np.lib.format.open_memmap(
+                    self.memmap_path, mode='w+', dtype=self.dtype, shape=shape)
+                self._acc[:] = 0
+            else:
+                self._acc = np.zeros(shape, dtype=self.dtype)
+            self._count = np.zeros(n, dtype=self.dtype)
+            self._freqs = to_numpy(tac._frequencies)
+            self._meta = {a: getattr(tac, a) for a in
+                          ('probe_positions', '_kxs', '_kys', '_xs', '_ys',
+                           '_layer', '_time', 'probe', 'cache_dir', '_backend')}
+        idx = slice(None) if rows is None else np.asarray(rows)
+        self._acc[idx] += spec * k             # weighted by this unit's segment count
+        self._count[idx] += k
+        return self
+
+    def finalize(self) -> "TACAWData":
+        """Return the ensemble-averaged spectrum as a TACAWData."""
+        if self._acc is None:
+            raise RuntimeError("TACAWAccumulator.finalize() called before any add()")
+        cnt = np.where(np.asarray(self._count) > 0, self._count, 1.0)
+        avg = np.asarray(self._acc) / cnt[:, None, None, None]
+        meta = dict(self._meta, segment_length=self._kw['segment_length'],
+                    overlap=self._kw['overlap'], window=self._kw['window'])
+        return TACAWData._from_spectrum(avg, self._freqs, meta)
