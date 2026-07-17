@@ -155,6 +155,8 @@ class HAADFData(PySliceSerial, Signal):
         mask = b.zeros(q.shape, type_match=self._wf_array)
         if isinstance(self._wf_array, np.memmap):
             q = to_numpy(q)
+            radius_inner = to_numpy(radius_inner)
+            radius_outer = to_numpy(radius_outer)
         mask[q >= radius_inner] = 1
         mask[q >= radius_outer] = 0
         return mask
