@@ -217,7 +217,7 @@ class HAADFData(PySliceSerial, Signal):
 
         return self.data  # Return numpy array for backward compatibility
 
-    def plot(self, filename=None, title=None, layer=-1):
+    def plot(self, filename=None, title=None, layer=-1, tiling=(1,1)):
         """
         Plot the HAADF image.
 
@@ -235,9 +235,21 @@ class HAADFData(PySliceSerial, Signal):
         img = to_numpy(self._array)
         if img.ndim == 3:            # (n_layers, x, y) stack -> pick a thickness
             img = img[layer]
-        array = img.T[::-1,:]  # imshow convention: y,x. our convention: x,y, and flip y (0,0 upper-left)
-        xs = to_numpy(self._xs)
-        ys = to_numpy(self._ys)
+
+        # tiling
+        nx,ny = img.shape
+        array = np.zeros(np.asarray([nx,ny])*np.asarray(tiling))
+        xs = np.zeros(nx*tiling[0]) ; lx = (self._xs[-1]-xs[0])/(nx-1)*nx
+        ys = np.zeros(ny*tiling[1]) ; ly = (self._ys[-1]-ys[0])/(ny-1)*ny
+        for i in range(tiling[0]):
+            for j in range(tiling[1]):
+                array[i*nx:(i+1)*nx,j*ny:(j+1)*ny] = img[:,:]
+        for i in range(tiling[0]):
+            xs[i*nx:(i+1)*nx] = to_numpy(self._xs) + lx*i
+        for j in range(tiling[1]):
+            ys[j*ny:(j+1)*ny] = to_numpy(self._ys) + ly*j
+
+        array = array.T[::-1,:] # imshow convention: y,x. our convention: x,y, and flip y (0,0 upper-left)
 
         dx = (xs[-1] - xs[0]) / (len(xs) - 1) if len(xs) > 1 else 0
         dy = (ys[-1] - ys[0]) / (len(ys) - 1) if len(ys) > 1 else 0
