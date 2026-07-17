@@ -527,9 +527,13 @@ class TorchBackend(Backend):
     # ------------------------------------------------------------------
 
     def _detect_device_and_precision(self, device_spec: Optional[str]):
-        env_device = os.environ.get('PYSLICE_DEVICE', '').lower()
-        if env_device:
-            device_spec = env_device
+        # An explicit device argument wins; PYSLICE_DEVICE is only a fallback
+        # when none was given. (Previously the env var overrode the argument,
+        # which broke per-rank pinning like device='cuda:{local_rank}'.)
+        if device_spec is None:
+            env_device = os.environ.get('PYSLICE_DEVICE', '').lower()
+            if env_device:
+                device_spec = env_device
 
         if device_spec is None:
             if torch.cuda.is_available():
