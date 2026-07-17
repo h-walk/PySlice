@@ -3,11 +3,13 @@ Core data structure for TACAW EELS calculations.
 """
 from __future__ import annotations
 
+import glob
 import hashlib
 import json
 import logging
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import List, Optional, Union
 
 import numpy as np
@@ -751,3 +753,74 @@ class TACAWAccumulator:
         meta = dict(self._meta, segment_length=self._kw['segment_length'],
                     overlap=self._kw['overlap'], window=self._kw['window'])
         return TACAWData._from_spectrum(avg, self._freqs, meta)
+
+    def save_partial(self, path) -> str:
+        """Serialise this rank's UN-averaged partial (sum + counts + metadata).
+
+        Written as a small .npz so a cross-rank reduce (``reduce_tacaw_partials``)
+        can sum several ranks' partials into the ensemble average. Only numeric
+        state is stored (no backend/probe objects), so it is portable and the
+        reduce can run anywhere.
+        """
+        if self._acc is None:
+            raise RuntimeError("save_partial() called before any add()")
+        m = self._meta
+        np.savez(
+            str(path),
+            acc=np.asarray(self._acc), count=np.asarray(self._count),
+            freqs=np.asarray(self._freqs),
+            kxs=to_numpy(m['_kxs']), kys=to_numpy(m['_kys']),
+            xs=to_numpy(m['_xs']), ys=to_numpy(m['_ys']),
+            layer=to_numpy(m['_layer']), time=to_numpy(m['_time']),
+            probe_positions=np.asarray(m['probe_positions'], dtype=float),
+            probe_eV=float(m['probe'].eV),
+            probe_wavelength=float(m['probe'].wavelength),
+            probe_mrad=float(m['probe'].mrad),
+            segment_length=(-1 if self._kw['segment_length'] is None
+                            else int(self._kw['segment_length'])),
+            overlap=float(self._kw['overlap']),
+            window=("" if self._kw['window'] is None else str(self._kw['window'])),
+        )
+        return str(path)
+
+
+def reduce_tacaw_partials(partials, backend=None) -> "TACAWData":
+    """Sum file-based TACAWAccumulator partials into an ensemble-averaged TACAWData.
+
+    partials: a directory (globs ``partial_*.npz``) or an explicit list of .npz
+    paths written by :meth:`TACAWAccumulator.save_partial`. This is the cross-rank
+    (and cross-node) reduce: it sums the per-rank un-averaged periodogram sums and
+    counts, then divides. Missing ranks simply do not contribute (fault tolerant).
+    """
+    from pyslice.backend import NumpyBackend
+    if isinstance(partials, (str, Path)):
+        paths = sorted(glob.glob(str(Path(partials) / "partial_*.npz")))
+    else:
+        paths = [str(p) for p in partials]
+    if not paths:
+        raise FileNotFoundError(f"no partial_*.npz found in {partials!r}")
+
+    acc = count = ref = None
+    for p in paths:
+        d = np.load(p, allow_pickle=False)
+        acc = d['acc'].astype(np.float64) if acc is None else acc + d['acc']
+        count = d['count'].astype(np.float64) if count is None else count + d['count']
+        ref = ref or {k: d[k] for k in d.files}
+    b = backend or NumpyBackend()
+    cnt = np.where(count > 0, count, 1.0)
+    avg = acc / cnt[:, None, None, None]
+    seg = int(ref['segment_length']); seg = None if seg < 0 else seg
+    win = str(ref['window']); win = None if win == "" else win
+    probe = SimpleNamespace(
+        eV=float(ref['probe_eV']), wavelength=float(ref['probe_wavelength']),
+        mrad=float(ref['probe_mrad']),
+        _array=b.asarray(np.zeros((1, 1, 2, 2), dtype=np.complex128)))
+    meta = dict(
+        _backend=b, probe=probe, cache_dir=Path('.'),
+        probe_positions=[tuple(pp) for pp in ref['probe_positions']],
+        _kxs=b.asarray(ref['kxs']), _kys=b.asarray(ref['kys']),
+        _xs=b.asarray(ref['xs']), _ys=b.asarray(ref['ys']),
+        _layer=b.asarray(ref['layer']), _time=b.asarray(ref['time']),
+        segment_length=seg, overlap=float(ref['overlap']), window=win,
+        n_segments=int(np.max(count)) if count.size else 1)
+    return TACAWData._from_spectrum(avg, b.asarray(ref['freqs']), meta)

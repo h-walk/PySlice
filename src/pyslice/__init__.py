@@ -19,6 +19,7 @@ from .multislice.multislice import *
 from .multislice.potentials import *
 from .multislice.sed import *
 from .multislice.trajectory import *
+from .multislice.distributed import dist_env, assign_units, run_tacaw_ensemble
 from .postprocessing.haadf_data import *
 from .postprocessing.tacaw_data import *
 from .postprocessing.testtools import *
