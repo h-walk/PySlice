@@ -168,11 +168,17 @@ def test_preview_probes_uses_flatten_compatibility(tmp_path, monkeypatch):
     calc.preview_probes()
 
 
-def test_tacaw_rejects_nondivisible_chunk_size(tmp_path):
+def test_tacaw_nondivisible_segment_drops_partial_tail(tmp_path):
+    # Welch segmentation no longer requires the segment length to divide the
+    # series evenly; the trailing partial segment is dropped (2 segments of 4
+    # from 10 samples), and the frequency axis follows the segment length.
     wf = _make_wf_data(tmp_path, n_time=10)
-
-    with pytest.raises(ValueError, match="evenly divide"):
-        TACAWData(wf, chunk_size_time=4, force_rerun=True)
+    tac = TACAWData(wf, segment_length=4, force_rerun=True)
+    assert tac.n_chunks == 2
+    assert len(tac.frequencies) == 4
+    # chunk_size_time stays a working alias for segment_length
+    tac2 = TACAWData(wf, chunk_size_time=4, force_rerun=True)
+    assert tac2.n_chunks == 2
 
 
 @pytest.mark.skipif(not TORCH_AVAILABLE, reason="PyTorch not available")
@@ -1373,3 +1379,53 @@ def test_decoherence_weights_preserve_total_probe_dose():
     reference = to_numpy(spatial_one._array).copy()
     spatial_one.addSpatialDecoherence(50.0, 1)
     np.testing.assert_allclose(to_numpy(spatial_one._array), reference, atol=1e-12)
+
+
+def _tone_wf(tmp_path, signal):
+    # WFData whose exit-wave time series is `signal` broadcast over a 2x2 k-grid.
+    import pathlib
+    n = len(signal)
+    arr = np.zeros((1, n, 2, 2, 1), dtype=np.complex128)
+    arr[0, :, :, :, 0] = np.asarray(signal)[:, None, None]
+    probe = SimpleNamespace(eV=1e5, wavelength=0.037, mrad=30.0,
+                            _array=NumpyBackend().asarray(np.zeros((1, 1, 2, 2), dtype=np.complex128)))
+    return WFData(probe_positions=[(0.0, 0.0)], probe_xs=[0.0], probe_ys=[0.0],
+                  time=np.arange(n) * 0.1, kxs=np.arange(2.0), kys=np.arange(2.0),
+                  xs=np.arange(2.0), ys=np.arange(2.0), layer=np.array([0]),
+                  array=arr, probe=probe, backend=NumpyBackend(),
+                  cache_dir=pathlib.Path(tmp_path))
+
+
+def test_tacaw_welch_windowing(tmp_path):
+    n, dt = 64, 0.1
+    t = np.arange(n) * dt
+    f0 = 8 / (n * dt)                    # a tone on a frequency bin (1.25 THz)
+    sig = np.cos(2 * np.pi * f0 * t) + 0.5   # +0.5 DC that detrend must remove
+
+    peak = lambda tac: abs(tac.frequencies[np.argmax(to_numpy(tac.spectrum()))])
+
+    # 1. default == the old un-windowed |FFT(detrend)|^2 (boxcar is RMS-identity)
+    tac = TACAWData(_tone_wf(tmp_path / "a", sig))
+    manual = np.abs(np.fft.fftshift(np.fft.fft(sig - sig.mean()))) ** 2 * 4  # *4: summed 2x2 k
+    np.testing.assert_allclose(to_numpy(tac.spectrum()), manual, rtol=1e-6, atol=1e-6)
+    assert np.isclose(peak(tac), f0)
+    dc = to_numpy(tac.spectrum())[np.argmin(np.abs(tac.frequencies))]
+    assert np.isclose(dc, 0.0, atol=1e-6)                      # DC/elastic removed
+
+    # 2. windowing keeps the peak position; frequency axis follows the segment
+    assert np.isclose(peak(TACAWData(_tone_wf(tmp_path / "b", sig), window="hann")), f0)
+    welch = TACAWData(_tone_wf(tmp_path / "c", sig), segment_length=32, overlap=0.5, window="hann")
+    assert np.isclose(peak(welch), f0)
+    assert welch.n_chunks == 3 and len(welch.frequencies) == 32
+
+    # 3. Welch averaging lowers the off-peak variance on noise
+    rng = np.random.RandomState(0)
+    noise = rng.randn(n) + 1j * rng.randn(n)
+    s_one = to_numpy(TACAWData(_tone_wf(tmp_path / "d", noise)).spectrum())
+    s_welch = to_numpy(TACAWData(_tone_wf(tmp_path / "e", noise),
+                                 segment_length=16, overlap=0.5, window="hann").spectrum())
+    assert np.std(s_welch) < np.std(s_one)
+
+    # 4. complex spectra cannot be averaged over segments
+    with pytest.raises(ValueError, match="keep_complex"):
+        TACAWData(_tone_wf(tmp_path / "f", sig), segment_length=32, keep_complex=True)

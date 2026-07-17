@@ -58,9 +58,29 @@ class TACAWData(PySliceSerial, Signal):
                  keep_complex: bool = False,
                  chunkFFT: bool = False,
                  chunk_size_time: Optional[int] = None,
+                 segment_length: Optional[int] = None,
+                 overlap: float = 0.0,
+                 window=None,
                  force_rerun: bool = False,
                  temperature_K: Optional[float] = None,
                  apply_bose: bool = False) -> None:
+        """Convert exit-wave time series to a spectral intensity |Psi(w,q)|^2.
+
+        The spectrum is a periodogram estimate averaged (Welch's method) over
+        time segments:
+
+            segment_length: L samples per FFT segment (None -> the whole series,
+                a single segment). Generalises chunk_size_time (kept as an alias).
+            overlap: fraction in [0, 1) of segment overlap; 0 -> non-overlapping
+                (Bartlett), 0.5 -> Welch.
+            window: taper applied per segment before the FFT -- None/'boxcar'
+                (rectangular, the default), 'hann', 'hamming', 'blackman',
+                'bartlett', a length-L array, or a callable L -> array. Windows
+                are RMS-normalised so 'boxcar' reproduces the un-windowed result.
+
+        Averaging only makes sense on intensities, so keep_complex=True is
+        rejected when more than one segment would be averaged.
+        """
 
         self._backend = wf_data._backend
 
@@ -77,7 +97,13 @@ class TACAWData(PySliceSerial, Signal):
         self.keep_complex  = keep_complex
         self.chunkFFT      = chunkFFT
         self.use_memmap    = isinstance(wf_data._array, np.memmap)
+        # segment_length supersedes chunk_size_time (kept as a back-compat alias)
+        if segment_length is None and chunk_size_time is not None:
+            segment_length = chunk_size_time
         self.chunk_size_time = chunk_size_time
+        self.segment_length = segment_length
+        self.overlap = float(overlap)
+        self.window = window
         self.force_rerun   = force_rerun
         self.temperature_K = temperature_K
         self.apply_bose = apply_bose
@@ -184,6 +210,55 @@ class TACAWData(PySliceSerial, Signal):
     # FFT computation
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _make_window(window, L, b):
+        """Return a length-L, RMS-normalised window as a backend array.
+
+        RMS normalisation (w /= sqrt(mean(w**2))) makes 'boxcar' the identity and
+        keeps windowed periodogram amplitudes comparable across window choices.
+        """
+        if window is None or (isinstance(window, str)
+                              and window.lower() in ("boxcar", "rect", "rectangular", "none")):
+            w = np.ones(L)
+        elif isinstance(window, str):
+            fn = {"hann": np.hanning, "hamming": np.hamming,
+                  "blackman": np.blackman, "bartlett": np.bartlett}.get(window.lower())
+            if fn is None:
+                raise ValueError(
+                    f"unknown window {window!r}; use 'boxcar', 'hann', 'hamming', "
+                    "'blackman', 'bartlett', a length-L array, or a callable")
+            w = fn(L)
+        elif callable(window):
+            w = np.asarray(window(L), dtype=float)
+        else:
+            w = np.asarray(window, dtype=float)
+        w = w.astype(float).reshape(-1)
+        if w.shape != (L,):
+            raise ValueError(f"window must have length {L}, got {w.shape}")
+        rms = np.sqrt(np.mean(w ** 2))
+        if rms > 0:
+            w = w / rms
+        return b.asarray(w)
+
+    def _resolve_segments(self, n_time):
+        """Resolve (segment_length, list_of_starts) for Welch segmentation."""
+        L = self.segment_length if self.segment_length is not None else n_time
+        if not (0 < L <= n_time):
+            raise ValueError(f"segment_length must be in [1, {n_time}]; got {L}")
+        if not (0.0 <= self.overlap < 1.0):
+            raise ValueError("overlap must be a fraction in [0, 1)")
+        step = L - int(round(self.overlap * L))
+        if step < 1:
+            raise ValueError("overlap too large: segment step < 1")
+        starts = list(range(0, n_time - L + 1, step))
+        if not starts:
+            raise ValueError("no segments fit; reduce segment_length")
+        if self.keep_complex and len(starts) > 1:
+            raise ValueError(
+                "keep_complex=True averages complex spectra to ~0; use a single "
+                "segment (segment_length=None, overlap=0) to keep the complex spectrum")
+        return L, starts
+
     def _fft_from_wf_data(self, layer_index: Optional[int] = None):
         """FFT along the time axis to convert wavefunction to TACAW data."""
         b = self._backend
@@ -192,18 +267,9 @@ class TACAWData(PySliceSerial, Signal):
         cache_freq  = self.cache_dir / "tacaw_freq.npy"
         cache_meta  = self.cache_dir / "tacaw_meta.json"
 
-        fft_len = self.chunk_size_time if self.chunk_size_time is not None else len(self._time)
-        if self.chunk_size_time is None:
-            self.n_chunks = 1
-        else:
-            if self.chunk_size_time <= 0:
-                raise ValueError("chunk_size_time must be a positive integer")
-            elif self.chunk_size_time > len(self._time):
-                raise ValueError("chunk_size_time cannot exceed total time length")
-            elif len(self._time) % self.chunk_size_time != 0:
-                raise ValueError("chunk_size_time must evenly divide total time length")
-            else:
-                self.n_chunks = len(self._time) // self.chunk_size_time
+        L, starts = self._resolve_segments(len(self._time))
+        fft_len = L
+        self.n_chunks = len(starts)   # number of averaged segments (Welch)
 
         # Resolve the layer up front: it — together with keep_complex, the
         # chunking and the source-wavefunction identity — is part of the cache
@@ -238,10 +304,21 @@ class TACAWData(PySliceSerial, Signal):
 
         wf_layer = self._wf_array[:, :, :, :, layer_index]  # p,t,kx,ky
 
-        indices = np.linspace(0, len(self._time), self.n_chunks + 1)
         dt = float(to_numpy(self._time[1] - self._time[0]))
         self._frequencies = b.fftshift(b.fftfreq(fft_len, d=dt))
+        window = self._make_window(self.window, L, b)   # RMS-normalised, length L
+        n_segments = len(starts)
 
+        def _segment_periodogram(seg):
+            # detrend (remove elastic/DC line) -> window -> FFT along time
+            seg = seg - b.mean(seg, axis=1, keepdims=True)
+            seg = seg * window.reshape((1, L) + (1,) * (seg.ndim - 2))
+            out = b.fftshift(b.fft(seg, axes=1), axes=1)
+            if not self.keep_complex:
+                out = self._fold_incoherent_copies(b.absolute(out) ** 2)
+            return out
+
+        # Welch: average the (windowed, detrended) segment periodograms.
         if self.chunkFFT:
             # Memory-conservative path: loop over kx
             dtype = b.complex_dtype if self.keep_complex else b.float_dtype
@@ -253,27 +330,17 @@ class TACAWData(PySliceSerial, Signal):
             else:
                 self._array = b.zeros(shape, dtype=dtype)
 
-            for chunk_i in range(self.n_chunks):
-                i1, i2 = int(to_numpy(indices[chunk_i])), int(to_numpy(indices[chunk_i + 1]))
+            for start in starts:
                 for kx_i in tqdm(range(len(self._kxs))):
-                    sl = wf_layer[:, i1:i2, kx_i, :]
-                    wf_mean = b.mean(sl, axis=1, keepdims=True)
-                    wf_fft  = b.fftshift(b.fft(sl - wf_mean, axes=1), axes=1)
-                    if not self.keep_complex:
-                        wf_fft = b.absolute(wf_fft) ** 2
-                        wf_fft = self._fold_incoherent_copies(wf_fft)
-                    self._array[:, :, kx_i, :] += wf_fft
+                    self._array[:, :, kx_i, :] += _segment_periodogram(
+                        wf_layer[:, start:start + L, kx_i, :])
+            self._array /= n_segments
         else:
-            # Standard path: FFT over full time window
-            for chunk_i in range(self.n_chunks):
-                i1, i2 = int(to_numpy(indices[chunk_i])), int(to_numpy(indices[chunk_i + 1]))
-                sl = wf_layer[:, i1:i2, :, :]
-                wf_mean = b.mean(sl, axis=1, keepdims=True)
-                wf_fft  = b.fftshift(b.fft(sl - wf_mean, axes=1), axes=1)
-                if not self.keep_complex:
-                    wf_fft = b.absolute(wf_fft) ** 2
-                    wf_fft = self._fold_incoherent_copies(wf_fft)
-                self._array = wf_fft if self._array is None else self._array + wf_fft
+            # Standard path: FFT over the full segment window
+            for start in starts:
+                contrib = _segment_periodogram(wf_layer[:, start:start + L, :, :])
+                self._array = contrib if self._array is None else self._array + contrib
+            self._array = self._array / n_segments
 
         # Persist to cache
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -306,6 +373,10 @@ class TACAWData(PySliceSerial, Signal):
             "keep_complex": bool(self.keep_complex),
             "fft_len": int(fft_len),
             "n_chunks": int(self.n_chunks),
+            "overlap": float(self.overlap),
+            "window": (self.window if isinstance(self.window, str)
+                       else ("callable" if callable(self.window)
+                             else ("array" if self.window is not None else None))),
             "n_copies": int(self.n_copies),
             "array_shape": [n_probes, int(fft_len), nkx, nky],
             "wf_dtype": str(getattr(self._wf_array, "dtype", "")),
