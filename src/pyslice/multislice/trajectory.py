@@ -432,6 +432,14 @@ class Trajectory:
         """
         import matplotlib.pyplot as plt
 
+        # Draw box outline
+        box = self.box_matrix
+        corners = np.array([
+            [0, 0, 0], [box[0,0], 0, 0], [box[0,0], box[1,1], 0], [0, box[1,1], 0],
+            [0, 0, box[2,2]], [box[0,0], 0, box[2,2]], [box[0,0], box[1,1], box[2,2]], [0, box[1,1], box[2,2]]
+        ])
+        edges = [(0,1), (1,2), (2,3), (3,0), (4,5), (5,6), (6,7), (7,4), (0,4), (1,5), (2,6), (3,7)]
+
         if view == '3d':
             fig = plt.figure(figsize=(10, 8))
             ax = fig.add_subplot(projection='3d')
@@ -452,18 +460,16 @@ class Trajectory:
             ax.set_zlabel('Z (Å)')
             ax.legend()
 
-            # Draw box outline
-            box = self.box_matrix
-            corners = np.array([
-                [0, 0, 0], [box[0,0], 0, 0], [box[0,0], box[1,1], 0], [0, box[1,1], 0],
-                [0, 0, box[2,2]], [box[0,0], 0, box[2,2]], [box[0,0], box[1,1], box[2,2]], [0, box[1,1], box[2,2]]
-            ])
-            edges = [(0,1), (1,2), (2,3), (3,0), (4,5), (5,6), (6,7), (7,4), (0,4), (1,5), (2,6), (3,7)]
             for edge in edges:
                 pts = corners[list(edge)]
                 ax.plot3D(pts[:,0], pts[:,1], pts[:,2], 'k-', alpha=0.3, linewidth=1)
         else:
             fig, ax = plt.subplots(figsize=(8, 8))
+
+            for edge in edges:
+                pts = corners[list(edge)]
+                xyzs = [[pts[:,0], pts[:,1], pts[:,2]]["xyz".index(c)] for c in view ]
+                ax.plot(xyzs[0], xyzs[1], 'k-', alpha=0.3, linewidth=1)
 
             # Select projection
             if view == 'xy':
