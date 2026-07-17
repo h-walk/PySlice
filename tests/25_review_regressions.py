@@ -1429,3 +1429,54 @@ def test_tacaw_welch_windowing(tmp_path):
     # 4. complex spectra cannot be averaged over segments
     with pytest.raises(ValueError, match="keep_complex"):
         TACAWData(_tone_wf(tmp_path / "f", sig), segment_length=32, keep_complex=True)
+
+
+def _multiprobe_wf(tmp_path, signals):
+    # signals: (n_probes, n_time) complex -> a WFData with per-probe time series.
+    import pathlib
+    signals = np.asarray(signals)
+    nprobe, n = signals.shape
+    arr = np.zeros((nprobe, n, 2, 2, 1), dtype=np.complex128)
+    for p in range(nprobe):
+        arr[p, :, :, :, 0] = signals[p][:, None, None]
+    probe = SimpleNamespace(eV=1e5, wavelength=0.037, mrad=30.0,
+                            _array=NumpyBackend().asarray(np.zeros((1, 1, 2, 2), dtype=np.complex128)))
+    return WFData(probe_positions=[(float(p), 0.0) for p in range(nprobe)],
+                  probe_xs=list(range(nprobe)), probe_ys=[0], time=np.arange(n) * 0.1,
+                  kxs=np.arange(2.0), kys=np.arange(2.0), xs=np.arange(2.0), ys=np.arange(2.0),
+                  layer=np.array([0]), array=arr, probe=probe, backend=NumpyBackend(),
+                  cache_dir=pathlib.Path(tmp_path))
+
+
+def test_tacaw_ensemble_average_and_accumulator(tmp_path):
+    from pyslice.postprocessing.tacaw_data import TACAWAccumulator
+    rng = np.random.RandomState(0)
+    n = 64
+    A = rng.randn(2, n) + 1j * rng.randn(2, n)   # trajectory A, 2 probes
+    B = rng.randn(2, n) + 1j * rng.randn(2, n)   # trajectory B
+    wfA = lambda sub=None: _multiprobe_wf(tmp_path / "A", A if sub is None else A[sub])
+    wfB = lambda: _multiprobe_wf(tmp_path / "B", B)
+
+    single = to_numpy(TACAWData(wfA())._array)
+    # averaging identical trajectories returns the single-trajectory spectrum
+    np.testing.assert_allclose(to_numpy(TACAWData([wfA(), wfA()])._array), single, atol=1e-10)
+    # averaging distinct trajectories is the mean of their spectra
+    specB = to_numpy(TACAWData(wfB())._array)
+    ens = to_numpy(TACAWData([wfA(), wfB()])._array)
+    np.testing.assert_allclose(ens, 0.5 * (single + specB), atol=1e-10)
+
+    # the streaming accumulator matches the list constructor
+    acc = TACAWAccumulator()
+    acc.add(wfA()); acc.add(wfB())
+    np.testing.assert_allclose(to_numpy(acc.finalize()._array), ens, atol=1e-10)
+
+    # probe batching: two 1-probe partials reconstruct the full 2-probe spectrum
+    acc2 = TACAWAccumulator(n_probes=2)
+    acc2.add(_multiprobe_wf(tmp_path / "p0", A[[0]]), rows=[0])
+    acc2.add(_multiprobe_wf(tmp_path / "p1", A[[1]]), rows=[1])
+    np.testing.assert_allclose(to_numpy(acc2.finalize()._array), single, atol=1e-10)
+
+    # incompatible trajectories are rejected
+    bad = wfB(); bad._kxs = np.arange(3.0)
+    with pytest.raises(ValueError, match="k-grid differs"):
+        TACAWData([wfA(), bad])
