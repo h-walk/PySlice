@@ -1557,3 +1557,35 @@ def test_pyslice_device_explicit_wins_over_env(monkeypatch):
     monkeypatch.setenv("PYSLICE_DEVICE", "meta")            # would previously override
     be = TorchBackend(device="cpu")                          # explicit must win
     assert be.device.type == "cpu"
+def test_adf_layers_decoupled_from_return_layers(tmp_path, monkeypatch):
+    # A depth-resolved ADF can be produced without returning/storing those
+    # wavefunctions (adf_layers is independent of return_layers).
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(tmp_path)
+    s = np.array([[[4., 4., 1.0], [3., 5., 2.5]]], dtype=np.float32)
+    traj = Trajectory(atom_types=np.array([14, 14]), positions=s,
+                      velocities=np.zeros_like(s), box_matrix=np.diag([8., 8., 4.]),
+                      timestep=0.1)
+
+    def run(**kw):
+        calc = MultisliceCalculator(force_cpu=True)
+        calc.setup(traj, aperture=30, voltage_eV=100e3, sampling=0.25, slice_thickness=1.0,
+                   probe_xs=[2., 4., 6.], probe_ys=[2., 4., 6.], ADF=(45, 150),
+                   cache_wavefunctions=False, **kw)
+        _, adf = calc.run(force_rerun=True)
+        return calc, adf
+
+    # ADF at every thickness, but NO wavefunctions returned or stored.
+    calc, adf = run(return_layers=None, adf_layers="all")
+    assert to_numpy(adf.array).shape == (5, 3, 3)
+    assert calc.returns_wavefunctions is False
+    assert not hasattr(calc, "wavefunction_data")            # no wavefunction RAM
+
+    # Identical to the coupled way (return_layers='all'), which does store them.
+    _, adf_coupled = run(return_layers="all")
+    np.testing.assert_allclose(to_numpy(adf.array), to_numpy(adf_coupled.array), atol=1e-8)
+
+    # Explicit subset of thicknesses.
+    _, adf_sub = run(return_layers=None, adf_layers=[0, 4])
+    assert to_numpy(adf_sub.array).shape == (2, 3, 3)
+    assert len(adf_sub.thicknesses) == 2
