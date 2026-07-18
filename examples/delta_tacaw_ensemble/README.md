@@ -48,6 +48,6 @@ sbatch submit_delta.sbatch
 
 ## Verifying the logic without a cluster
 The whole map-reduce is exercised on CPU in
-`tests/25_review_regressions.py::test_distributed_ensemble_equals_serial_on_cpu`
+`tests/test_distributed.py::test_distributed_ensemble_equals_serial_on_cpu`
 (a simulated 4-rank run reproduces the serial ensemble bit-for-bit) — so the
 distribution/reduce is validated without any GPU.
