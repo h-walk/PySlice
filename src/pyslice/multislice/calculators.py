@@ -140,6 +140,32 @@ class MultisliceCalculator:
         """Return layers that must be computed or cached for this run."""
         return list(return_layers) or [self.nz - 1]
 
+    def _resolve_adf_layers(self, stored_layers):
+        """Normalize adf_layers -> the slice indices at which to accumulate ADF.
+
+        When unspecified (None) the ADF follows return_layers (back-compat), so
+        return_layers='all' still yields a per-thickness stack. Set adf_layers
+        explicitly to decouple the two — e.g. return_layers=None with
+        adf_layers='all' gives a depth-resolved ADF at zero wavefunction cost.
+        -1 -> exit wave only; 'all' -> every slice; a list/int -> those slices.
+        """
+        spec = self.adf_layers
+        if spec is None:
+            return list(stored_layers)
+        if isinstance(spec, (int, np.integer)) and int(spec) == -1:
+            return [self.nz - 1]
+        if isinstance(spec, str):
+            if spec == "all":
+                return list(range(self.nz))
+            raise ValueError("adf_layers must be None, -1, 'all', or a list of layer indices")
+        requested = [int(spec)] if isinstance(spec, (int, np.integer)) else [int(i) for i in spec]
+        layers = sorted(set(i + self.nz if i < 0 else i for i in requested))
+        invalid = [i for i in layers if i < 0 or i >= self.nz]
+        if invalid:
+            raise ValueError(
+                f"adf_layers contains out-of-range layers {invalid}; valid range is [0, {self.nz - 1}]")
+        return layers
+
     def _cache_key_stored_layers(self, stored_layers):
         """Return layer selection for cache-key partitioning, if needed."""
         if list(stored_layers) in ([self.nz - 1], list(range(self.nz))):
@@ -176,6 +202,7 @@ class MultisliceCalculator:
         prism=False,
         kth=1,
         ADF=False,
+        adf_layers=None,
         skip_vacuum=False,
         **kwargs,
     ):
@@ -267,6 +294,7 @@ class MultisliceCalculator:
         self.prism = prism             # False or int: PRISM algorithm implementation, this denotes how many fourier components are used in kx ky
         self.kth = kth                 # int: Δk=1/L, nk = nx. huge systems waste RAM with ultra-fine Δk. this sparsifies the exitwaves via ::kth
         self.ADF = ADF                 # bool or (inner,outer): allows on-the-fly calculation of the ADF signal
+        self.adf_layers = adf_layers   # None/-1/'all'/list: thicknesses at which to accumulate ADF, independent of return_layers
         self.skip_vacuum = skip_vacuum # bool: if True, we skip propagation of probes in locations where there are no atoms
 
         # Set up spatial grids
@@ -435,6 +463,14 @@ class MultisliceCalculator:
         self._return_layers = _return_layers
         self._stored_layers = _stored_layers
         self.returns_wavefunctions = bool(_return_layers)
+        # ADF thicknesses are chosen independently of the returned wavefunctions.
+        # We propagate-and-capture the union, but only _stored_layers are stored
+        # as wavefunctions; ADF-only layers are reduced to the detector signal
+        # and discarded, so a depth-resolved ADF costs no wavefunction memory.
+        _adf_layers = self._resolve_adf_layers(_stored_layers) if self.ADF else []
+        _captured_layers = sorted(set(_stored_layers) | set(_adf_layers)) or [self.nz - 1]
+        self._adf_layers = _adf_layers
+        self._captured_layers = _captured_layers
         cache_key = self._generate_cache_key(self.trajectory, self.aperture, self.voltage_eV,
                                              self.slice_thickness, self.sampling, self.probe_positions,
                                              self.base_probe.spatial_decoherence, self.base_probe.temporal_decoherence,
@@ -472,9 +508,14 @@ class MultisliceCalculator:
             len(self.base_probe.probe_positions) if self.prism
             else self.n_probes
         )
-        # Storage: [probe, frame, x, y, layer] - matches WFData expected format
+        # Storage: [probe, frame, x, y, layer] - matches WFData expected format.
+        # n_layers sizes the wavefunction storage (return layers only); the ADF
+        # stack is sized separately by the (possibly larger) adf layer set.
         self.n_layers = len(_stored_layers)
-        stores_exit_wave_only = self._stores_exit_wave_only(_stored_layers)
+        self.n_adf_layers = len(_adf_layers)
+        # Capture every layer that either output needs; exit-only fast path only
+        # when neither return nor ADF asks for interior slices.
+        stores_exit_wave_only = self._stores_exit_wave_only(_captured_layers)
         if self.returns_wavefunctions:
             fd_nx = self.nx; fd_ny = self.ny; fd_npt = self.n_probes
             if self.use_memmap:
@@ -506,9 +547,10 @@ class MultisliceCalculator:
             self.ADF = HAADFData(wf)
             self.ADFmask = b.absolute(self.ADF.getMask(**kwargs))  # HAADFData infers mask dtype from _wf_array dtype, but we'll absolute^2 later
             self.ADFindex = b.astype(b.absolute(self.ADF._wf_array[0, :, :, 0, 0, 0, 0]), int)
-            # One ADF image per stored layer (thickness). Collapsed to a plain 2D
-            # image below when only one thickness is stored (the default).
-            self.ADF._array = b.zeros((self.n_layers,) + tuple(self.ADFindex.shape),
+            # One ADF image per adf layer (thickness), chosen independently of
+            # the returned wavefunctions. Collapsed to a plain 2D image below
+            # when only one thickness is requested (the default).
+            self.ADF._array = b.zeros((self.n_adf_layers,) + tuple(self.ADFindex.shape),
                                       dtype=self.complex_dtype)
 
         # If tacaw.npy already exists and no per-frame cache will be written,
@@ -542,16 +584,19 @@ class MultisliceCalculator:
                         atom_type_names.append(atom_type)
 
                 # frame_data should always be shaped: n_probes,nkx,nky,n_layers,1 (idk why there's a trailing 1)
+                # A cached frame holds only the stored (return) layers, so it can
+                # only serve the ADF when every adf layer is among them; otherwise
+                # recompute so the extra ADF thicknesses are captured live.
+                adf_from_cache_ok = (not self.ADF) or set(_adf_layers).issubset(_stored_layers)
                 cache_exists, frame_data = checkCache(
                     cache_file,
-                    self.cache_wavefunctions and not force_rerun,
+                    self.cache_wavefunctions and not force_rerun and adf_from_cache_ok,
                     b,
                     expected_n_layers=self.n_layers,
                     expected_n_probes=expected_cache_rows,
                 )
                 if cache_exists and not self.prism and self.ADF:
-                    # Keep the layer axis so each stored thickness gets its own
-                    # ADF image (previously all layers were summed together).
+                    # Reduce each adf layer from its position among the stored layers.
                     intensities = b.einsum('pxyln,xy->pl', b.absolute(frame_data)**2, self.ADFmask)
                     n_copies = frame_data.shape[0] // n_scan_positions
                     intensities = b.sum(
@@ -561,8 +606,9 @@ class MultisliceCalculator:
                         ),
                         axis=0,
                     )
-                    for out_idx in range(self.n_layers):
-                        self.ADF._array[out_idx] += intensities[self.ADFindex, out_idx]
+                    for a_idx, layer in enumerate(_adf_layers):
+                        s_idx = _stored_layers.index(layer)
+                        self.ADF._array[a_idx] += intensities[self.ADFindex, s_idx]
 
                 if not os.path.exists(self.output_dir / f"kx.npy"):
                     np.save(self.output_dir / f"kx.npy", to_numpy(self.kxs[self.keep_kxs_indices]))
@@ -635,20 +681,25 @@ class MultisliceCalculator:
                             progress=show_progress,
                             onthefly=True,
                             store_all_slices=not stores_exit_wave_only,
-                            stored_slice_indices=_stored_layers if not stores_exit_wave_only else None,
+                            stored_slice_indices=_captured_layers if not stores_exit_wave_only else None,
                         )  # [l],p,x,y indices
 
                         # expand out to fixed l,p,x,y indices
                         exit_waves_single = b.expand_dims(exit_waves_single, 0) if len(exit_waves_single.shape) == 3 else exit_waves_single
-                        # FFT and load into frame_data - always use 'axes' and let backend handle conversion
-                        for out_idx, _ in enumerate(_stored_layers):
-                            exit_waves_k = b.fft2(exit_waves_single[out_idx, :, :, :], axes=(-2, -1))  # l,p,x,y --> p,x,y
+                        # Route each captured layer to wavefunction storage (return
+                        # layers) and/or the ADF detector (adf layers). ADF-only
+                        # layers are reduced to the detector signal here and never
+                        # stored, so a depth-resolved ADF costs no wavefunction RAM.
+                        store_pos = {layer: i for i, layer in enumerate(_stored_layers)}
+                        adf_pos = {layer: i for i, layer in enumerate(_adf_layers)}
+                        for cap_idx, layer in enumerate(_captured_layers):
+                            exit_waves_k = b.fft2(exit_waves_single[cap_idx, :, :, :], axes=(-2, -1))  # l,p,x,y --> p,x,y
                             diffraction_patterns = b.fftshift(exit_waves_k, axes=(-2, -1))
                             diffraction_patterns = diffraction_patterns[:, self.keep_kxs_indices, :][:, :, self.keep_kys_indices]*self.kth**2
                             if self.use_memmap:
                                 diffraction_patterns = to_numpy(diffraction_patterns)
                                 selected = to_numpy(selected)
-                            if self.returns_wavefunctions or self.cache_wavefunctions or self.prism:
+                            if (self.returns_wavefunctions or self.cache_wavefunctions or self.prism) and layer in store_pos:
                                 # Propagation flattens (copy, selected-probe) in
                                 # copy-major order. Expand the selected position
                                 # indices across copies to preserve that layout.
@@ -658,19 +709,18 @@ class MultisliceCalculator:
                                 else:
                                     selected_rows = b.reshape(
                                         b.arange(nc)[:, None] * npt + selected[None, :], (-1,))
-                                frame_data[selected_rows, :, :, out_idx, 0] = diffraction_patterns
-                            if self.ADF and not self.prism:
+                                frame_data[selected_rows, :, :, store_pos[layer], 0] = diffraction_patterns
+                            if self.ADF and not self.prism and layer in adf_pos:
                                 intensities = b.einsum('pxy,xy->p', b.absolute(diffraction_patterns[:, :, :])**2, self.ADFmask)
                                 # The batch is (nc, npt) flattened as c*npt+p, so
                                 # fold the decoherence copies back and sum them
-                                # (the detector sees the incoherent sum). The old
-                                # zip() truncated to the first copy only.
+                                # (the detector sees the incoherent sum).
                                 n_copies = intensities.shape[0] // len(selected)
                                 if n_copies > 1:
                                     intensities = b.sum(
                                         b.reshape(intensities, (n_copies, len(selected))), axis=0)
                                 for i, pp in zip(intensities, selected):
-                                    self.ADF._array[out_idx][self.ADFindex == pp] += i
+                                    self.ADF._array[adf_pos[layer]][self.ADFindex == pp] += i
                         if pbar2 is not None:
                             pbar2.update(len(selected))
 
@@ -767,14 +817,14 @@ class MultisliceCalculator:
             # Each stored wave is captured after that slice's transmission, so
             # its depth is the far boundary (i + 1) * dz, not the slice's
             # coordinate sample zs[i]. The final layer must equal specimen lz.
-            # collapse to a plain 2D image when a single thickness was stored.
+            # collapse to a plain 2D image when a single thickness was requested.
             dz = float(self.lz) / len(self.zs)
             self.ADF.thicknesses = (
-                np.asarray(_stored_layers, dtype=float) + 1.0) * dz
+                np.asarray(_adf_layers, dtype=float) + 1.0) * dz
             self.ADF._set_dimensions(
-                self.ADF.thicknesses if self.n_layers > 1 else None,
+                self.ADF.thicknesses if self.n_adf_layers > 1 else None,
                 layer_name='thickness', layer_units='Å')
-            if self.n_layers == 1:
+            if self.n_adf_layers == 1:
                 self.ADF._array = self.ADF._array[0]
             return wf_data, self.ADF
 
