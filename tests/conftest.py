@@ -10,6 +10,7 @@ error when it is absent.
 """
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 
 import numpy as np
@@ -19,6 +20,26 @@ from pyslice.backend import NumpyBackend, TORCH_AVAILABLE
 
 if TORCH_AVAILABLE:
     from pyslice.backend import TorchBackend
+
+
+# ---------------------------------------------------------------------------
+# Backend selection for the suite
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _pin_numpy_backend(monkeypatch):
+    """Pin ``make_backend()`` to NumPy for the suite unless overridden.
+
+    ``MultisliceCalculator`` (and other engine code) call ``make_backend()``,
+    which selects the torch-CPU backend whenever torch is installed. Torch's
+    per-FFT-call overhead makes the small-grid calculator/HAADF *logic* tests
+    ~50x slower than NumPy for no extra coverage — the torch FFT path itself is
+    exercised by the parity tests, which build ``TorchBackend`` directly and are
+    unaffected by this env var. Run e.g. ``PYSLICE_BACKEND=torch pytest`` to
+    exercise the calculators on torch instead.
+    """
+    if "PYSLICE_BACKEND" not in os.environ:
+        monkeypatch.setenv("PYSLICE_BACKEND", "numpy")
 
 
 # ---------------------------------------------------------------------------
