@@ -719,19 +719,22 @@ class MultisliceCalculator:
         time_array = np.arange(self.n_frames) * self.trajectory.timestep  # Time array in ps
         layer_array = np.array(_return_layers)
 
-        # Package results
-        array = b.zeros(
-            (
-                self.n_probes,
-                self.n_frames,
-                len(self.keep_kxs_indices),
-                len(self.keep_kys_indices),
-                len(_return_layers),
-            ),
-            dtype=self.complex_dtype,
-        )
+        # Package results # TWP 20260717 what is this doing?? all it seems to do for me is double my ram usage
+        #array = b.zeros(
+        #    (
+        #        self.n_probes,
+        #        self.n_frames,
+        #        len(self.keep_kxs_indices),
+        #        len(self.keep_kys_indices),
+        #        len(_return_layers),
+        #    ),
+        #    dtype=self.complex_dtype,
+        #)
+
         if self.returns_wavefunctions:
             array = self.wavefunction_data
+        else:
+            array = None
         wf_data = WFData(
             probe_positions=self.probe_positions,
             probe_xs=self.probe_xs,
