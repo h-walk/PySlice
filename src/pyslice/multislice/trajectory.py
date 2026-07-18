@@ -420,7 +420,7 @@ class Trajectory:
             timestep=self.timestep
         )
 
-    def plot(self, timestep=0, view='3d', alpha=0.6, size=20):
+    def plot(self, timestep=0, view='3d', alpha=0.6, size=20, filename = None):
         """
         Plot atomic positions.
 
@@ -499,7 +499,11 @@ class Trajectory:
             ax.set_aspect('equal')
 
         plt.tight_layout()
-        plt.show()
+
+        if filename is not None:
+            plt.savefig(filename)
+        else:
+            plt.show()
 
 
     def rotate_to(self, direction: Tuple[int, int, int]) -> 'Trajectory':
