@@ -18,24 +18,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install core deps + package (no ovito/backport deps)
+      - name: Install package + test deps
         run: |
           python -m pip install --upgrade pip
-          # Runtime deps PySlice actually needs at import time. We deliberately
-          # skip the pyproject `ovito` / `dataclasses` / `pathlib` entries: ovito
-          # needs a special index and the latter two are stdlib now (their PyPI
-          # backports break on modern Python). Install the package itself with
-          # --no-deps so those do not get pulled in.
-          pip install numpy scipy ase h5py matplotlib tqdm typing-extensions pytest
-          pip install -e . --no-deps
-      - name: Run test suite
-        run: pytest -ra
+          # ovito is an optional extra (own index) and orb-models is heavy, so we
+          # install neither here; their tests skip. The remaining runtime deps
+          # are all plain PyPI, so a normal editable install just works.
+          pip install -e .
+          pip install pytest pytest-cov
+      - name: Run test suite with coverage
+        run: pytest -ra --cov=pyslice --cov-report=term-missing --cov-report=xml
 
   # Optional: same suite with the Torch backend so the np/torch parity tests run.
   torch:
@@ -45,11 +43,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install core deps + CPU Torch + package
+      - name: Install package + CPU Torch + test deps
         run: |
           python -m pip install --upgrade pip
-          pip install numpy scipy ase h5py matplotlib tqdm typing-extensions pytest
+          pip install -e .
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -e . --no-deps
+          pip install pytest pytest-cov
       - name: Run test suite (Torch backend available)
         run: pytest -ra
