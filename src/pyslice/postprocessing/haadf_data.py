@@ -189,15 +189,22 @@ class HAADFData(PySliceSerial, Signal):
             ax.imshow(to_numpy(b.absolute(preview_data)), cmap="inferno")
             plt.show()
 
-        nc,_,_,nt,_,_,nl = self._wf_array.shape
-        wf_intensity = b.absolute(self._wf_array)**2 ; mask = b.absolute(mask)
+        nc,nx,ny,nt,_,_,nl = self._wf_array.shape
+
+        # TWP 20260717 loop time (or frozen phonon configs) should cost cut ram usage by nt (reasonably 10-100x) and a for loop (over reasonably 10-100) shouldn't kill us
+        stack = b.zeros((nl,nx,ny)) ; mask = b.absolute(mask)
+        for t in range(nt):
+            wf_intensity = b.absolute(self._wf_array[:,:,:,t,:,:,:])**2
+            stack += b.einsum('cxykql,kq->lxy', wf_intensity, mask) / nt
+
+        #wf_intensity = b.absolute(self._wf_array)**2 ; mask = b.absolute(mask)
         # One ADF image per stored layer (thickness). Only the exit wave
         # physically reaches the detector, but storing several layers gives ADF
         # vs thickness. Collapse to a plain 2D image for the single-layer case.
         # Probe copies already carry normalised intensity weights; sum them,
         # then average only over time. Dividing by nc would make the signal
         # vanish as more quadrature points are used.
-        stack = b.einsum('cxytkql,kq->lxy', wf_intensity, mask) / nt
+        #stack = b.einsum('cxytkql,kq->lxy', wf_intensity, mask) / nt
         self._array = stack[0] if nl == 1 else stack
 
         xs_np = to_numpy(self._xs)
