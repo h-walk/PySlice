@@ -521,7 +521,11 @@ np.savez(
             from ovito.io import import_file
             from ovito.modifiers import UnwrapTrajectoriesModifier
         except ImportError as exc:
-            raise ImportError("OVITO is not available. Please install ovito package.") from exc
+            raise ImportError(
+                "OVITO is required to read this trajectory but is not installed. "
+                "Install the optional reader with `pip install PySlice[io]` "
+                "(OVITO is served from its own package index)."
+            ) from exc
 
         # Import file
         try:

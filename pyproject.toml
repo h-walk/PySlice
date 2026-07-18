@@ -6,20 +6,23 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "ase",
-    "dataclasses",
     "matplotlib",
     "numpy",
-    "ovito",
-    "pathlib",
     "scipy",
     "tqdm",
     "typing-extensions",
     "h5py",
 ]
+# `dataclasses` and `pathlib` were listed here but are the standard library on
+# every supported Python (>=3.12); their PyPI backports are for EOL Pythons and
+# the `pathlib` backport actively breaks modern interpreters. `ovito` needs a
+# non-PyPI index and is imported lazily (only when reading OVITO/LAMMPS files),
+# so it is an optional extra rather than a hard install-time dependency.
 
 [project.optional-dependencies]
 fast = ["torch","torchvision"]
-test = []
+io = ["ovito"]                     # OVITO/LAMMPS trajectory reader (special index)
+test = ["pytest", "pytest-cov"]
 md = ["orb-models>=0.6.0; python_version < '3.13'"]
 
 [project.urls]
@@ -60,3 +63,20 @@ markers = [
     "multigpu: requires >1 visible CUDA device",
     "slow: excluded from the fast default run",
 ]
+
+[tool.coverage.run]
+source = ["pyslice"]
+branch = true
+# Demos are never collected; the data/ helpers are vendored scripts, not package
+# code exercised by the suite.
+omit = [
+    "*/pyslice/data/NOTsignal.py",
+    "*/pyslice/data/pyslice_serial.py",
+    "*/pyslice/backend_old.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+# A hard `fail_under` gate is intentionally deferred until the regression suite
+# is split per-module and coverage can be measured and ratcheted (see
+# /workspaces/run/pyslice_test_overhaul_2026-07-18.md).
