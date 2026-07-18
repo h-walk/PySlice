@@ -43,3 +43,20 @@ include = [
     "/INSTALL.md",
     "/pyproject.toml",
 ]
+
+[tool.pytest.ini_options]
+# Collect only the `test_*.py` suites in tests/. The legacy `NN_name.py`
+# eyeball scripts do not match this pattern and are therefore never imported
+# (they call plt.show() and load multi-GB inputs — unfit for CI).
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-ra --strict-markers"
+markers = [
+    "torch: requires the optional PyTorch backend",
+    "md: requires an MD engine (orb-models)",
+    "ovito: requires the optional OVITO reader",
+    "multigpu: requires >1 visible CUDA device",
+    "slow: excluded from the fast default run",
+]
