@@ -393,7 +393,7 @@ class MultisliceCalculator:
         )
         self.output_dir = Path("psi_data/" + ("torch" if not isinstance(b, NumpyBackend) else "numpy") + "_"+self.cache_key)
 
-    def preview_probes(self):
+    def preview_probes(self,filename=None):
         b = self._backend
         positions = self.trajectory.positions[0]
         atom_types = self.trajectory.atom_types
@@ -415,7 +415,10 @@ class MultisliceCalculator:
         ax.set_xlabel("x ($\\AA$)"); ax.set_ylabel("y ($\\AA$)")
         pp = np.asarray(self.base_probe.probe_positions)
         ax.scatter(pp[:, 0], pp[:, 1], c='r')
-        plt.show()
+        if filename is not None:
+            plt.savefig(filename)
+        else:
+            plt.show()
 
     #@profile
     def run(self, force_rerun: bool = False) -> WFData:
