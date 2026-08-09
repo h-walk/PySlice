@@ -191,6 +191,7 @@ class Probe:
             defer_shifts: bool = False,
             stay_reciprocal: bool = False,
             crop_reciprocal=False,
+            tilt = (0,0),
     ):
         self._backend = make_backend(device) if backend is None else backend
         backend = self._backend
@@ -235,6 +236,7 @@ class Probe:
         self.temporal_decoherence = None
         self.spatial_decoherence  = None
         self.gaussianVOA          = gaussianVOA
+        self.tilt = tilt
 
         self.stay_reciprocal = stay_reciprocal
         self.crop_reciprocal = crop_reciprocal
@@ -257,7 +259,7 @@ class Probe:
             # (1, 1, nx, ny) so decoherence expansion and applyShifts work
             # uniformly on (nc, npt, nx, ny) shaped arrays throughout.
             single = self.generate_single_probe(
-                mrad, self.wavelength, gaussianVOA, preview=preview)
+                mrad, self.wavelength, gaussianVOA, preview=preview, tilt=self.tilt)
             self._array = (
                 single[None, None, :, :]
                 * backend.ones((1, 1), dtype=backend.complex_dtype)[:, :, None, None]
@@ -280,7 +282,7 @@ class Probe:
     # ------------------------------------------------------------------
 
     def generate_single_probe(self, mrad: float, wavelength_val,
-                              gaussianVOA: float, preview: bool = False):
+                              gaussianVOA: float, preview: bool = False, tilt=(0,0)):
         """
         Build one probe wavefunction centred at the grid origin.
 
@@ -315,9 +317,11 @@ class Probe:
         reciprocal = b.zeros((nx, ny), dtype=b.complex_dtype)
         # Convergence semi-angle in Å⁻¹: α_rad = mrad·1e-3, r = α_rad / λ
         radius = (mrad * 1e-3) / wavelength_val
+        tilt_x = tilt[0]*1e-3 / wavelength_val
+        tilt_y = tilt[1]*1e-3 / wavelength_val
 
         kx_grid, ky_grid = b.meshgrid(kxs, kys, indexing='ij')
-        radii = b.sqrt(kx_grid**2 + ky_grid**2)
+        radii = b.sqrt((kx_grid-tilt_x)**2 + (ky_grid-tilt_y)**2)
 
         if gaussianVOA == 0:
             # Hard aperture: mask all k-vectors inside the convergence radius.
