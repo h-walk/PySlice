@@ -558,7 +558,10 @@ class TorchBackend(Backend):
     def asarray(self, arraylike: Any, dtype=None, device=None) -> Any:
         dtype = self._normalize_dtype(dtype)
         if dtype is None:
-            dtype = self.float_dtype
+            if "complex" in str(arraylike.dtype):
+                dtype = self.complex_dtype
+            else:
+                dtype = self.float_dtype
         if device is None:
             device = self.device
         input_dtype = getattr(arraylike, 'dtype', None)
