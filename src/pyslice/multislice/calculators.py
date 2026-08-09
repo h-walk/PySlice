@@ -153,14 +153,15 @@ class MultisliceCalculator:
     def setup(
         self,
         trajectory: Trajectory,
-        aperture: float = 0.0,
-        voltage_eV: float = 60e3,
+        aperture: float = 0.0,                                          # units: mrad
+        voltage_eV: float = 60e3,                                       # units: eV
         defocus: float = 0.0,
-        slice_thickness: float = 0.5,
-        sampling: float = 0.1,
+        slice_thickness: float = 0.5,                                   # units: Angstrom
+        sampling: float = 0.1,                                          # units: Angstrom
         probe_xs: Optional[List[float]] = None,
         probe_ys: Optional[List[float]] = None,
         probe_positions: Optional[List[Tuple[float, float]]] = None,
+        probe_tilt: Optional[tuple[float]] = (0,0),                     # units: mrad
         batch_size: int = 10,
         save_path: Optional[Path] = None,
         cleanup_temp_files: bool = False,
@@ -244,6 +245,7 @@ class MultisliceCalculator:
         self.probe_xs = probe_xs
         self.probe_ys = probe_ys
         self.probe_positions = probe_positions
+        self.probe_tilt = probe_tilt
         self.save_path = save_path
         self.cleanup_temp_files = cleanup_temp_files
         if slice_axis != 2:
@@ -357,7 +359,7 @@ class MultisliceCalculator:
             # would make Probe rebuild an outer-product grid, so an explicit
             # position list would be silently replaced by that grid and desync
             # n_probes from the actually-simulated probes (shape-mismatch crash).
-            self.base_probe = Probe(xs, ys, self.aperture, self.voltage_eV, backend=b, probe_positions=self.probe_positions, cropping=self.probe_cropping, defer_shifts=True)
+            self.base_probe = Probe(xs, ys, self.aperture, self.voltage_eV, backend=b, probe_positions=self.probe_positions, cropping=self.probe_cropping, defer_shifts=True, tilt = self.probe_tilt)
 
         defocus_values = to_numpy(self.defocus)
         if np.ndim(defocus_values) != 0:

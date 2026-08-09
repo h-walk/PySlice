@@ -533,7 +533,11 @@ class TorchBackend(Backend):
 
         if device_spec is None:
             if torch.cuda.is_available():
+                devices = os.environ.get('CUDA_VISIBLE_DEVICES', '')
+                #if len(devices)==0 or len(devices.split(","))==1: # not specified, or single-gpu specified
                 device = torch.device('cuda')
+                #else:
+                #    device = [ torch.device('cuda:'+d) for d in devices.split(",") ]
             elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
                 device = torch.device('mps')
             else:
@@ -558,7 +562,10 @@ class TorchBackend(Backend):
     def asarray(self, arraylike: Any, dtype=None, device=None) -> Any:
         dtype = self._normalize_dtype(dtype)
         if dtype is None:
-            dtype = self.float_dtype
+            if hasattr(arraylike,"dtype") and "complex" in str(arraylike.dtype):
+                dtype = self.complex_dtype
+            else:
+                dtype = self.float_dtype
         if device is None:
             device = self.device
         input_dtype = getattr(arraylike, 'dtype', None)
