@@ -13,15 +13,14 @@ A GPU-accelerated Python package for simulating vibrational electron energy loss
 ## Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/h-walk/PySlice.git
-cd PySlice
+# Clone the repository ("git clone https://github.com/h-walk/PySlice" will work, but here we exclude the tests folder so as to greatly increase download speed and reduce disk usage)
+git clone --filter=blob:none --no-checkout https://github.com/h-walk/PySlice
+cd PySlice/
+git sparse-checkout set --no-cone '/*' '!/tests/*'
+git checkout main
 
 # Install with pip. -e = editable mode. [fast] will install torch (technically optional, but provides extreme speed improvements).
 pip install -e ".[fast]"
-
-# Install OVITO for trajectory loading
-pip install ovito --find-links https://www.ovito.org/pip/
 
 # Or using uv (recommended)
 uv sync
@@ -33,6 +32,57 @@ uv sync --python 3.12 --extra fast --extra md
 ```
 
 ## Quick Start
+
+### Basic Multislice: HAADF-STEM Imaging
+
+```python
+from pyslice import Loader,MultisliceCalculator,HAADFData
+import numpy as np
+
+# Load your cif file
+trajectory = Loader("SiO2.cif").load()
+
+# single unit-cell imported, need to tile to create a slab
+trajectory = trajectory.tile_positions([10,10,3])
+
+# "frozen phonon" technique: create many snapshots (or "frames") of atomic configurations, with random (gaussian) atomic displacements to emulate atomic motion
+trajectory = trajectory.generate_random_displacements(10, 0.3, seed=0) # 10 snapshots, 0.3 sigma value for gaussian, random seed for reproducible results
+
+# Define probe scan grid over a 2x2 unit-cell grid
+a = trajectory.box_matrix[0,0] ; b = trajectory.box_matrix[1,1]
+xs = np.linspace(a,3*a,18,endpoint=False) ; ys = np.linspace(b,3*b,16,endpoint=False)
+
+# MultisliceCalculator object is responsible for slicing / wave propagation
+calc = MultisliceCalculator()
+calc.setup(trajectory, aperture=30, voltage_eV=100e3, sampling=0.1, probe_xs=xs, probe_ys=ys) # aperture is in mrad, voltage is in eV
+wf_data = calc.run()
+
+# Exit waves are stored as a WFData object, which has an "array" attribute, with probe,snapshot,kx,ky,layer indices. But we don't want the user to need to sift through these on their own. instead, we provide standardized functions/objects for things like ADF (coherent summation of the exit wave around an annular detector). 
+haadf = HAADFData(wf_data)
+haadf.calculateADF(inner_mrad=60, outer_mrad=200)
+haadf.plot(filename="quartz_ADF.png")
+```
+
+### Basic Multislice: TEM Diffraction
+
+```python
+from pyslice import Loader,MultisliceCalculator
+import numpy as np
+
+# Load your trajectory
+trajectory = Loader( "hBN.lammpstrj",atom_mapping={1: "B", 2: "N"}).load() # You can also load atomic positions from LAMMPS dump files, but you must specify the mapping of atom types
+    
+# Optional cropping in time and space
+trajectory = trajectory.get_random_timesteps(5).slice_positions([0,20],[0,20])
+
+calc = MultisliceCalculator()
+# for TEM diffraction, we'll use a parallel beam (aperture = 0 mrad). If you opt for an ultra-small convergence angle, check that the probe is contained within the simulation bounds. e.g: calc.setup(trajectory, aperture=5, voltage_eV=100e3, sampling=0.1) ; calc.base_probe.plot(filename="5mrad.png")
+calc.setup(trajectory, aperture=0, voltage_eV=100e3, sampling=0.1)
+wf_data = calc.run()
+
+wf_data.plot(powerscaling=0.125)  # Diffraction pattern
+
+```
 
 ### Full TACAW Pipeline (MD → Multislice → Phonon Dispersion)
 
@@ -65,62 +115,12 @@ from pyslice.io.loader import Loader
 
 trajectory = Loader(
     "hBN.lammpstrj",
-    timestep=0.005,  # ps
+    timestep=0.005,  # If using your lammps trajectory for TACAW, it is important to specify the timestep size, or your frequencies may be incorrect!
     atom_mapping={1: "B", 2: "N"}
 ).load()
 
 # ASE trajectory or CIF/XYZ file
 trajectory = Loader("silicon.cif").load()
-```
-
-### HAADF-STEM Imaging
-
-```python
-from pyslice import Loader,MultisliceCalculator,HAADFData
-import numpy as np
-
-# Load your trajectory
-trajectory = Loader(
-    "hBN.lammpstrj",
-    timestep=0.005,  # ps
-    atom_mapping={1: "B", 2: "N"}
-).load()
-# Optional cropping in time and space
-trajectory = trajectory.get_random_timesteps(5).slice_positions([0,20],[0,20])
-
-# Define probe scan grid
-xs = np.linspace(5,12,16) ; ys = np.linspace(5,12,16)
-
-calc = MultisliceCalculator()
-calc.setup(trajectory, aperture=30, voltage_eV=100e3, sampling=0.1, probe_xs=xs, probe_ys=ys)
-wf_data = calc.run()
-
-haadf = HAADFData(wf_data)
-haadf.calculateADF(inner_mrad=60, outer_mrad=200)
-haadf.plot()
-```
-
-### TEM Diffraction
-
-```python
-from pyslice import Loader,MultisliceCalculator
-import numpy as np
-
-# Load your trajectory
-trajectory = Loader(
-    "hBN.lammpstrj",
-    timestep=0.005,  # ps
-    atom_mapping={1: "B", 2: "N"}
-).load()
-# Optional cropping in time and space
-trajectory = trajectory.get_random_timesteps(5).slice_positions([0,20],[0,20])
-
-calc = MultisliceCalculator()
-calc.setup(trajectory, aperture=0, voltage_eV=100e3, sampling=0.1)
-wf_data = calc.run()
-
-wf_data.plot(powerscaling=0.125)  # Diffraction pattern
-
 ```
 
 ## Data Flow
