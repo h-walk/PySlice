@@ -123,6 +123,23 @@ trajectory = Loader(
 trajectory = Loader("silicon.cif").load()
 ```
 
+### Tips and Tricks
+Are you running our of memory? We offer a few flags to mitigate this, but first it is important to understand _why_ we are running out of RAM. Fundamentally, there is an exit wave which describes a wave-function, sampled across a grid of points (for a system of length L, discretized to $\delta l$, yielding $L/ \Delta l$ points, for both $x$ and $y$). We also attempt to run the calculation across $P$ probes simultaneously through each of $T$ timesteps (or snapshots), meaning we must store $P \times T \times nx \times ny$ values in memory, just for the exit wave. Holding this all in memory makes post-processing faster (e.g., summation across snapshots for calculation of an ADF image), so we prefer to write to disk if and only if we are required to. 
+
+Below are a list of flags that can be passed to MultisliceCalculator:
+- 'max_kx' and 'max_ky': this will crop your exit wave. $k = 1/ \Delta l$, and while fine-resolution may be required (0.1 $\AA$ by default), high $k$ likely is not. 
+- 'kth': since $\Delta k = 1/L$, large systems may have unnecessarily fine k-space resolution. this will add binning to your exit wave
+- 'loop_probes': while we would prefer to process all probe positions simultaneously, high-res ADF images will easily blow your RAM. this specifies the number of probes to process simultaneously. 
+- 'min_dk': since $\Delta k = 1/L$, large systems may have unnecessarily fine k-space resolution. instead of binning your exit-wave in-post (via 'kth' above), we can also spatially-crop your probe (be cautious of boundary effects!), which will naturally produce a lower-res exit wave. This is effectively propagating a probe through a cropped sub-region of your system.
+- 'use_memmap': while we would prefer to hold everything in memory, we offer the ability to use memmapping to store the large exit wave array on disk instead. this may come with a severe performance reduction however. 
+- 'ADF': in the HAADF example above, we calculated all exit waves (full datacube $P \times T \times kx \ times ky$), then calculated the ADF signal afterwards (coherent summation around the annular detector: a ring in k-space). We can instead calculate ADF on the fly, meaning we don't need to store the full exit wave (it is effectively "compressed" across $kx$ and $ky$). We may still have intermediate datacubes ($P \times kx \ times ky$), but this can be combined with 'loop_probes' if system sizes are particularly large. 
+
+Noticing excessive disk usage? We save caches of the exit waves, which means your script can be re-run and the potentially-expensive multislice steps can be skipped (provided that your atomic configurations, probe positions and run parameters (accelerating voltage, convergence angle, etc) are the same). This is particularly useful if you have long runs (large systems, high-res ADF with many probes, and/or TACAW with many timesteps): if your run is interrupted, it can be resumed from where it left off. 
+
+To turn off or adjust the level of caching, use the following:
+- 'cache_wavefunctions': defaults to True, but can be set to False to avoid disk consumption.
+- 'cache_potentials': defaults to False, but can be set to True to further expedite resumption
+
 ## Data Flow
 
 ```
