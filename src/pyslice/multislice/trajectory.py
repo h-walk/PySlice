@@ -309,7 +309,7 @@ class Trajectory:
             raise ValueError(f"Filter {' AND '.join(ranges_desc)} resulted in 0 atoms")
 
         if not reset_coordinate_system:
-            new_box = self.box_matrix.copy()
+            origin_shift *=  0
 
         # Create the cropped trajectory even when every atom survives. A range
         # request changes the coordinate origin and box; returning self in that
