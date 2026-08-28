@@ -244,7 +244,8 @@ class Trajectory:
     def slice_positions(self,
                        x_range: Optional[Tuple[float, float]] = None,
                        y_range: Optional[Tuple[float, float]] = None,
-                       z_range: Optional[Tuple[float, float]] = None) -> 'Trajectory':
+                       z_range: Optional[Tuple[float, float]] = None,
+                       reset_coordinate_system=True) -> 'Trajectory':
         """
         Slice trajectory to include only atoms within specified spatial ranges.
 
@@ -306,6 +307,9 @@ class Trajectory:
             if y_range: ranges_desc.append(f"Y∈[{y_range[0]:.2f},{y_range[1]:.2f}]")
             if z_range: ranges_desc.append(f"Z∈[{z_range[0]:.2f},{z_range[1]:.2f}]")
             raise ValueError(f"Filter {' AND '.join(ranges_desc)} resulted in 0 atoms")
+
+        if not reset_coordinate_system:
+            new_box = self.box_matrix.copy()
 
         # Create the cropped trajectory even when every atom survives. A range
         # request changes the coordinate origin and box; returning self in that
