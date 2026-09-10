@@ -37,6 +37,150 @@ def _fake_wf_data(tmp_path, array=None):
     )
 
 
+def test_bose_correction_factor_has_signed_gain_loss_balance():
+    frequencies = np.array([-30.0, 0.0, 30.0])
+
+    factors = bose_correction_factor(frequencies, temperature_K=300.0)
+
+    assert factors[0] < 1.0
+    assert factors[1] == pytest.approx(1.0)
+    assert factors[2] > 1.0
+
+    beta_e = 30.0 * 4.135667696e-3 / (8.617333262145e-5 * 300.0)
+    assert factors[2] / factors[0] == pytest.approx(np.exp(beta_e))
+
+
+def test_tacaw_apply_bose_scales_intensity_by_frequency(tmp_path):
+    array = _fake_wf_data(tmp_path / "seed")._array
+    raw = TACAWData(_fake_wf_data(tmp_path / "raw", array=array))
+    corrected = TACAWData(
+        _fake_wf_data(tmp_path / "corrected", array=array),
+        temperature_K=300.0,
+        apply_bose=True,
+    )
+
+    folded = TACAWData(_fake_wf_data(tmp_path / "folded", array=array))
+    folded.fold_gain_loss()
+    factors = bose_correction_factor(raw.frequencies, temperature_K=300.0)
+    expected = folded.array * factors[None, :, None, None]
+
+    np.testing.assert_allclose(corrected.array, expected, rtol=1e-10, atol=1e-10)
+    assert corrected.temperature_K == 300.0
+    assert corrected.gain_loss_folded is True
+    assert corrected.apply_bose is True
+
+
+def test_gain_loss_fold_averages_q_omega_inversion_pairs(tmp_path):
+    tacaw = TACAWData(_fake_wf_data(tmp_path))
+    rng = np.random.default_rng(456)
+    original = rng.random(tacaw.array.shape)
+    tacaw._array = original.copy()
+
+    tacaw.fold_gain_loss()
+
+    kx_indices = np.array([np.argmin(np.abs(tacaw.kxs + value))
+                           for value in tacaw.kxs])
+    ky_indices = np.array([np.argmin(np.abs(tacaw.kys + value))
+                           for value in tacaw.kys])
+    for positive_index in np.flatnonzero(tacaw.frequencies > 0):
+        frequency = tacaw.frequencies[positive_index]
+        negative_index = int(np.argmin(np.abs(tacaw.frequencies + frequency)))
+        negative = tacaw.array[:, negative_index, :, :]
+        positive_at_minus_q = tacaw.array[:, positive_index, :, :]
+        positive_at_minus_q = positive_at_minus_q[:, kx_indices, :][:, :, ky_indices]
+        np.testing.assert_allclose(negative, positive_at_minus_q)
+
+    assert np.sum(tacaw.array) == pytest.approx(np.sum(original))
+    assert tacaw.gain_loss_folded is True
+
+
+def test_bose_corrected_gain_side_obeys_detailed_balance(tmp_path):
+    temperature = 300.0
+    tacaw = TACAWData(
+        _fake_wf_data(tmp_path),
+        temperature_K=temperature,
+        apply_bose=True,
+    )
+    positive_index = int(np.flatnonzero(tacaw.frequencies > 0)[0])
+    frequency = tacaw.frequencies[positive_index]
+    negative_index = int(np.argmin(np.abs(tacaw.frequencies + frequency)))
+    kx_indices = np.array([np.argmin(np.abs(tacaw.kxs + value))
+                           for value in tacaw.kxs])
+    ky_indices = np.array([np.argmin(np.abs(tacaw.kys + value))
+                           for value in tacaw.kys])
+    loss_at_minus_q = tacaw.array[:, positive_index, :, :]
+    loss_at_minus_q = loss_at_minus_q[:, kx_indices, :][:, :, ky_indices]
+    beta_e = frequency * 4.135667696e-3 / (8.617333262145e-5 * temperature)
+
+    np.testing.assert_allclose(
+        tacaw.array[:, negative_index, :, :],
+        np.exp(-beta_e) * loss_at_minus_q,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+
+def test_bose_correction_requires_intensity_data(tmp_path):
+    tacaw = TACAWData(_fake_wf_data(tmp_path), keep_complex=True)
+
+    with pytest.raises(ValueError, match="intensity data"):
+        tacaw.apply_bose_correction(300.0)
+
+
+def test_masked_spectrum_accepts_torch_backed_tacaw_array(tmp_path):
+    torch = pytest.importorskip("torch")
+
+    tacaw = TACAWData(_fake_wf_data(tmp_path))
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        dtype = torch.float64
+    elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        device = torch.device("mps")
+        dtype = torch.float32
+    else:
+        device = torch.device("cpu")
+        dtype = torch.float64
+
+    tacaw._backend = TorchBackend(str(device))
+    tacaw._array = torch.as_tensor(tacaw.array, dtype=dtype, device=device)
+    tacaw.fold_gain_loss()
+
+    spectrum = tacaw.masked_spectrum(
+        {"shape": "round", "center": (0.0, 0.0), "radius": 1.25},
+        probe_index=None,
+    )
+
+    assert spectrum.shape == (len(tacaw.frequencies),)
+    assert np.all(np.isfinite(spectrum))
+
+
+def test_gain_loss_fold_handles_even_fft_nyquist_bins(tmp_path):
+    rng = np.random.default_rng(789)
+    array = (
+        rng.normal(size=(2, 8, 4, 4, 1))
+        + 1j * rng.normal(size=(2, 8, 4, 4, 1))
+    ).astype(np.complex128)
+    tacaw = TACAWData(_fake_wf_data(tmp_path, array=array))
+    tacaw._kxs = np.fft.fftshift(np.fft.fftfreq(4, d=0.25))
+    tacaw._kys = np.fft.fftshift(np.fft.fftfreq(4, d=0.5))
+    original_sum = np.sum(tacaw.array)
+
+    tacaw.fold_gain_loss()
+
+    assert np.sum(tacaw.array) == pytest.approx(original_sum)
+    first_result = tacaw.array.copy()
+    tacaw.fold_gain_loss()
+    np.testing.assert_array_equal(tacaw.array, first_result)
+
+
+def test_gain_loss_fold_rejects_asymmetric_momentum_grid(tmp_path):
+    tacaw = TACAWData(_fake_wf_data(tmp_path))
+    tacaw._kxs = np.array([-1.0, 0.0, 2.0])
+
+    with pytest.raises(ValueError, match="not closed under inversion"):
+        tacaw.fold_gain_loss()
+
+
 def test_dispersion_returns_all_frequency_bins(tmp_path):
     tacaw = TACAWData(_fake_wf_data(tmp_path))
     kx_path = np.linspace(-0.5, 0.5, 5)
@@ -170,6 +314,17 @@ def test_plot_transposes_named_xy_pattern_and_crops_extent(tmp_path, monkeypatch
     assert rendered.shape == (3, 2)
     np.testing.assert_array_equal(rendered, values[1:, 1:].T)
     close_figure(fig)
+
+
+def test_bose_correction_rejects_invalid_or_repeated_application(tmp_path):
+    tacaw = TACAWData(_fake_wf_data(tmp_path))
+
+    with pytest.raises(ValueError, match="positive"):
+        tacaw.apply_bose_correction(0.0)
+
+    tacaw.apply_bose_correction(300.0)
+    with pytest.raises(ValueError, match="already"):
+        tacaw.apply_bose_correction(300.0)
 
 
 def test_mask_and_dispersion_validate_scientific_coordinates(tmp_path):

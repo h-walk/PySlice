@@ -21,8 +21,12 @@ K_B_EV_PER_K = 8.617333262145e-5
 THZ_TO_EV = 4.135667696e-3
 
 
+
+
 def bose_correction_factor(frequencies_THz, temperature_K: float) -> np.ndarray:
     """Return beta E / (1 - exp(-beta E)) for TACAW gain/loss balance."""
+    if temperature_K is None or temperature_K <= 0:
+        raise ValueError("temperature_K must be positive")
     frequencies = np.asarray(to_numpy(frequencies_THz), dtype=np.float64)
     beta_E = frequencies * THZ_TO_EV / (K_B_EV_PER_K * temperature_K)
     beta_E = np.clip(beta_E, -500.0, 500.0)
@@ -30,6 +34,63 @@ def bose_correction_factor(frequencies_THz, temperature_K: float) -> np.ndarray:
     nonzero = np.abs(beta_E) > 1e-12
     factor[nonzero] = beta_E[nonzero] / (1.0 - np.exp(-beta_E[nonzero]))
     return factor
+
+
+def _inversion_indices(coordinates, axis_name: str) -> np.ndarray:
+    """Map a shifted FFT coordinate axis onto its inversion partner.
+
+    Ordinary coordinate pairs are matched explicitly. For an even FFT grid,
+    the lone negative Nyquist bin is its own periodic partner.
+    """
+    values = np.asarray(to_numpy(coordinates), dtype=np.float64)
+    if values.ndim != 1 or len(values) == 0:
+        raise ValueError(f"{axis_name} coordinates must be a nonempty one-dimensional array")
+
+    scale = max(1.0, float(np.max(np.abs(values))))
+    atol = 1e-10 * scale
+    indices = np.empty(len(values), dtype=np.int64)
+    unmatched = []
+    for index, value in enumerate(values):
+        matches = np.flatnonzero(np.isclose(values, -value, rtol=1e-9, atol=atol))
+        if len(matches) == 1:
+            indices[index] = int(matches[0])
+        elif len(matches) == 0:
+            unmatched.append(index)
+        else:
+            raise ValueError(f"{axis_name} coordinates contain duplicate inversion partners")
+
+    # fftshift(fftfreq(N)) has one unpaired negative Nyquist coordinate when N
+    # is even. It represents the same periodic sample as positive Nyquist.
+    if unmatched:
+        differences = np.diff(values)
+        uniform_shifted_grid = (
+            len(values) > 1
+            and np.all(differences > 0.0)
+            and np.allclose(differences, differences[0], rtol=1e-9, atol=atol)
+            and np.any(np.isclose(values, 0.0, rtol=0.0, atol=atol))
+            and np.isclose(
+                abs(values[unmatched[0]]),
+                values[-1] + differences[0],
+                rtol=1e-9,
+                atol=atol,
+            )
+        )
+        if (
+            len(unmatched) == 1
+            and unmatched[0] == int(np.argmin(values))
+            and values[unmatched[0]] < 0.0
+            and uniform_shifted_grid
+        ):
+            indices[unmatched[0]] = unmatched[0]
+        else:
+            raise ValueError(
+                f"{axis_name} coordinates are not closed under inversion; "
+                "folding requires every coordinate q to have a -q partner"
+            )
+
+    if not np.array_equal(indices[indices], np.arange(len(values))):
+        raise ValueError(f"{axis_name} inversion mapping is not self-consistent")
+    return indices
 
 
 class TACAWData(PySliceSerial, Signal):
@@ -48,6 +109,8 @@ class TACAWData(PySliceSerial, Signal):
         'exclude_attrs': ['probe', '_wf_array', '_backend'],
         'force_datasets': ['_array', 'probe_positions', '_kxs', '_kys',
                            '_xs', '_ys', '_time', '_layer', '_frequencies'],
+        'default_attrs': {'gain_loss_folded': False, 'apply_bose': False,
+                          'temperature_K': None},
     }
 
     def __init__(self,
@@ -59,6 +122,27 @@ class TACAWData(PySliceSerial, Signal):
                  force_rerun: bool = False,
                  temperature_K: Optional[float] = None,
                  apply_bose: bool = False) -> None:
+        """Transform time-domain exit waves into TACAW frequency data.
+
+        Args:
+            wf_data: Wavefunctions shaped ``(probe, time, kx, ky, layer)``.
+            layer_index: Index within ``wf_data.layer`` to transform. Defaults
+                to the last returned layer.
+            keep_complex: Keep complex FFT amplitudes instead of converting to
+                intensity ``abs(FFT)**2``.
+            chunkFFT: Loop over reciprocal x values to reduce peak FFT memory.
+            chunk_size_time: Optional time-window length. It must be positive
+                and divide the number of saved frames exactly.
+            force_rerun: Ignore a compatible ``tacaw.npy`` cache.
+            temperature_K: Sample temperature used by the Bose correction.
+            apply_bose: Apply detailed-balance weighting after the FFT. This
+                first folds gain/loss partners and requires ``temperature_K``
+                and ``keep_complex=False``.
+
+        Notes:
+            Frequencies are in THz. Negative bins represent gain and positive
+            bins represent loss under PySlice's FFT convention.
+        """
 
         self._backend = wf_data._backend
 
@@ -78,14 +162,16 @@ class TACAWData(PySliceSerial, Signal):
         self.chunk_size_time = chunk_size_time
         self.force_rerun   = force_rerun
         self.temperature_K = temperature_K
-        self.apply_bose = apply_bose
+        requested_bose_correction = apply_bose
+        self.apply_bose = False
+        self.gain_loss_folded = False
 
         self._wf_array   = wf_data._array
         self._array      = None
         self._frequencies = None
 
         self._fft_from_wf_data(layer_index)
-        if self.apply_bose:
+        if requested_bose_correction:
             self.apply_bose_correction(self.temperature_K)
 
         if Dimensions is not None:
@@ -108,6 +194,7 @@ class TACAWData(PySliceSerial, Signal):
                     'aperture_mrad': float(self.probe.mrad),
                     'probe_positions': [list(p) for p in self.probe_positions],
                     'temperature_K': None if self.temperature_K is None else float(self.temperature_K),
+                    'gain_loss_folded': bool(self.gain_loss_folded),
                     'bose_corrected': bool(self.apply_bose),
                 },
             })
@@ -118,18 +205,29 @@ class TACAWData(PySliceSerial, Signal):
     # ------------------------------------------------------------------
 
     @property
-    def kxs(self)         -> np.ndarray: return to_numpy(self._kxs)
+    def kxs(self) -> np.ndarray:
+        """Reciprocal x coordinates in inverse Angstroms."""
+        return to_numpy(self._kxs)
     @property
-    def kys(self)         -> np.ndarray: return to_numpy(self._kys)
+    def kys(self) -> np.ndarray:
+        """Reciprocal y coordinates in inverse Angstroms."""
+        return to_numpy(self._kys)
     @property
-    def xs(self)          -> np.ndarray: return to_numpy(self._xs)
+    def xs(self) -> np.ndarray:
+        """Real-space x coordinates in Angstroms."""
+        return to_numpy(self._xs)
     @property
-    def ys(self)          -> np.ndarray: return to_numpy(self._ys)
+    def ys(self) -> np.ndarray:
+        """Real-space y coordinates in Angstroms."""
+        return to_numpy(self._ys)
     @property
-    def frequencies(self) -> np.ndarray: return to_numpy(self._frequencies)
+    def frequencies(self) -> np.ndarray:
+        """Signed FFT frequency bins in THz."""
+        return to_numpy(self._frequencies)
 
     @property
     def data(self):
+        """TACAW data converted to a CPU NumPy array."""
         return to_numpy(self._array) if self._array is not None else None
 
     @data.setter
@@ -138,6 +236,7 @@ class TACAWData(PySliceSerial, Signal):
 
     @property
     def intensity(self):
+        """Backend-native TACAW intensity array."""
         return self._array
 
     @intensity.setter
@@ -146,20 +245,86 @@ class TACAWData(PySliceSerial, Signal):
 
     @property
     def array(self):
+        """TACAW data converted to a CPU NumPy array."""
         return to_numpy(self._array) if self._array is not None else None
 
     def apply_bose_correction(self, temperature_K: float):
-        """Apply the detailed-balance Bose factor to an intensity TACAW array."""
+        """Fold classical gain/loss pairs, then apply quantum weighting.
+
+        Before applying ``beta E / (1 - exp(-beta E))``, the classical
+        intensity is averaged under ``I(q, -frequency) = I(-q, frequency)``.
+        The signed weighting then reconstructs the gain side by detailed
+        balance rather than treating it as an independent classical signal.
+
+        Args:
+            temperature_K: Sample temperature in kelvin.
+
+        Returns:
+            This object, after mutating its intensity data and metadata.
+        """
         if temperature_K is None:
             raise ValueError("temperature_K must be provided when apply_bose=True")
+        if temperature_K <= 0:
+            raise ValueError("temperature_K must be positive")
         if self.keep_complex:
             raise ValueError("Bose correction expects intensity data; set keep_complex=False")
+        if self.apply_bose:
+            raise ValueError("Bose correction has already been applied to this object")
 
+        self.fold_gain_loss()
         b = self._backend
         factor = b.asarray(bose_correction_factor(self._frequencies, temperature_K), dtype=self._array.dtype)
         self._array = self._array * factor[None, :, None, None]
         self.temperature_K = temperature_K
         self.apply_bose = True
+        if hasattr(self, "metadata") and self.metadata is not None:
+            self.metadata.Simulation.temperature_K = float(temperature_K)
+            self.metadata.Simulation.gain_loss_folded = True
+            self.metadata.Simulation.bose_corrected = True
+        return self
+
+    def fold_gain_loss(self):
+        """Average classical gain/loss partners before quantum correction.
+
+        Enforces ``I(q, -frequency) = I(-q, frequency)`` by averaging each
+        inversion-related pair. Both signed-frequency halves are retained so
+        a subsequent Bose correction can build the gain side by detailed
+        balance. Pair averaging, rather than summation, preserves total
+        spectral weight and normalization.
+
+        Returns:
+            This object, after mutating its intensity data and metadata.
+        """
+        if self.keep_complex:
+            raise ValueError("Gain/loss folding expects intensity data; set keep_complex=False")
+        if self.apply_bose:
+            raise ValueError("Gain/loss folding must be applied before the Bose correction")
+        if getattr(self, "gain_loss_folded", False):
+            return self
+
+        expected_shape = (
+            len(self._frequencies), len(self._kxs), len(self._kys)
+        )
+        if tuple(self._array.shape[1:]) != expected_shape:
+            raise ValueError(
+                "TACAW array frequency/kx/ky dimensions do not match its coordinates"
+            )
+
+        frequency_indices = _inversion_indices(self._frequencies, "frequency")
+        kx_indices = _inversion_indices(self._kxs, "kx")
+        ky_indices = _inversion_indices(self._kys, "ky")
+
+        b = self._backend
+        frequency_indices = b.asarray(frequency_indices, dtype=int)
+        kx_indices = b.asarray(kx_indices, dtype=int)
+        ky_indices = b.asarray(ky_indices, dtype=int)
+        partner = self._array[:, frequency_indices, :, :]
+        partner = partner[:, :, kx_indices, :]
+        partner = partner[:, :, :, ky_indices]
+        self._array = 0.5 * (self._array + partner)
+        self.gain_loss_folded = True
+        if hasattr(self, "metadata") and self.metadata is not None:
+            self.metadata.Simulation.gain_loss_folded = True
         return self
 
     # ------------------------------------------------------------------
@@ -261,8 +426,27 @@ class TACAWData(PySliceSerial, Signal):
             np.save(cache_tacaw, to_numpy(self._array))
 
     def fft_from_wf_data(self, layer_index: Optional[int] = None):
-        """Public alias for backward compatibility."""
-        self._fft_from_wf_data(layer_index)
+        """Recompute TACAW data from the stored wavefunctions.
+
+        Args:
+            layer_index: Index within the stored layer axis. Defaults to the
+                final returned layer.
+
+        Notes:
+            This compatibility method mutates the object and returns ``None``.
+        """
+        previous_force = self.force_rerun
+        try:
+            self.force_rerun = True
+            self._array = None
+            self.gain_loss_folded = False
+            self.apply_bose = False
+            self._fft_from_wf_data(layer_index)
+            if hasattr(self, "metadata") and self.metadata is not None:
+                self.metadata.Simulation.gain_loss_folded = False
+                self.metadata.Simulation.bose_corrected = False
+        finally:
+            self.force_rerun = previous_force
 
     # ------------------------------------------------------------------
     # Analysis methods
