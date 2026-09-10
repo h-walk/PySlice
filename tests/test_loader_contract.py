@@ -18,6 +18,17 @@ def _trajectory():
     )
 
 
+def test_loader_cache_manifest_invalidates_changed_source(tmp_path):
+    source = tmp_path / "trajectory.dump"
+    source.write_text("first")
+    loader = Loader(source, timestep=0.01, atom_mapping={1: "Si"})
+    loader._save_to_cache(_trajectory())
+
+    assert loader._load_from_cache() is not None
+    source.write_text("changed source contents")
+    assert loader._load_from_cache() is None
+
+
 def test_deprecated_loader_mapping_is_applied(tmp_path):
     source = tmp_path / "trajectory.dump"
     source.write_text("placeholder")

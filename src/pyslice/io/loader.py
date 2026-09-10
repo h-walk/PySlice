@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import warnings
+import hashlib
 from tqdm import tqdm
 from typing import Optional, Dict, Union
 
@@ -16,6 +17,7 @@ from ..multislice.potentials import get_z_from_element
 
 logger = logging.getLogger(__name__)
 
+LOADER_CACHE_SCHEMA_VERSION = 2
 
 class Loader:
     """Load a file or ASE object into the internal ``Trajectory`` representation.
@@ -147,9 +149,28 @@ class Loader:
             'positions': cache_base.with_suffix(cache_base.suffix + '.positions.npy'),
             'velocities': cache_base.with_suffix(cache_base.suffix + '.velocities.npy'),
             'atom_types': cache_base.with_suffix(cache_base.suffix + '.atom_types.npy'),
-            'box_matrix': cache_base.with_suffix(cache_base.suffix + '.box_matrix.npy')
+            'box_matrix': cache_base.with_suffix(cache_base.suffix + '.box_matrix.npy'),
+            'metadata': cache_base.with_suffix(cache_base.suffix + '.cache.json'),
         }
 
+    def _cache_metadata(self) -> dict:
+        """Return source and parser metadata required for safe cache reuse."""
+        stat = self.filepath.stat()
+        digest = hashlib.sha256()
+        with self.filepath.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return {
+            "schema": LOADER_CACHE_SCHEMA_VERSION,
+            "source": str(self.filepath.resolve()),
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "sha256": digest.hexdigest(),
+            "atom_mapping": None if self.atomic_numbers is None else {
+                str(key): value for key, value in self.atomic_numbers.items()
+            },
+            "ovitokwargs": self.ovitokwargs,
+        }
 
     def _load_from_cache(self) -> Optional[Trajectory]:
         """Try to load trajectory from cached .npy files."""
@@ -160,6 +181,11 @@ class Loader:
 
         try:
             logger.info(f"Loading from cache for {self.filepath.name}")
+
+            metadata = json.loads(cache_files['metadata'].read_text())
+            if metadata != self._cache_metadata():
+                logger.info("Ignoring stale trajectory cache: source or parser settings changed")
+                return None
 
             pos = np.load(cache_files['positions'])
             vel = np.load(cache_files['velocities'])
@@ -195,6 +221,9 @@ class Loader:
         np.save(cache_files['velocities'], trajectory.velocities)
         np.save(cache_files['atom_types'], trajectory.atom_types)
         np.save(cache_files['box_matrix'], trajectory.box_matrix)
+        cache_files['metadata'].write_text(
+            json.dumps(self._cache_metadata(), indent=2, sort_keys=True)
+        )
 
     def load(self) -> Trajectory:
         """Load structure/trajectory from file or ASE Atoms object and return as Trajectory."""

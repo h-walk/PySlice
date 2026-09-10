@@ -146,6 +146,34 @@ def test_setup_defocus_rejects_prism_path():
         )
 
 
+def test_cache_key_hashes_all_frames_and_coordinate_components():
+    base = _make_tiny_trajectory()
+    positions = np.repeat(base.positions, 2, axis=0)
+    first = Trajectory(
+        atom_types=base.atom_types,
+        positions=positions,
+        velocities=np.zeros_like(positions),
+        box_matrix=base.box_matrix,
+        timestep=base.timestep,
+    )
+    changed = Trajectory(
+        atom_types=base.atom_types,
+        positions=positions.copy(),
+        velocities=np.zeros_like(positions),
+        box_matrix=base.box_matrix,
+        timestep=base.timestep,
+    )
+    changed.positions[1, 0, 2] += 0.25
+
+    calculators = []
+    for trajectory in (first, changed):
+        calc = MultisliceCalculator(force_cpu=True)
+        calc.setup(trajectory, sampling=1.0, slice_thickness=1.0)
+        calculators.append(calc)
+
+    assert calculators[0].cache_key != calculators[1].cache_key
+
+
 def test_reciprocal_coordinates_use_realized_grid_spacing():
     calc = MultisliceCalculator(force_cpu=True)
     calc.setup(_make_tiny_trajectory(), sampling=1.0, slice_thickness=1.0)
@@ -153,6 +181,18 @@ def test_reciprocal_coordinates_use_realized_grid_spacing():
     assert calc.dx == pytest.approx(0.8)
     expected = np.fft.fftshift(np.fft.fftfreq(len(calc.xs), d=calc.dx))
     np.testing.assert_allclose(to_numpy(calc.kxs), expected)
+
+
+def test_save_path_selects_cache_root(tmp_path):
+    calc = MultisliceCalculator(force_cpu=True)
+    calc.setup(
+        _make_tiny_trajectory(),
+        sampling=1.0,
+        slice_thickness=1.0,
+        save_path=tmp_path / "cache-root",
+    )
+
+    assert calc.output_dir.parent == tmp_path / "cache-root"
 
 
 def test_multislice_rejects_unvalidated_slice_axis_and_tilted_cell():

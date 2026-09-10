@@ -1,7 +1,7 @@
 import numpy as np
 from pathlib import Path
 import logging
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Union
 from tqdm import tqdm
 import time, os
 import hashlib
@@ -14,6 +14,18 @@ from .sed import SED
 from pyslice.backend import make_backend, to_numpy, NumpyBackend
 
 logger = logging.getLogger(__name__)
+
+CACHE_SCHEMA_VERSION = 2
+
+
+def _hash_array(array) -> str:
+    """Return a content hash including an array's dtype and shape."""
+    values = np.ascontiguousarray(to_numpy(array))
+    digest = hashlib.sha256()
+    digest.update(str(values.dtype).encode())
+    digest.update(repr(values.shape).encode())
+    digest.update(values.view(np.uint8))
+    return digest.hexdigest()
 
 class MultisliceCalculator:
     """Configure and run multislice electron-scattering simulations.
@@ -53,15 +65,16 @@ class MultisliceCalculator:
     def _generate_cache_key(self, trajectory, aperture, voltage_eV,
                             slice_thickness, sampling, probe_positions,
                             spatial_decoherence, temporal_decoherence,
-                            probe_array=None, stored_layer_indices=None):
+                            probe_array=None, stored_layer_indices=None,
+                            output_options=None):
         """Generate a short hash for parameters that affect wavefunction output."""
-        firstNAtoms = [str(np.round(v, 4)) for v in trajectory.positions[0, :100, 0]]  # first timestep's first 10 atom's x positions
         params = {
-            'firstNAtoms': ",".join(firstNAtoms),  # WHY? prevents the same script from re-using psi_data when positions change
+            'cache_schema': CACHE_SCHEMA_VERSION,
+            'positions_hash': _hash_array(trajectory.positions),
             'n_frames': trajectory.n_frames,
             'n_atoms': trajectory.n_atoms,
-            'box_matrix': trajectory.box_matrix.tolist(),
-            'atom_types': trajectory.atom_types.tolist(),
+            'box_hash': _hash_array(trajectory.box_matrix),
+            'atom_types_hash': _hash_array(trajectory.atom_types),
             'aperture': aperture,
             'voltage_eV': voltage_eV,
             'slice_thickness': slice_thickness,
@@ -76,10 +89,30 @@ class MultisliceCalculator:
         if temporal_decoherence is not None:
             params['temporal_decoherence'] = temporal_decoherence
         if probe_array is not None:
-            probe_np = np.ascontiguousarray(to_numpy(probe_array).ravel()[:1000])
-            params['probe_hash'] = hashlib.md5(probe_np.tobytes()).hexdigest()
+            params['probe_hash'] = _hash_array(probe_array)
+        if output_options is not None:
+            params['output_options'] = output_options
         param_str = str(sorted(params.items()))
-        return hashlib.md5(param_str.encode()).hexdigest()[:12]
+        return hashlib.sha256(param_str.encode()).hexdigest()[:16]
+
+    def _cache_output_dir(self, cache_key: str) -> Path:
+        """Return the cache directory selected by ``save_path`` and backend."""
+        root = Path(self.save_path) if self.save_path is not None else Path("psi_data")
+        backend_name = "numpy" if isinstance(self._backend, NumpyBackend) else "torch"
+        return root / f"{backend_name}_{cache_key}"
+
+    def _cache_output_options(self):
+        """Return output-affecting settings included in cache identity."""
+        return {
+            "slice_axis": int(self.slice_axis),
+            "dx": float(self.dx),
+            "dy": float(self.dy),
+            "max_kx": float(self.max_kx),
+            "max_ky": float(self.max_ky),
+            "min_dk": float(self.min_dk),
+            "prism": False if self.prism is False else int(self.prism),
+            "kth": int(self.kth),
+        }
 
     def _resolve_return_layers(self):
         """Return normalized wavefunction layer indices for the current setup."""
@@ -153,16 +186,25 @@ class MultisliceCalculator:
         Set up multislice simulation.
 
         Args:
-            trajectory: Input trajectory data
-            aperture: Objective aperture semi-angle in mrad
-            voltage_eV: Accelerating voltage in eV
-            defocus: Defocus in Angstroms applied to the probe before propagation
-            slice_thickness: Thickness of each slice in Angstroms
-            sampling: Sampling rate in Angstroms per pixel
-            probe_positions: List of (x,y) probe positions in Angstroms
-            batch_size: Number of frames to process at once
-            save_path: Optional path to save wave function data
-            cleanup_temp_files: Whether to delete temp files after loading
+            trajectory: Atomic positions, cell, elements, and frame spacing.
+            aperture: Probe convergence semi-angle in milliradians. Use zero
+                for a parallel TEM beam.
+            voltage_eV: Electron accelerating voltage in electron-volts.
+            defocus: Scalar defocus in Angstroms applied before probe shifts.
+                Nonzero setup-time defocus is not implemented for PRISM.
+            slice_thickness: Projected-potential slice thickness in Angstroms.
+            sampling: Real-space pixel spacing in Angstroms per pixel.
+            probe_xs: STEM scan coordinates along x in Angstroms. When supplied
+                with ``probe_ys``, their Cartesian product defines the scan.
+            probe_ys: STEM scan coordinates along y in Angstroms.
+            probe_positions: Explicit ``(x, y)`` probe coordinates in
+                Angstroms. Ignored when both scan-coordinate arrays are given.
+            batch_size: Reserved frame-batch size. Frame propagation currently
+                proceeds one frame at a time.
+            save_path: Optional cache root. By default caches are written below
+                ``psi_data`` in the current working directory.
+            cleanup_temp_files: Delete cached frame files after loading them.
+            slice_axis: Propagation axis. Only z (2) is currently supported.
             return_layers: Wavefunction layers to include in the returned
                 ``WFData``. ``-1`` (default) returns the exit wave, ``"all"``
                 returns every layer, and a list such as ``[43, 87, 175]`` returns
@@ -172,7 +214,25 @@ class MultisliceCalculator:
                 optional exit-wave caching.
             cache_wavefunctions: Whether to read/write per-frame wavefunction cache files
             cache_potentials: Whether to read/write potential-slice cache data
-            skip_vacuum: Skip probe positions that are far from atoms when using probe cropping.
+            max_kx: Maximum stored absolute kx in inverse Angstroms.
+            max_ky: Maximum stored absolute ky in inverse Angstroms.
+            use_memmap: Store large intermediate and result arrays as NumPy
+                memory maps instead of keeping them entirely in RAM.
+            loop_probes: False to propagate the complete probe batch together,
+                or a positive integer giving the number of probes per chunk.
+            min_dk: Minimum reciprocal-space sampling in inverse Angstroms. A
+                positive value crops the real-space propagation window.
+            prism: False for ordinary multislice, or a positive integer giving
+                the PRISM Fourier-component count in each reciprocal direction.
+            kth: Keep every kth reciprocal-space sample in returned data.
+            ADF: False to disable on-the-fly integration, True for the default
+                detector, or ``(inner_mrad, outer_mrad)`` for detector angles.
+                In ADF mode, :meth:`run` returns ``(WFData, HAADFData)``.
+            skip_vacuum: Skip probe positions far from atoms when probe
+                cropping is active.
+
+        Returns:
+            None. The configured simulation state is stored on the calculator.
         """
         if kwargs:
             old_api_kwargs = {
@@ -335,10 +395,12 @@ class MultisliceCalculator:
             self.base_probe.spatial_decoherence, self.base_probe.temporal_decoherence,
             self.base_probe._array,
             self._cache_key_stored_layers(self._stored_layers),
+            self._cache_output_options(),
         )
-        self.output_dir = Path("psi_data/" + ("torch" if not isinstance(b, NumpyBackend) else "numpy") + "_"+self.cache_key)
+        self.output_dir = self._cache_output_dir(self.cache_key)
 
     def preview_probes(self):
+        """Plot the first-frame projected potential and configured probe positions."""
         b = self._backend
         positions = self.trajectory.positions[0]
         atom_types = self.trajectory.atom_types
@@ -363,8 +425,11 @@ class MultisliceCalculator:
         plt.show()
 
     #@profile
-    def run(self, force_rerun: bool = False) -> WFData:
+    def run(self, force_rerun: bool = False) -> Union[WFData, Tuple[WFData, "HAADFData"]]:
         """Run propagation and return ``WFData`` or ``(WFData, HAADFData)``.
+
+        Args:
+            force_rerun: Recompute frames even when compatible cache files exist.
 
         Returns:
             ``WFData`` for normal wavefunction-output runs. If ``ADF`` was set
@@ -384,10 +449,11 @@ class MultisliceCalculator:
                                              self.slice_thickness, self.sampling, self.probe_positions,
                                              self.base_probe.spatial_decoherence, self.base_probe.temporal_decoherence,
                                              self.base_probe._array,
-                                             self._cache_key_stored_layers(_stored_layers))
+                                             self._cache_key_stored_layers(_stored_layers),
+                                             self._cache_output_options())
         if self.cache_key != cache_key:
             self.cache_key = cache_key
-        self.output_dir = Path("psi_data/" + ("torch" if b.xp is not np else "numpy") + "_"+cache_key)
+        self.output_dir = self._cache_output_dir(cache_key)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # if probes are over vacuum (e.g. nanoparticles), we don't need to propagate them?
@@ -445,18 +511,10 @@ class MultisliceCalculator:
             self.ADFindex = b.astype(b.absolute(self.ADF._wf_array[0, :, :, 0, 0, 0, 0]), int)
             self.ADF._array = b.zeros(self.ADFindex.shape, dtype=self.complex_dtype)
 
-        # If tacaw.npy already exists and no per-frame cache will be written,
-        # there is nothing to reload or recompute. Pass force_rerun=True to
-        # override after changing probe parameters.
-        skip_all_frames = (
-            not force_rerun
-            and os.path.exists(self.output_dir / "tacaw.npy")
-            and not self.cache_wavefunctions
-            and not self.returns_wavefunctions
-            and not self.ADF
-        )
-        if skip_all_frames:
-            logger.info("tacaw.npy found and no per-frame cache levels active; skipping multislice computation. Pass force_rerun=True to recompute.")
+        # TACAW cache validity depends on analysis settings unavailable here.
+        # TACAWData owns manifest validation; a bare tacaw.npy must never cause
+        # multislice propagation to be skipped.
+        skip_all_frames = False
 
         # Process frames one at a time with tqdm progress tracking
         if not skip_all_frames:
@@ -648,6 +706,7 @@ class MultisliceCalculator:
             backend=b,
             cache_dir=self.output_dir
         )
+        wf_data.source_fingerprint = self.cache_key
 
         # Handle cleanup
         if self.cleanup_temp_files:
@@ -673,6 +732,12 @@ class MultisliceCalculator:
 logging_tracker = []
 
 def checkCache(cache_file, cache_wavefunctions, b, expected_n_layers=None):
+    """Load a compatible cached frame into the active array backend.
+
+    Returns:
+        ``(True, frame_data)`` when a compatible cache is loaded, otherwise
+        ``(False, 0)``.
+    """
     global logging_tracker
     if cache_wavefunctions and cache_file.exists():
         frame_data = np.load(cache_file)
@@ -693,7 +758,14 @@ def checkCache(cache_file, cache_wavefunctions, b, expected_n_layers=None):
 
 
 class SEDCalculator:
+    """Experimental atomic spectral-energy-density calculator.
+
+    Unlike :class:`MultisliceCalculator`, this analyzes atomic displacements
+    directly and does not propagate an electron wavefunction.
+    """
+
     def __init__(self, device=None):
+        """Select the NumPy or PyTorch backend used for the SED calculation."""
         self._backend = make_backend(device)
 
     def setup(self, trajectory: Trajectory, axis: int = 2, abc: list = [1, 1, 1]):
@@ -701,7 +773,9 @@ class SEDCalculator:
         Set up Spectral Energy Density calculation
 
         Args:
-            trajectory: Input trajectory data
+            trajectory: Input molecular-dynamics trajectory.
+            axis: Cartesian axis normal to the two-dimensional reciprocal grid.
+            abc: Real-space lattice spacings in Angstroms along x, y, and z.
         """
         b = self._backend
         self.trajectory = trajectory
@@ -723,7 +797,12 @@ class SEDCalculator:
         self.kvec[:, :, 0] += self.kxs[:, None]
         self.kvec[:, :, 1] += self.kys[None, :]
 
-    def run(self) -> WFData:
+    def run(self) -> None:
+        """Compute x-, y-, and z-polarized SED arrays in place.
+
+        Results are stored on ``Zx``, ``Zy``, ``Zz``, and ``ws``; ``ws`` is in
+        THz when the trajectory timestep is expressed in picoseconds.
+        """
         b = self._backend
         avg = self.trajectory.get_mean_positions()
         disp = self.trajectory.get_distplacements()
@@ -736,6 +815,7 @@ class SEDCalculator:
         self.ws = ws / self.trajectory.timestep
 
     def plot(self, w, filename=None):  # TODO MAYBE "RUN" SHOULD RETURN A TACAW OBJECT SO WE CAN REUSE TACAW PLOTTING/POSTPROCESSING FUNCTIONALITY??
+        """Plot total SED magnitude at the frequency bin nearest ``w`` THz."""
         import matplotlib.pyplot as plt
 
         i = np.argmin(np.absolute(self.ws - w))

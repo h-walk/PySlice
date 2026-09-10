@@ -265,6 +265,32 @@ def test_plot_with_omega_axis_renders_positive_rows_above_zero(tmp_path, monkeyp
     close_figure(fig)
 
 
+def test_tacaw_cache_manifest_separates_intensity_and_complex_data(tmp_path):
+    wf = _fake_wf_data(tmp_path)
+    intensity = TACAWData(wf, keep_complex=False)
+    complex_amplitude = TACAWData(wf, keep_complex=True)
+
+    assert not np.iscomplexobj(intensity.array)
+    assert np.iscomplexobj(complex_amplitude.array)
+
+    import json
+    manifest = json.loads((tmp_path / "tacaw_manifest.json").read_text())
+    assert manifest["keep_complex"] is True
+
+
+def test_tacaw_constructor_reuses_compatible_cache(tmp_path, monkeypatch):
+    wf = _fake_wf_data(tmp_path)
+    first = TACAWData(wf)
+
+    def fail_if_fft_runs(*_args, **_kwargs):
+        raise AssertionError("compatible TACAW cache should bypass FFT")
+
+    monkeypatch.setattr(wf._backend, "fft", fail_if_fft_runs)
+    second = TACAWData(wf)
+
+    assert np.array_equal(second.array, first.array)
+
+
 def test_nearest_frequency_and_rectangular_spectrum_image(tmp_path):
     array = np.ones((6, 8, 3, 4, 1), dtype=np.complex128)
     backend = NumpyBackend()
