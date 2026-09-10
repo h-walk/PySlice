@@ -130,8 +130,85 @@ class Trajectory:
         return np.mean(self.positions, axis=0)
  
     def get_distplacements(self) -> np.ndarray:
-        """Return per-frame displacements from each atom's time-averaged position."""
-        return self.positions[:,:,:]-self.get_mean_positions()[None,:,:]
+        """Deprecated misspelled alias for :meth:`get_displacements`."""
+        return self.get_displacements()
+
+    def get_displacements(self) -> np.ndarray:
+        """Return Cartesian displacement from each atom's arithmetic mean.
+
+        Positions must be unwrapped first when atoms cross periodic boundaries.
+        """
+        return self.positions - self.get_mean_positions()[None, :, :]
+
+    def get_center_of_mass(self) -> np.ndarray:
+        """Return the mass-weighted center of mass of every frame in Angstrom.
+
+        The result has shape ``(n_frames, 3)``.  Positions must be unwrapped
+        before using this method when atoms cross periodic boundaries; otherwise
+        changes of periodic image can masquerade as center-of-mass motion.
+        """
+        masses = self.to_ase(frame=0).get_masses()
+        return np.einsum("fai,a->fi", self.positions, masses) / masses.sum()
+
+    def get_center_of_mass_drift(self, reference_frame: int = 0) -> np.ndarray:
+        """Return each frame's center-of-mass displacement from a reference.
+
+        Args:
+            reference_frame: Frame whose center of mass defines zero drift.
+
+        Returns:
+            Array shaped ``(n_frames, 3)`` in Angstrom.
+        """
+        if not (-self.n_frames <= reference_frame < self.n_frames):
+            raise IndexError(
+                f"reference_frame {reference_frame} out of range for "
+                f"{self.n_frames} frames"
+            )
+        center_of_mass = self.get_center_of_mass()
+        return center_of_mass - center_of_mass[reference_frame]
+
+    def remove_center_of_mass_drift(
+        self,
+        reference_frame: int = 0,
+        correct_velocities: bool = True,
+    ) -> 'Trajectory':
+        """Return a sample-fixed trajectory with rigid COM translation removed.
+
+        A frame-dependent uniform translation is subtracted from every atom, so
+        all intraframe interatomic vectors are preserved to floating-point
+        precision.  When ``correct_velocities`` is true, the mass-weighted COM
+        velocity is also subtracted independently in every frame.
+
+        Positions must be unwrapped first when atoms cross periodic boundaries.
+        This transform is appropriate when absolute sample translation is a
+        nuisance (for example, a solid trajectory used for TACAW), but not when
+        rigid translation is itself part of the intended physics.
+
+        Args:
+            reference_frame: Frame whose center-of-mass position is retained.
+            correct_velocities: Also remove mass-weighted COM velocity.
+
+        Returns:
+            New ``Trajectory`` in the reference frame of the sample.
+        """
+        drift = self.get_center_of_mass_drift(reference_frame=reference_frame)
+        positions = self.positions - drift[:, None, :]
+        velocities = self.velocities.copy()
+
+        if correct_velocities:
+            masses = self.to_ase(frame=0).get_masses()
+            com_velocity = (
+                np.einsum("fai,a->fi", velocities, masses) / masses.sum()
+            )
+            velocities = velocities - com_velocity[:, None, :]
+
+        return Trajectory(
+            atom_types=self.atom_types.copy(),
+            positions=positions,
+            velocities=velocities,
+            box_matrix=self.box_matrix.copy(),
+            timestep=self.timestep,
+        )
 
     def tile_positions(self, repeats: Tuple[int, int, int], trajectories:list = None) -> 'Trajectory':
         """
@@ -580,6 +657,23 @@ class Trajectory:
         )
 
     # returns an ase object
-    def to_ase(self):
-        """Convert the first frame to an ASE ``Atoms`` object."""
-        return Atoms(''.join(self.atom_types), positions=self.positions[0], cell=self.box_matrix, pbc=True)
+    def to_ase(self, frame: int = 0):
+        """Convert one selected frame to an ASE ``Atoms`` object."""
+        if not (-self.n_frames <= frame < self.n_frames):
+            raise IndexError(f"frame {frame} out of range for {self.n_frames} frames")
+        if np.issubdtype(self.atom_types.dtype, np.integer):
+            atoms = Atoms(
+                numbers=self.atom_types,
+                positions=self.positions[frame],
+                cell=self.box_matrix,
+                pbc=True,
+            )
+        else:
+            atoms = Atoms(
+                symbols=self.atom_types.tolist(),
+                positions=self.positions[frame],
+                cell=self.box_matrix,
+                pbc=True,
+            )
+        atoms.set_velocities(self.velocities[frame])
+        return atoms

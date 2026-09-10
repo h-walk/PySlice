@@ -13,7 +13,7 @@ import logging,traceback
 import sys
 import time
 from typing import Optional, Dict, List, TYPE_CHECKING
-from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
+from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
 from ase.md.langevin import Langevin
 from ase.md.nvtberendsen import NVTBerendsen
 from ase.md.npt import NPT
@@ -281,6 +281,9 @@ class MDCalculator:
         timestep: float = 1.0,
         ensemble: str = 'nvt',
         pressure: float = 1.01325,
+        bulk_modulus_GPa: Optional[float] = None,
+        thermostat_timescale: float = 25.0,
+        barostat_timescale: float = 75.0,
         friction: float = 0.02,
         production_ensemble: Optional[str] = None,
         production_friction: Optional[float] = None,
@@ -296,6 +299,7 @@ class MDCalculator:
         output_dir: Optional[Path] = None,
         save_xyz: bool = True,
         rng: Optional[np.random.Generator] = None,
+        overwrite: bool = False,
     ):
         """
         Set up MD simulation.
@@ -305,10 +309,17 @@ class MDCalculator:
             temperature: Target temperature (K)
             timestep: MD timestep (fs)
             ensemble: 'nvt', 'npt', or 'nve' (for equilibration)
-            pressure: Target pressure for NPT (bar)
+            pressure: Target pressure for NPT equilibration (bar). Positive
+                values mean compression.
+            bulk_modulus_GPa: Material bulk modulus used to construct ASE's
+                NPT barostat factor. Required when ensemble='npt'.
+            thermostat_timescale: NPT thermostat timescale (fs).
+            barostat_timescale: NPT barostat timescale (fs).
             friction: Friction coefficient for Langevin thermostat during equilibration (fs^-1)
-            production_ensemble: Ensemble for production run (default: same as equilibration)
-                                 Use 'nve' for noise-free dynamics suitable for TACAW analysis
+            production_ensemble: Fixed-cell ensemble for production: 'nvt' or
+                'nve'. Defaults to the equilibration ensemble, except NPT
+                equilibration defaults to NVT production. NPT production is
+                rejected because PySlice trajectories store one fixed cell.
             production_friction: Friction for production run (default: same as equilibration)
                                  Use lower value (e.g., 0.01) for cleaner dynamics
             production_relaxation_steps: Number of steps to run after switching ensemble but before
@@ -318,21 +329,32 @@ class MDCalculator:
             temp_tolerance: Max deviation of mean temperature from target for equilibration (K)
             energy_threshold: Max relative std dev of energy for equilibration
             min_equilibration_steps: Minimum equilibration steps before checking convergence
-            max_equilibration_steps: Maximum equilibration steps before forcing production
+            max_equilibration_steps: Maximum equilibration steps before the
+                equilibration attempt fails. ``run()`` then aborts without
+                starting production.
             production_steps: Number of production MD steps
             check_interval: Steps between convergence/progress checks
             save_interval: Save trajectory every N steps
             output_dir: Directory for output files
             save_xyz: If True, also save trajectories in XYZ format for OVITO compatibility
             rng: Optional numpy random generator (avoids FAIRChem global seed issue)
+            overwrite: Replace existing equilibration/production outputs. The
+                default is False to prevent accidental loss of prior runs.
         """
         self.atoms = atoms
         self.temperature = temperature
         self.timestep = timestep
-        self.ensemble = ensemble
+        self.ensemble = ensemble.lower()
         self.pressure = pressure
+        self.bulk_modulus_GPa = bulk_modulus_GPa
+        self.thermostat_timescale = thermostat_timescale
+        self.barostat_timescale = barostat_timescale
         self.friction = friction
-        self.production_ensemble = production_ensemble if production_ensemble is not None else ensemble
+        self.production_ensemble = (
+            production_ensemble.lower()
+            if production_ensemble is not None
+            else ("nvt" if self.ensemble == "npt" else self.ensemble)
+        )
         self.production_friction = production_friction if production_friction is not None else friction
         self.production_relaxation_steps = production_relaxation_steps
         self.temp_threshold = temp_threshold
@@ -345,6 +367,31 @@ class MDCalculator:
         self.save_interval = save_interval
         self.output_dir = Path(output_dir) if output_dir is not None else Path.cwd()
         self.save_xyz = save_xyz
+        self.overwrite = overwrite
+
+        if self.ensemble not in {"nvt", "nve", "npt"}:
+            raise ValueError(
+                "ensemble must be one of ['npt', 'nve', 'nvt'], "
+                f"got {self.ensemble!r}"
+            )
+        if self.production_ensemble not in {"nvt", "nve"}:
+            raise ValueError(
+                "production_ensemble must be 'nvt' or 'nve'. NPT is allowed "
+                "for ASE equilibration, but not for a PySlice production trajectory "
+                "because its cell must remain fixed."
+            )
+        if self.ensemble == "npt":
+            if bulk_modulus_GPa is None or not np.isfinite(bulk_modulus_GPa) or bulk_modulus_GPa <= 0:
+                raise ValueError(
+                    "bulk_modulus_GPa must be a positive material-specific value "
+                    "when ensemble='npt'; ASE uses it to construct the barostat factor."
+                )
+            if not np.isfinite(pressure):
+                raise ValueError("pressure must be finite")
+            if not np.isfinite(thermostat_timescale) or thermostat_timescale <= 0:
+                raise ValueError("thermostat_timescale must be positive and finite")
+            if not np.isfinite(barostat_timescale) or barostat_timescale <= 0:
+                raise ValueError("barostat_timescale must be positive and finite")
 
         if rng is None:
             rng = np.random.default_rng()
@@ -352,12 +399,23 @@ class MDCalculator:
 
         self.atoms.calc = self._ensure_calculator()
 
+        if self.ensemble == "npt":
+            try:
+                self.atoms.get_stress()
+            except Exception as exc:
+                raise RuntimeError(
+                    "NPT equilibration requires a calculator that provides stress. "
+                    f"{self.model_name} did not return stress for this structure."
+                ) from exc
+
         # Initialize velocities
         logger.info(f"Initializing velocities for T = {temperature} K")
         MaxwellBoltzmannDistribution(self.atoms, temperature_K=temperature, rng=self.rng)
 
-        # Remove center of mass motion
-        self.atoms.arrays['momenta'] -= self.atoms.arrays['momenta'].mean(axis=0)
+        # Remove rigid translation without distorting relative velocities in
+        # mixed-mass systems.  Preserve the requested kinetic temperature after
+        # removing the three center-of-mass degrees of freedom.
+        Stationary(self.atoms, preserve_temperature=True)
 
         # Set up MD integrator
         logger.info(f"Setting up {ensemble.upper()} ensemble")
@@ -368,6 +426,7 @@ class MDCalculator:
                 timestep * units.fs,
                 temperature_K=temperature,
                 friction=friction / units.fs,
+                fixcm=True,
                 rng=self.rng,
             )
         elif ensemble.lower() == 'npt':
@@ -375,24 +434,16 @@ class MDCalculator:
                 self.atoms,
                 timestep * units.fs,
                 temperature_K=temperature,
-                externalstress=pressure,
-                ttime=25*units.fs,
-                pfactor=75*units.fs**2,
+                externalstress=pressure * units.bar,
+                ttime=thermostat_timescale * units.fs,
+                pfactor=(barostat_timescale * units.fs) ** 2
+                * (bulk_modulus_GPa * units.GPa),
             )
         elif ensemble.lower() == 'nve':
             from ase.md.verlet import VelocityVerlet
             self.dyn = VelocityVerlet(
                 self.atoms,
                 timestep * units.fs,
-            )
-        else:
-            logger.warning(f"Unknown ensemble {ensemble}, using NVT")
-            self.dyn = Langevin(
-                self.atoms,
-                timestep * units.fs,
-                temperature_K=temperature,
-                friction=friction / units.fs,
-                rng=self.rng,
             )
 
     def run_equilibration(
@@ -416,6 +467,13 @@ class MDCalculator:
 
         log_file = self.output_dir / 'equilibration.log'
         traj_file = self.output_dir / 'equilibration.traj'
+        existing = [path for path in (log_file, traj_file) if path.exists()]
+        if existing and not self.overwrite:
+            raise FileExistsError(
+                "Refusing to overwrite existing equilibration output(s): "
+                + ", ".join(map(str, existing))
+                + ". Use a new output_dir or setup(overwrite=True)."
+            )
 
         logger.info("="*70)
         logger.info("EQUILIBRATION PHASE")
@@ -447,7 +505,15 @@ class MDCalculator:
         log.write(f"# Temperature: {self.temperature} K\n")
         log.write(f"# Timestep: {self.timestep} fs\n")
         log.write(f"# Model: {self.model_name}\n")
-        log.write(f"# Step Time(ps) Temp(K) Epot(eV) Ekin(eV) Etot(eV)\n")
+        if self.ensemble == "npt":
+            log.write(f"# Target pressure: {self.pressure} bar\n")
+            log.write(f"# Bulk modulus: {self.bulk_modulus_GPa} GPa\n")
+            log.write(
+                "# Step Time(ps) Temp(K) Epot(eV) Ekin(eV) Etot(eV) "
+                "Volume(A^3) Pressure(bar)\n"
+            )
+        else:
+            log.write(f"# Step Time(ps) Temp(K) Epot(eV) Ekin(eV) Etot(eV)\n")
 
         eq_traj = ASETrajectory(str(traj_file), 'w', self.atoms)
 
@@ -466,7 +532,15 @@ class MDCalculator:
             etot = epot + ekin
 
             # Log data
-            log.write(f"{self.dyn.nsteps} {time_ps:.3f} {temp:.2f} {epot:.6f} {ekin:.6f} {etot:.6f}\n")
+            log.write(
+                f"{self.dyn.nsteps} {time_ps:.3f} {temp:.2f} "
+                f"{epot:.6f} {ekin:.6f} {etot:.6f}"
+            )
+            if self.ensemble == "npt":
+                stress = self.atoms.get_stress(voigt=False)
+                pressure_bar = -np.trace(stress) / (3.0 * units.bar)
+                log.write(f" {self.atoms.get_volume():.6f} {pressure_bar:.6f}")
+            log.write("\n")
             log.flush()
 
             # Update convergence checker
@@ -503,7 +577,7 @@ class MDCalculator:
 
         if not equilibrated:
             logger.warning(f"\n[WARN] Maximum steps ({self.max_equilibration_steps}) reached without full convergence")
-            logger.info(f"Proceeding to production anyway...")
+            logger.warning("Equilibration failed; md.run() will abort before production.")
 
         # Get statistics
         eq_stats = convergence_checker.get_statistics()
@@ -530,11 +604,26 @@ class MDCalculator:
 
         Returns:
             PySlice Trajectory object containing the production MD data
+
         """
+        if self.production_ensemble == "npt":
+            raise ValueError(
+                "NPT production cannot be converted to a PySlice Trajectory because "
+                "the cell changes between frames. Use NPT only for equilibration, "
+                "then switch to NVT or NVE production."
+            )
+
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         log_file = self.output_dir / 'production.log'
         traj_file = self.output_dir / 'production.traj'
+        existing = [path for path in (log_file, traj_file) if path.exists()]
+        if existing and not self.overwrite:
+            raise FileExistsError(
+                "Refusing to overwrite existing production output(s): "
+                + ", ".join(map(str, existing))
+                + ". Use a new output_dir or setup(overwrite=True)."
+            )
 
         logger.info("="*70)
         logger.info("PRODUCTION PHASE")
@@ -551,16 +640,8 @@ class MDCalculator:
                     self.timestep * units.fs,
                     temperature_K=self.temperature,
                     friction=self.production_friction / units.fs,
+                    fixcm=True,
                     rng=self.rng,
-                )
-            elif self.production_ensemble.lower() == 'npt':
-                self.dyn = NPT(
-                    self.atoms,
-                    self.timestep * units.fs,
-                    temperature_K=self.temperature,
-                    externalstress=self.pressure,
-                    ttime=25*units.fs,
-                    pfactor=75*units.fs**2,
                 )
             elif self.production_ensemble.lower() == 'nve':
                 from ase.md.verlet import VelocityVerlet
@@ -569,8 +650,6 @@ class MDCalculator:
                     self.timestep * units.fs,
                 )
                 logger.info("  NVE ensemble: microcanonical dynamics (no thermostat noise)")
-            else:
-                logger.warning(f"Unknown production ensemble {self.production_ensemble}, keeping current")
 
         # Run relaxation period to let thermostat artifacts decay
         if self.production_relaxation_steps > 0:
@@ -678,6 +757,13 @@ class MDCalculator:
 
         logger.info(f"Converted trajectory: {trajectory.n_frames} frames, "
                    f"{trajectory.n_atoms} atoms")
+        com_drift = trajectory.get_center_of_mass_drift()
+        max_com_drift = np.linalg.norm(com_drift, axis=1).max()
+        logger.info(
+            "Center-of-mass drift: final=%s Angstrom, max magnitude=%.6g Angstrom",
+            np.array2string(com_drift[-1], precision=6),
+            max_com_drift,
+        )
 
         return trajectory
 
@@ -690,9 +776,18 @@ class MDCalculator:
 
         Returns:
             PySlice Trajectory object containing the production MD data
+
+        Raises:
+            RuntimeError: If the equilibration heuristic does not pass; in
+                that case production is not started.
         """
         # Run equilibration with convergence criteria
-        self.run_equilibration()
+        equilibrated = self.run_equilibration()
+        if not equilibrated:
+            raise RuntimeError(
+                "MD equilibration criteria were not met; production was not started. "
+                "Inspect equilibration.log and revise or extend the equilibration protocol."
+            )
 
         # Run production and return trajectory
         return self.run_production()
