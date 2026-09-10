@@ -883,19 +883,29 @@ def analyze_md_trajectory(
     output_file: str = 'md_analysis.png'
 ):
     """
-    Analyze MD trajectory and create plots.
+    Plot MD temperature and total-energy diagnostics from a production log.
+
+    Two figures are written. ``output_file`` contains temperature versus time
+    alongside a horizontal temperature histogram with a Gaussian fit. The
+    total-energy figure uses the same layout and is written beside it with an
+    ``_energy`` suffix.
+
+    The Gaussian fits are descriptive and are applied to every finite series;
+    this function does not test whether the trajectory is stationary.
 
     Args:
-        trajectory_file: Trajectory to analyze
+        trajectory_file: Retained for compatibility. RMSD analysis has been
+            removed, so the trajectory file is not read.
         log_file: MD log file with thermodynamic data
-        skip_frames: Analyze every Nth frame
-        output_file: Output plot filename
+        skip_frames: Retained for compatibility; currently unused.
+        output_file: Temperature-plot filename. The energy filename is derived
+            by inserting ``_energy`` before its extension.
     """
     logger.info("Analyzing MD trajectory...")
 
     try:
         # Read log file
-        data = np.loadtxt(log_file, comments='#')
+        data = np.loadtxt(log_file, comments='#', ndmin=2)
         steps = data[:, 0]
         time_ps = data[:, 1]
         temps = data[:, 2]
@@ -909,63 +919,183 @@ def analyze_md_trajectory(
         logger.info(f"<Epot>: {np.mean(epots):.2f} +/- {np.std(epots):.2f} eV")
         logger.info(f"<Etot>: {np.mean(etots):.2f} +/- {np.std(etots):.2f} eV")
 
-        # Calculate structural properties
-        traj = ASETrajectory(trajectory_file, 'r')
-
-        rmsds = []
-        ref_pos = traj[0].get_positions()
-
-        for i, atoms in enumerate(traj[::skip_frames]):
-            pos = atoms.get_positions()
-            rmsd = np.sqrt(np.mean((pos - ref_pos)**2))
-            rmsds.append(rmsd)
-
         # Plotting
         try:
             import matplotlib.pyplot as plt
 
-            fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+            def plot_horizontal_gaussian(
+                ax,
+                values,
+                ylabel,
+                color,
+                fit_color,
+                units,
+                decimals,
+            ):
+                """Plot sample counts and the maximum-likelihood Gaussian."""
+                values = np.asarray(values, dtype=float)
+                mean = float(np.mean(values))
+                sigma = float(np.std(values))
+                _, edges, _ = ax.hist(
+                    values,
+                    bins='fd',
+                    orientation='horizontal',
+                    color=color,
+                    alpha=0.72,
+                    edgecolor='white',
+                    linewidth=0.8,
+                    label=f'MD samples (n={len(values):,})',
+                )
 
-            # Temperature
-            axes[0, 0].plot(time_ps, temps, alpha=0.5)
-            axes[0, 0].axhline(y=np.mean(temps), color='r', linestyle='--',
-                              label=f'Mean: {np.mean(temps):.1f} K')
-            axes[0, 0].set_xlabel('Time (ps)')
-            axes[0, 0].set_ylabel('Temperature (K)')
-            axes[0, 0].set_title('Temperature Evolution')
-            axes[0, 0].legend()
-            axes[0, 0].grid(alpha=0.3)
+                if sigma > 0:
+                    grid = np.linspace(edges[0], edges[-1], 500)
+                    bin_width = float(np.mean(np.diff(edges)))
+                    expected_counts = (
+                        len(values)
+                        * bin_width
+                        * np.exp(-0.5 * ((grid - mean) / sigma) ** 2)
+                        / (sigma * np.sqrt(2 * np.pi))
+                    )
+                    ax.plot(
+                        expected_counts,
+                        grid,
+                        color=fit_color,
+                        linewidth=2.5,
+                        label=(
+                            rf'Gaussian: $\mu={mean:.{decimals}f}$ {units}, '
+                            rf'$\sigma={sigma:.{decimals}f}$ {units}'
+                        ),
+                    )
+                else:
+                    ax.axhline(
+                        mean,
+                        color=fit_color,
+                        linewidth=2.5,
+                        label=rf'Gaussian limit: $\mu={mean:.{decimals}f}$ {units}, $\sigma=0$',
+                    )
 
-            # Energy
-            axes[0, 1].plot(time_ps, epots, label='Potential', alpha=0.7)
-            axes[0, 1].plot(time_ps, ekins, label='Kinetic', alpha=0.7)
-            axes[0, 1].plot(time_ps, etots, label='Total', alpha=0.7)
-            axes[0, 1].set_xlabel('Time (ps)')
-            axes[0, 1].set_ylabel('Energy (eV)')
-            axes[0, 1].set_title('Energy Evolution')
-            axes[0, 1].legend()
-            axes[0, 1].grid(alpha=0.3)
+                ax.axhline(mean, color=fit_color, linestyle='--', linewidth=1.1)
+                ax.set_xlabel('Counts per bin')
+                ax.set_ylabel(ylabel)
+                ax.grid(axis='x', alpha=0.3)
+                ax.legend(frameon=False)
+                return mean, sigma
 
-            # RMSD from initial
-            axes[1, 0].plot(rmsds)
-            axes[1, 0].set_xlabel('Frame')
-            axes[1, 0].set_ylabel('RMSD (A)')
-            axes[1, 0].set_title('RMSD from Initial Structure')
-            axes[1, 0].grid(alpha=0.3)
+            target_temperature = None
+            with open(log_file, encoding='utf-8') as log:
+                for line in log:
+                    if line.startswith('# Temperature:'):
+                        try:
+                            target_temperature = float(line.split(':', 1)[1].split()[0])
+                        except (IndexError, ValueError):
+                            pass
+                        break
 
-            # Energy distribution
-            axes[1, 1].hist(epots, bins=50, alpha=0.7, edgecolor='black')
-            axes[1, 1].axvline(x=np.mean(epots), color='r', linestyle='--',
-                              label=f'Mean: {np.mean(epots):.2f} eV')
-            axes[1, 1].set_xlabel('Potential Energy (eV)')
-            axes[1, 1].set_ylabel('Frequency')
-            axes[1, 1].set_title('Energy Distribution')
-            axes[1, 1].legend()
-            axes[1, 1].grid(alpha=0.3)
+            output_path = Path(output_file)
+            energy_output_path = output_path.with_name(
+                f'{output_path.stem}_energy{output_path.suffix}'
+            )
 
-            plt.tight_layout()
-            plt.savefig(output_file, dpi=300)
-            logger.info(f"Saved analysis plot: {output_file}")
+            # Temperature: complete history and horizontal Gaussian fit.
+            fig, axes = plt.subplots(1, 2, figsize=(13.5, 5.2))
+            temp_mean = float(np.mean(temps))
+            axes[0].plot(time_ps, temps, color='#4C78A8', linewidth=1.0, alpha=0.85)
+            axes[0].axhline(
+                temp_mean,
+                color='#E45756',
+                linestyle='--',
+                linewidth=1.2,
+                label=f'Mean: {temp_mean:.1f} K',
+            )
+            if target_temperature is not None:
+                axes[0].axhline(
+                    target_temperature,
+                    color='#222222',
+                    linestyle=':',
+                    linewidth=1.5,
+                    label=f'Requested: {target_temperature:g} K',
+                )
+            axes[0].set_xlabel('Time (ps)')
+            axes[0].set_ylabel('Temperature (K)')
+            axes[0].set_title('Temperature Evolution')
+            axes[0].legend(frameon=False)
+            axes[0].grid(alpha=0.3)
+
+            plot_horizontal_gaussian(
+                axes[1], temps, 'Temperature (K)', '#4C78A8', '#E45756', 'K', 1
+            )
+            if target_temperature is not None:
+                axes[1].axhline(
+                    target_temperature,
+                    color='#222222',
+                    linestyle=':',
+                    linewidth=1.5,
+                    label=f'Requested: {target_temperature:g} K',
+                )
+                axes[1].legend(frameon=False)
+            axes[1].set_title('Temperature Distribution')
+
+            for label, ax in zip(('a', 'b'), axes):
+                ax.text(
+                    -0.11,
+                    1.04,
+                    label,
+                    transform=ax.transAxes,
+                    fontsize=14,
+                    fontweight='bold',
+                    va='bottom',
+                )
+
+            fig.tight_layout()
+            fig.savefig(output_path, dpi=300, bbox_inches='tight')
+            plt.close(fig)
+            logger.info(f"Saved temperature analysis plot: {output_path}")
+
+            # Total energy: use the same quantity in the history and fit.
+            fig, axes = plt.subplots(1, 2, figsize=(13.5, 5.2))
+            energy_mean = float(np.mean(etots))
+            axes[0].plot(time_ps, etots, color='#59A14F', linewidth=1.0, alpha=0.85)
+            axes[0].axhline(
+                energy_mean,
+                color='#F28E2B',
+                linestyle='--',
+                linewidth=1.2,
+                label=f'Mean: {energy_mean:.4f} eV',
+            )
+            axes[0].set_xlabel('Time (ps)')
+            axes[0].set_ylabel('Total Energy (eV)')
+            axes[0].set_title('Total-Energy Evolution')
+            axes[0].ticklabel_format(style='plain', axis='y', useOffset=False)
+            axes[0].legend(frameon=False)
+            axes[0].grid(alpha=0.3)
+
+            plot_horizontal_gaussian(
+                axes[1],
+                etots,
+                'Total Energy (eV)',
+                '#59A14F',
+                '#F28E2B',
+                'eV',
+                4,
+            )
+            axes[1].set_title('Total-Energy Distribution')
+            axes[1].ticklabel_format(style='plain', axis='y', useOffset=False)
+
+            for label, ax in zip(('a', 'b'), axes):
+                ax.text(
+                    -0.11,
+                    1.04,
+                    label,
+                    transform=ax.transAxes,
+                    fontsize=14,
+                    fontweight='bold',
+                    va='bottom',
+                )
+
+            fig.tight_layout()
+            fig.savefig(energy_output_path, dpi=300, bbox_inches='tight')
+            plt.close(fig)
+            logger.info(f"Saved total-energy analysis plot: {energy_output_path}")
 
         except ImportError:
             logger.warning("Matplotlib not available for plotting")
