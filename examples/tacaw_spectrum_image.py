@@ -22,7 +22,11 @@ os.makedirs("outputs", exist_ok=True)
 # ---------------------------------------------------------------------------
 # 1. Load the trajectory produced by tacaw_pipeline.py
 # ---------------------------------------------------------------------------
-trajectory = Loader("outputs/tacaw_pipeline_md/production.traj").load()
+# tacaw_pipeline.py saves every 5 steps from a 5 fs integrator: 0.025 ps/frame.
+trajectory = Loader(
+    "outputs/tacaw_pipeline_md/production.traj",
+    timestep=0.025,
+).load()
 print(f"Loaded trajectory: {trajectory.n_frames} frames, {trajectory.n_atoms} atoms")
 
 # ---------------------------------------------------------------------------
@@ -52,24 +56,23 @@ print(f"Exit-wave shape: {wf_stem.array.shape}")
 tacaw = TACAWData(wf_stem)
 
 freq_THz = 10.0
-spectrum = tacaw.spectrum_image(freq_THz)
-
-nx, ny = len(probe_xs), len(probe_ys)
-phonon_map = spectrum.reshape(nx, ny)
+selected_THz = tacaw.nearest_frequency(freq_THz)
+phonon_map = tacaw.spectrum_image_reshaped(selected_THz)
 
 fig, ax = plt.subplots(figsize=(5, 4))
 im = ax.imshow(
     phonon_map,
-    extent=[probe_ys[0], probe_ys[-1], probe_xs[-1], probe_xs[0]],
+    extent=[probe_ys[0], probe_ys[-1], probe_xs[0], probe_xs[-1]],
     cmap="inferno",
+    origin="lower",
     aspect="equal",
     interpolation="bicubic",
 )
 ax.set_xlabel("y (Å)")
 ax.set_ylabel("x (Å)")
-ax.set_title(f"Phonon map at {freq_THz} THz")
+ax.set_title(f"Phonon map at {selected_THz:g} THz")
 fig.colorbar(im, ax=ax, label="Intensity (arb. u.)")
 fig.tight_layout()
 fig.savefig("outputs/tacaw_spectrum_image.png", dpi=150)
 plt.close(fig)
-print(f"Saved spectrum image at {freq_THz} THz")
+print(f"Requested {freq_THz:g} THz; saved nearest bin {selected_THz:g} THz")

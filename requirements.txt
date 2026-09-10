@@ -1,8 +1,12 @@
+# Development and example environment only.
+# End users should install PySlice with `python -m pip install -e .` and
+# optional extras such as `.[fast]` or `.[fast,md]`.
+
 # Core scientific computing
 numpy>=1.20.0
 scipy>=1.7.0
 
-# PyTorch for accelerated multislice calculations (required)
+# Optional PyTorch backend for accelerated multislice calculations
 torch>=2.0.0
 
 # Plotting and visualization
@@ -11,16 +15,16 @@ matplotlib>=3.5.0
 # Progress bars and utilities
 tqdm>=4.62.0
 
-# Multislice electron microscopy simulation (abtem-based)
+# Optional abTEM comparison and validation examples (not used by PySlice core)
 abtem>=1.0.6
 ase>=3.26.0
 
 # LAMMPS trajectory loading
 ovito>=3.8.0
 
-# Data structures and typing
-dataclasses
+# Data and typing
 typing-extensions
+h5py
 
 # Jupyter notebook support
 jupyter>=1.0.0

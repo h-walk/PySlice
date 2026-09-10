@@ -13,6 +13,7 @@ No external input files needed — the structure is built from scratch with ASE.
 """
 
 import os
+import numpy as np
 from ase.build import bulk
 from pyslice import ORBMDCalculator, Trajectory, analyze_md_trajectory
 
@@ -48,6 +49,7 @@ md.setup(
     production_steps=200,         # short for demo
     save_interval=2,              # save every 2 steps -> 100 frames
     output_dir="outputs/md_demo",
+    rng=np.random.default_rng(7),
 )
 
 # ---------------------------------------------------------------------------
@@ -140,6 +142,7 @@ md_prod.setup(
     production_steps=5000,              # 5000 * 2 fs = 10 ps total
     save_interval=5,                    # save every 10 fs -> 1000 frames
     output_dir="outputs/md_production",
+    rng=np.random.default_rng(8),
 )
 
 print("\nParameter summary:")

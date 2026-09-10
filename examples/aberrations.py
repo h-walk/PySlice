@@ -18,29 +18,39 @@ Common coefficients:
   C34 — 4-fold astigmatism
 
 Input file:
-    ../tests/inputs/hBN_monolayer.cif
+    tests/inputs/hBN_monolayer.cif
+
+Level: intermediate
+Expected scale: minutes; GPU recommended
+
+The 0.05 Å sampling resolves the full 60–200 mrad detector at 100 keV. The
+example integrates that detector during propagation instead of storing a
+large 4D-STEM cube.
 """
 
 import os
+from pathlib import Path
 import numpy as np
 from pyslice import Loader, MultisliceCalculator, HAADFData
 
 os.makedirs("outputs", exist_ok=True)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # ---------------------------------------------------------------------------
 # 1. Build an hBN frozen-phonon supercell
 # ---------------------------------------------------------------------------
-trajectory = Loader("../tests/inputs/hBN_monolayer.cif").load()
-trajectory = trajectory.tile_positions([10, 10, 1])
+trajectory = Loader(PROJECT_ROOT / "tests/inputs/hBN_monolayer.cif").load()
+trajectory = trajectory.fold_positions_to_orthogonal_box()
+trajectory = trajectory.tile_positions([6, 6, 1])
 trajectory = trajectory.generate_random_displacements(
-    n_displacements=20, sigma=0.1, seed=0,
+    n_displacements=4, sigma=0.1, seed=0,
 )
 print(f"Supercell: {trajectory.n_atoms} atoms, {trajectory.n_frames} frozen-phonon frames")
 
 a = 2.491   # hBN lattice parameter (Å)
 b = 2.157   # inter-row spacing (= a√3/2)
-probe_xs = np.linspace(a, 4 * a, 48)
-probe_ys = np.linspace(b, 4 * b, 48)
+probe_xs = np.linspace(a, 4 * a, 8, endpoint=False)
+probe_ys = np.linspace(b, 4 * b, 8, endpoint=False)
 
 # ---------------------------------------------------------------------------
 # 2. Ideal probe — no aberrations
@@ -52,23 +62,16 @@ print("=" * 60)
 calc = MultisliceCalculator()
 calc.setup(
     trajectory,
-    aperture=30, voltage_eV=100e3, sampling=0.1, slice_thickness=0.5,
+    aperture=30, voltage_eV=100e3, sampling=0.05, slice_thickness=0.5,
     probe_xs=probe_xs, probe_ys=probe_ys,
-    use_memmap=True,
-    loop_probes=500,
+    ADF=(60, 200), return_layers=None,
+    cache_wavefunctions=False,
+    loop_probes=16,
 )
 
-wf_ideal = calc.run()
-
-wf_ideal.plot_reciprocal(
-    "outputs/cbed_ideal.png",
-    whichProbe=0, powerscaling=0.1, extent=[-2, 2, -2, 2],
-)
-
-haadf_ideal = HAADFData(wf_ideal)
-haadf_ideal.calculateADF(inner_mrad=60, outer_mrad=200)
+_, haadf_ideal = calc.run()
 haadf_ideal.plot("outputs/haadf_ideal.png")
-print("Saved ideal CBED + HAADF")
+print("Saved ideal HAADF")
 
 # ---------------------------------------------------------------------------
 # 3. Aberrated probe — spherical aberration + 2-fold astigmatism
@@ -81,10 +84,11 @@ print("=" * 60)
 calc = MultisliceCalculator()
 calc.setup(
     trajectory,
-    aperture=30, voltage_eV=100e3, sampling=0.1, slice_thickness=0.5,
+    aperture=30, voltage_eV=100e3, sampling=0.05, slice_thickness=0.5,
     probe_xs=probe_xs, probe_ys=probe_ys,
-    use_memmap=True,
-    loop_probes=500,
+    ADF=(60, 200), return_layers=None,
+    cache_wavefunctions=False,
+    loop_probes=16,
 )
 
 # Apply aberrations to the probe before running
@@ -93,14 +97,6 @@ calc.base_probe.aberrate({
     "C12": (1e2, 0.0),       # 100 Å 2-fold astigmatism at 0°
 })
 
-wf_aberr = calc.run()
-
-wf_aberr.plot_reciprocal(
-    "outputs/cbed_aberrated.png",
-    whichProbe=0, powerscaling=0.1, extent=[-2, 2, -2, 2],
-)
-
-haadf_aberr = HAADFData(wf_aberr)
-haadf_aberr.calculateADF(inner_mrad=60, outer_mrad=200)
+_, haadf_aberr = calc.run()
 haadf_aberr.plot("outputs/haadf_aberrated.png")
-print("Saved aberrated CBED + HAADF")
+print("Saved aberrated HAADF")

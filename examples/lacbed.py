@@ -15,20 +15,22 @@ Steps:
   4. Plot the LACBED pattern
 
 Input file:
-    ../tests/inputs/Si_truncated.lammpstrj
+    tests/inputs/Si_truncated.lammpstrj
 """
 
 import os
+from pathlib import Path
 import numpy as np
 from pyslice import Loader, MultisliceCalculator
 
 os.makedirs("outputs", exist_ok=True)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # ---------------------------------------------------------------------------
 # 1. Load silicon trajectory and build a thick specimen
 # ---------------------------------------------------------------------------
 trajectory = Loader(
-    "../tests/inputs/Si_truncated.lammpstrj",
+    PROJECT_ROOT / "tests/inputs/Si_truncated.lammpstrj",
     timestep=0.002,
     atom_mapping={1: "Si"},
 ).load()

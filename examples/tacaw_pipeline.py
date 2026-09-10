@@ -42,10 +42,11 @@ md.setup(
     production_relaxation_steps=100,
     temp_tolerance=5.0,        # K — convergence criterion
     temp_threshold=5.0,
-    energy_threshold=0.05,     # eV/atom
+    energy_threshold=0.05,     # dimensionless relative energy standard deviation
     production_steps=500,
     save_interval=5,           # Save every 5 steps → 100 frames
     output_dir="outputs/tacaw_pipeline_md",
+    rng=np.random.default_rng(7),
 )
 
 trajectory = md.run()
@@ -84,9 +85,10 @@ Z = tacaw.spectral_diffraction(15.0)
 tacaw.plot(Z ** 0.1, "kx", "ky", filename="outputs/tacaw_15THz.png")
 print("Saved spectral diffraction at 15 THz")
 
-# Phonon dispersion along X → Gamma → X
+# Phonon dispersion along X → Gamma → X. PySlice reciprocal
+# coordinates are spatial frequencies in cycles/Å, so X is at 1/a here.
 a_si = 5.431  # Si lattice parameter (Å)
-kx_path = np.linspace(-2 * np.pi / a_si, 2 * np.pi / a_si, 200)
+kx_path = np.linspace(-1 / a_si, 1 / a_si, 200)
 ky_path = np.zeros_like(kx_path)
 dispersion = tacaw.dispersion(kx_path, ky_path)
 

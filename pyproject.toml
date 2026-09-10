@@ -1,16 +1,14 @@
 [project]
 name = "PySlice"
 version = "0.1.0"
-description = "PyTorch based package for EELS calculations"
+description = "Multislice electron scattering and TACAW vibrational EELS simulations"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "ase",
-    "dataclasses",
     "matplotlib",
     "numpy",
     "ovito",
-    "pathlib",
     "scipy",
     "tqdm",
     "typing-extensions",
@@ -19,14 +17,13 @@ dependencies = [
 
 [project.optional-dependencies]
 fast = ["torch","torchvision"]
-test = []
+test = ["pytest"]
 md = ["orb-models>=0.6.0; python_version < '3.13'"]
 
 [project.urls]
 Homepage = "https://github.com/h-walk/PySlice"
-
-[tool.setuptools.package-data]
-mypkg = ["data/*.txt", "data/*.json"]
+Documentation = "https://github.com/h-walk/PySlice/tree/main/docs/user-guide"
+Issues = "https://github.com/h-walk/PySlice/issues"
 
 [tool.hatch.build]
 include = [

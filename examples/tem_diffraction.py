@@ -2,8 +2,11 @@
 TEM Diffraction: Structure → Potential → Diffraction Pattern
 =============================================================
 
-The simplest multislice workflow: illuminate a structure with a parallel
-electron beam and compute the diffraction pattern.
+Level: getting started
+Expected scale: seconds to a few minutes; CPU-capable; no downloads
+
+The smallest canonical multislice workflow: illuminate one static structure
+with a parallel electron beam and compute one diffraction pattern.
 
 Along the way we visualize:
   1. The atomic structure (projected along the beam direction)
@@ -41,15 +44,13 @@ unit_cell = Atoms(
     cell=[a, b, c],
     pbc=True,
 )
-atoms = unit_cell * (20, 10, 5)  # 4000 atoms, ~50 × 43 × 17 Å (5 layers)
+atoms = unit_cell * (6, 4, 2)  # 192 atoms, ~15 × 17 × 7 Å
 print(f"Created hBN supercell: {len(atoms)} atoms, "
       f"box = {atoms.cell[0,0]:.1f} × {atoms.cell[1,1]:.1f} Å")
 
-# Load into PySlice and add frozen-phonon displacements
+# Load one static structure. Add frozen-phonon frames only after this baseline
+# calculation works and its sampling/slice-thickness convergence is understood.
 trajectory = Loader(atoms=atoms).load()
-trajectory = trajectory.generate_random_displacements(
-    n_displacements=10, sigma=0.05, seed=0,
-)
 
 # ---------------------------------------------------------------------------
 # 2. Plot the atomic structure (xy projection, first layer only)
@@ -84,8 +85,9 @@ calc.setup(
     trajectory,
     aperture=0,        # Parallel beam (plane wave)
     voltage_eV=100e3,
-    sampling=0.1,
+    sampling=0.2,
     slice_thickness=0.5,
+    cache_wavefunctions=False,
 )
 
 # ---------------------------------------------------------------------------

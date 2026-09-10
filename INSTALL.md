@@ -1,45 +1,72 @@
-# Installation Instructions for TACAW
+# Installing PySlice
 
-## Prerequisites
+The [README](README.md#installation) is the canonical installation guide.
+PySlice requires Python 3.12 or newer; ORB molecular dynamics currently
+requires Python 3.12 specifically.
 
-- Python 3.12 or higher
-- pip package manager
+## Recommended editable installation
 
-## Installation Steps
-
-1. **Create a virtual environment (recommended):**
-   ```bash
-   python3 -m venv tacaw_env
-   source tacaw_env/bin/activate  # On Windows: tacaw_env\Scripts\activate
-   ```
-
-2. **Install required packages:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Special installation notes:**
-
-   - **OVITO**: If you encounter issues installing OVITO via pip, you may need to install it separately:
-     ```bash
-     pip install ovito --find-links https://www.ovito.org/pip/
-     ```
-
-   - **abtem**: The abtem library may require specific installation steps. Check the [abtem documentation](https://abtem.readthedocs.io/en/latest/) for detailed installation instructions.
-
-## Testing the Installation
-
-Run the main simulation script to verify everything is working:
 ```bash
-python3 main.py
+python3.12 -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[fast]"
 ```
+
+Add ORB molecular dynamics support with:
+
+```bash
+python -m pip install -e ".[fast,md]"
+```
+
+For a NumPy-only installation, use `python -m pip install -e .`. To use
+`FAIRChemMDCalculator`, install `fairchem-core` separately.
+
+## Verify the installation
+
+```bash
+PYSLICE_BACKEND=numpy python - <<'PY'
+from ase.build import bulk
+from pyslice import Loader, __version__
+
+trajectory = Loader(
+    atoms=bulk("Si", "diamond", a=5.431, cubic=True)
+).load()
+
+print(f"PySlice {__version__}")
+print(f"{trajectory.n_frames} frame, {trajectory.n_atoms} atoms")
+PY
+```
+
+Expected output includes one frame and eight atoms. This verifies the package,
+ASE conversion, and NumPy path without network access or external data.
+
+Inspect the automatically selected backend with:
+
+```bash
+python - <<'PY'
+from pyslice import make_backend
+b = make_backend()
+print(type(b).__name__, b.device, b.float_dtype, b.complex_dtype)
+PY
+```
+
+`fast` may select Torch CPU when no accelerator is available. Override with
+`PYSLICE_BACKEND=numpy` or `PYSLICE_DEVICE=cpu|cuda|mps`.
 
 ## Troubleshooting
 
-- **OVITO installation issues**: OVITO sometimes requires specific Python versions. Check the [OVITO documentation](https://www.ovito.org/docs/current/python/) for compatibility.
-
-- **abtem installation**: If you encounter abtem issues, refer to the [abtem installation guide](https://abtem.readthedocs.io/en/latest/installation.html).
-
-- **Memory issues**: For large trajectories, you may need to adjust the `batch_size` parameter or limit the number of frames processed.
-
-- **ASE compatibility**: Ensure your ASE version is compatible with abtem. The requirements.txt specifies compatible versions.
+- If `import pyslice` fails while working from a checkout, activate the same
+  environment in which the editable package was installed.
+- If ORB fails to install under Python 3.13, recreate the environment with
+  Python 3.12 and install the `md` extra.
+- For ADF-only runs, use `ADF=(inner, outer)`, `return_layers=None`, and
+  `cache_wavefunctions=False` together. `return_layers=None` alone does not
+  prevent frame caches.
+- `loop_probes` reduces peak device memory, not returned cube size.
+  `max_kx`/`max_ky` reduce stored output, not propagation memory.
+- Use the [scaling guide](docs/user-guide/scaling.md) before a dense scan.
+- Set `PYSLICE_BACKEND=numpy` to force the NumPy backend when diagnosing a
+  PyTorch device problem.
+- See [troubleshooting](docs/user-guide/troubleshooting.md) for warning
+  severity, cache invalidation, and the information to include in a bug report.
