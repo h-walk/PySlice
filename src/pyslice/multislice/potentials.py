@@ -123,8 +123,19 @@ def grid_from_trajectory(trajectory, sampling: float = 0.1,
     Returns:
         xs, ys, zs, lx, ly, lz
     """
-    box = trajectory.box_matrix
+    box = np.asarray(trajectory.box_matrix, dtype=float)
+    if box.shape != (3, 3):
+        raise ValueError("trajectory.box_matrix must have shape (3, 3)")
+    if not np.allclose(box, np.diag(np.diag(box)), atol=1e-10):
+        raise ValueError(
+            "Multislice currently requires an axis-aligned orthogonal cell; "
+            "orthogonalize or fold the trajectory before propagation."
+        )
     lx, ly, lz = box[0, 0], box[1, 1], box[2, 2]
+    if min(lx, ly, lz) <= 0:
+        raise ValueError("trajectory cell lengths must be positive")
+    if sampling <= 0 or slice_thickness <= 0:
+        raise ValueError("sampling and slice_thickness must be positive")
 
     nx = int(lx / sampling) + 1
     ny = int(ly / sampling) + 1

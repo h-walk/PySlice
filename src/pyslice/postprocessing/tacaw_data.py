@@ -170,6 +170,28 @@ class TACAWData(PySliceSerial, Signal):
         """FFT along the time axis to convert wavefunction to TACAW data."""
         b = self._backend
 
+        if self._wf_array is None or self._wf_array.shape[-1] == 0:
+            raise ValueError("TACAW requires at least one returned wavefunction layer")
+        if len(self._time) < 2:
+            raise ValueError("TACAW requires at least two uniformly spaced time samples")
+
+        if layer_index is None:
+            layer_index = len(self._layer) - 1
+        if not (0 <= layer_index < len(self._layer)):
+            raise ValueError(
+                f"layer_index {layer_index} out of range [0, {len(self._layer) - 1}]")
+        self.layer_index = int(layer_index)
+
+        time_values = np.asarray(to_numpy(self._time), dtype=float)
+        time_steps = np.diff(time_values)
+        if time_steps[0] <= 0:
+            raise ValueError(
+                "TACAW requires a positive chronological frame spacing; "
+                "random/frozen configurations are not a time series"
+            )
+        if not np.allclose(time_steps, time_steps[0], rtol=1e-7, atol=1e-12):
+            raise ValueError("TACAW requires uniformly spaced time samples")
+
         cache_tacaw = self.cache_dir / "tacaw.npy"
         cache_freq  = self.cache_dir / "tacaw_freq.npy"
 
@@ -195,16 +217,10 @@ class TACAWData(PySliceSerial, Signal):
                 self._array = b.asarray(cached)
                 return
 
-        if layer_index is None:
-            layer_index = len(self._layer) - 1
-        if not (0 <= layer_index < len(self._layer)):
-            raise ValueError(
-                f"layer_index {layer_index} out of range [0, {len(self._layer) - 1}]")
-
         wf_layer = self._wf_array[:, :, :, :, layer_index]  # p,t,kx,ky
 
         indices = np.linspace(0, len(self._time), self.n_chunks + 1)
-        dt = float(to_numpy(self._time[1] - self._time[0]))
+        dt = float(time_steps[0])
         self._frequencies = b.fftshift(b.fftfreq(fft_len, d=dt))
 
         if self.chunkFFT:

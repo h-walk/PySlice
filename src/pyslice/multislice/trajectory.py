@@ -36,6 +36,16 @@ class Trajectory:
             raise ValueError(f"atom_types must be 1D, got {self.atom_types.ndim}D")
         if self.box_matrix.shape != (3, 3):
             raise ValueError(f"box_matrix must be (3, 3), got {self.box_matrix.shape}")
+        if not np.all(np.isfinite(self.positions)):
+            raise ValueError("positions must contain only finite values")
+        if not np.all(np.isfinite(self.velocities)):
+            raise ValueError("velocities must contain only finite values")
+        if not np.all(np.isfinite(self.box_matrix)):
+            raise ValueError("box_matrix must contain only finite values")
+        if np.linalg.det(self.box_matrix) <= 0:
+            raise ValueError("box_matrix must have positive volume and handedness")
+        if not np.isfinite(self.timestep) or self.timestep < 0:
+            raise ValueError("timestep must be a finite nonnegative value in ps")
 
         # Check consistency
         n_frames_pos, n_atoms_pos = self.positions.shape[:2]
@@ -222,7 +232,9 @@ class Trajectory:
         Returns:
             New Trajectory with tiled positions
         """
-        nx, ny, nz = repeats
+        if len(repeats) != 3 or any(int(value) != value or value < 1 for value in repeats):
+            raise ValueError("repeats must contain three positive integers")
+        nx, ny, nz = map(int, repeats)
         total_tiles = nx * ny * nz
 
         # Generate all tile offsets
@@ -242,8 +254,15 @@ class Trajectory:
         tiled_velocities = []
         tiled_atom_types = []
 
-        if trajectories is None or len(trajectories) != len(offsets):
+        if trajectories is None:
             trajectories = [ self ]*len(offsets)
+        elif len(trajectories) != len(offsets):
+            raise ValueError(
+                f"trajectories must contain one entry per tile ({len(offsets)})"
+            )
+        for trajectory in trajectories:
+            if trajectory.n_frames != self.n_frames:
+                raise ValueError("all tiled trajectories must have the same frame count")
 
         for offset,traj in zip(offsets,trajectories):
             tiled_positions.append(traj.positions + offset)
@@ -275,8 +294,8 @@ class Trajectory:
             return None
 
         min_val, max_val = range_val
-        if min_val > max_val:
-            raise ValueError(f"{axis_name} range invalid: min={min_val} > max={max_val}")
+        if min_val >= max_val:
+            raise ValueError(f"{axis_name} range must satisfy min < max")
 
         return range_val
 
@@ -310,11 +329,12 @@ class Trajectory:
         positions_tilted = np.reshape( ( Rb @ Ra @ pos ).T , (nt,na,3) )
         velocities_tilted = np.reshape( ( Rb @ Ra @ vel ).T , (nt,na,3) )
         
+        rotation = Rb @ Ra
         return Trajectory(
             atom_types=self.atom_types,
             positions=positions_tilted,
             velocities=velocities_tilted,
-            box_matrix=self.box_matrix,
+            box_matrix=self.box_matrix @ rotation.T,
             timestep=self.timestep
         )
 
@@ -344,6 +364,15 @@ class Trajectory:
         # Check if any filtering is needed
         if all(r is None for r in [x_range, y_range, z_range]):
             return self
+
+        if not np.allclose(
+            self.box_matrix,
+            np.diag(np.diag(self.box_matrix)),
+            atol=1e-10,
+        ):
+            raise ValueError(
+                "slice_positions currently requires an axis-aligned orthogonal box"
+            )
 
         # Use mean positions for spatial filtering
         mean_pos = self.get_mean_positions()
@@ -378,13 +407,15 @@ class Trajectory:
             if z_range: ranges_desc.append(f"Z∈[{z_range[0]:.2f},{z_range[1]:.2f}]")
             raise ValueError(f"Filter {' AND '.join(ranges_desc)} resulted in 0 atoms")
 
-        if n_filtered == self.n_atoms:
-            return self
+        new_positions = self.positions[:, atom_mask, :].copy()
+        for axis, coordinate_range in enumerate((x_range, y_range, z_range)):
+            if coordinate_range is not None:
+                new_positions[:, :, axis] -= coordinate_range[0]
 
         # Create filtered trajectory
         return Trajectory(
             atom_types=self.atom_types[atom_mask],
-            positions=self.positions[:, atom_mask, :],
+            positions=new_positions,
             velocities=self.velocities[:, atom_mask, :],
             box_matrix=new_box,
             timestep=self.timestep
@@ -407,6 +438,8 @@ class Trajectory:
         if isinstance(i1, (list, tuple, np.ndarray)):
             return self.select_timesteps(i1)
 
+        if ith < 1:
+            raise ValueError("ith must be a positive integer")
         if i2 is None:
             i2 = len(self.positions)
 
@@ -461,6 +494,8 @@ class Trajectory:
 
     def random_frames(self, N: int, seed: Optional[int] = None) -> 'Trajectory':
         """Return a new trajectory with ``N`` randomly selected frames."""
+        if not isinstance(N, (int, np.integer)) or not (1 <= N <= self.n_frames):
+            raise ValueError(f"N must be between 1 and {self.n_frames}")
         rng = np.random.default_rng(seed)
         indices = rng.choice(self.n_frames, size=N, replace=False)
         return Trajectory(
@@ -468,7 +503,7 @@ class Trajectory:
             positions=self.positions[indices, :, :],
             velocities=self.velocities[indices, :, :],
             box_matrix=self.box_matrix,
-            timestep=self.timestep
+            timestep=0.0
         )
 
     def generate_random_displacements(self, n_displacements, sigma, seed=None):
@@ -479,6 +514,10 @@ class Trajectory:
             sigma: RMS displacement magnitude in Angstroms.
             seed: Optional NumPy random seed.
         """
+        if not isinstance(n_displacements, (int, np.integer)) or n_displacements < 1:
+            raise ValueError("n_displacements must be a positive integer")
+        if sigma < 0:
+            raise ValueError("sigma must be nonnegative")
         rng = np.random.default_rng(seed)
         na = self.n_atoms
         dxyz = rng.normal(0, sigma / np.sqrt(3), size=(n_displacements, na, 3))
@@ -489,7 +528,7 @@ class Trajectory:
             positions=positions,
             velocities=np.broadcast_to(self.velocities[0], (n_displacements, na, 3)).copy(),
             box_matrix=self.box_matrix,
-            timestep=self.timestep
+            timestep=0.0
         )
 
     def plot(self, timestep=0, view='3d', alpha=0.6, size=20):
@@ -653,7 +692,7 @@ class Trajectory:
             positions=rotated_positions,
             velocities=rotated_velocities,
             box_matrix=rotated_box_matrix,
-            timestep=self.timestep
+            timestep=0.0
         )
 
     # returns an ase object

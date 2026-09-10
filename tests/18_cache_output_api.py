@@ -146,6 +146,39 @@ def test_setup_defocus_rejects_prism_path():
         )
 
 
+def test_reciprocal_coordinates_use_realized_grid_spacing():
+    calc = MultisliceCalculator(force_cpu=True)
+    calc.setup(_make_tiny_trajectory(), sampling=1.0, slice_thickness=1.0)
+
+    assert calc.dx == pytest.approx(0.8)
+    expected = np.fft.fftshift(np.fft.fftfreq(len(calc.xs), d=calc.dx))
+    np.testing.assert_allclose(to_numpy(calc.kxs), expected)
+
+
+def test_multislice_rejects_unvalidated_slice_axis_and_tilted_cell():
+    calc = MultisliceCalculator(force_cpu=True)
+    with pytest.raises(NotImplementedError, match="slice_axis=2"):
+        calc.setup(_make_tiny_trajectory(), slice_axis=0)
+
+    trajectory = _make_tiny_trajectory()
+    trajectory.box_matrix[0, 1] = 0.25
+    with pytest.raises(ValueError, match="orthogonal cell"):
+        calc.setup(trajectory)
+
+
+def test_on_the_fly_adf_rejects_irregular_probe_lists():
+    calc = MultisliceCalculator(force_cpu=True)
+    with pytest.raises(ValueError, match="complete Cartesian product"):
+        calc.setup(
+            _make_tiny_trajectory(),
+            aperture=10,
+            sampling=1.0,
+            probe_positions=[(0.0, 0.0), (1.0, 1.0)],
+            ADF=(1, 5),
+            return_layers=None,
+        )
+
+
 def test_cached_files_with_mismatched_layer_counts_are_ignored(tmp_path):
     cache_file = tmp_path / "frame_0.npy"
     np.save(cache_file, np.zeros((1, 2, 2, 3, 1), dtype=np.complex128))

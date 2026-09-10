@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import warnings
 from tqdm import tqdm
 from typing import Optional, Dict, Union
 
@@ -15,12 +16,15 @@ from ..multislice.potentials import get_z_from_element
 
 logger = logging.getLogger(__name__)
 
+
 class Loader:
     """Load a file or ASE object into the internal ``Trajectory`` representation.
 
     Supported paths include LAMMPS-style files handled by OVITO and CIF/ASE
-    inputs handled through ASE.  Loaded arrays are cached next to the source
-    file as ``*.npy`` files so repeated loads avoid parser overhead.
+    inputs handled through ASE. Loaded arrays are cached next to the source
+    file as ``*.npy`` files with a source/parser manifest. Variable-cell or
+    identity-changing trajectories are rejected because ``Trajectory`` stores
+    one fixed cell and atom ordering.
     """
 
     def __init__(self,
@@ -61,6 +65,32 @@ class Loader:
         self.timestep = timestep if timestep is not None else 1.0
 
         self.ovitokwargs = ovitokwargs if ovitokwargs is not None else {}
+
+        legacy_mapping = {}
+        for name, mapping in (
+            ("atomic_numbers", atomic_numbers),
+            ("element_names", element_names),
+        ):
+            if mapping is None:
+                continue
+            warnings.warn(
+                f"Loader({name}=...) is deprecated; use atom_mapping=... instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            for atom_type, value in mapping.items():
+                if atom_type in legacy_mapping and legacy_mapping[atom_type] != value:
+                    raise ValueError(
+                        f"Conflicting deprecated mappings for atom type {atom_type}"
+                    )
+                legacy_mapping[atom_type] = value
+        if atom_mapping is not None and legacy_mapping:
+            raise TypeError(
+                "Use atom_mapping alone; it cannot be combined with deprecated "
+                "atomic_numbers or element_names."
+            )
+        if atom_mapping is None and legacy_mapping:
+            atom_mapping = legacy_mapping
 
         # Process atom mapping
         self.atomic_numbers = self._process_atom_mapping(atom_mapping)
@@ -119,6 +149,7 @@ class Loader:
             'atom_types': cache_base.with_suffix(cache_base.suffix + '.atom_types.npy'),
             'box_matrix': cache_base.with_suffix(cache_base.suffix + '.box_matrix.npy')
         }
+
 
     def _load_from_cache(self) -> Optional[Trajectory]:
         """Try to load trajectory from cached .npy files."""
@@ -295,20 +326,22 @@ velocities = np.zeros((n_frames, n_atoms, 3), dtype=np.float32)
 for i in range(n_frames):
     try:
         frame_data = pipeline.compute(i)
-        if frame_data and hasattr(frame_data, "particles"):
-            if (
-                hasattr(frame_data.particles, "positions")
-                and frame_data.particles.positions is not None
-            ):
-                positions[i] = np.array(frame_data.particles.positions, dtype=np.float32)
-            if (
-                has_velocities
-                and hasattr(frame_data.particles, "velocities")
-                and frame_data.particles.velocities is not None
-            ):
-                velocities[i] = np.array(frame_data.particles.velocities, dtype=np.float32)
+        validate_frame_data(frame_data, i)
+        frame_positions = np.array(frame_data.particles.positions, dtype=np.float32)
+        if frame_positions.shape != (n_atoms, 3):
+            raise ValueError(f"Frame {i} changes atom count or position shape")
+        frame_cell = np.array(frame_data.cell.matrix, dtype=np.float32)[:3, :3]
+        if not np.allclose(frame_cell, h_matrix):
+            raise ValueError("Variable-cell OVITO trajectories are not supported")
+        positions[i] = frame_positions
+        if (
+            has_velocities
+            and hasattr(frame_data.particles, "velocities")
+            and frame_data.particles.velocities is not None
+        ):
+            velocities[i] = np.array(frame_data.particles.velocities, dtype=np.float32)
     except Exception as exc:
-        print(f"Failed to load frame {i}: {exc}", file=sys.stderr)
+        raise RuntimeError(f"Failed to load frame {i}: {exc}") from exc
 
 if (
     hasattr(frame0_data.particles, "particle_types")
@@ -425,16 +458,20 @@ np.savez(
             try:
                 frame_data = pipeline.compute(i)
 
-                if frame_data and hasattr(frame_data, 'particles'):
-                    if hasattr(frame_data.particles, 'positions') and frame_data.particles.positions is not None:
-                        positions[i] = np.array(frame_data.particles.positions, dtype=np.float32)
+                self._validate_frame_data(frame_data, i)
+                frame_positions = np.array(frame_data.particles.positions, dtype=np.float32)
+                if frame_positions.shape != (n_atoms, 3):
+                    raise ValueError(f"Frame {i} changes atom count or position shape")
+                frame_cell = np.array(frame_data.cell.matrix, dtype=np.float32)[:3, :3]
+                if not np.allclose(frame_cell, h_matrix):
+                    raise ValueError("Variable-cell OVITO trajectories are not supported")
+                positions[i] = frame_positions
 
-                    if has_velocities and hasattr(frame_data.particles, 'velocities') and frame_data.particles.velocities is not None:
-                        velocities[i] = np.array(frame_data.particles.velocities, dtype=np.float32)
+                if has_velocities and hasattr(frame_data.particles, 'velocities') and frame_data.particles.velocities is not None:
+                    velocities[i] = np.array(frame_data.particles.velocities, dtype=np.float32)
 
             except Exception as e:
-                logger.error(f"Failed to load frame {i}: {e}")
-                continue
+                raise RuntimeError(f"Failed to load frame {i}: {e}") from e
 
         # Get atom types
         if (hasattr(frame0_data.particles, 'particle_types') and
@@ -489,6 +526,8 @@ np.savez(
             # Get dimensions from first frame
             first_frame = frames[0]
             n_atoms = len(first_frame)
+            first_symbols = first_frame.get_chemical_symbols()
+            first_cell = np.asarray(first_frame.get_cell())
 
             # Allocate arrays
             positions = np.zeros((n_frames, n_atoms, 3), dtype=np.float32)
@@ -496,12 +535,26 @@ np.savez(
 
             # Load each frame
             for i, frame in enumerate(frames):
+                if len(frame) != n_atoms:
+                    raise ValueError(
+                        "ASE trajectory changes atom count between frames; PySlice "
+                        "requires fixed atom identity and ordering."
+                    )
+                if frame.get_chemical_symbols() != first_symbols:
+                    raise ValueError(
+                        "ASE trajectory changes atom identity or ordering between frames."
+                    )
+                if not np.allclose(np.asarray(frame.get_cell()), first_cell):
+                    raise ValueError(
+                        "Variable-cell ASE trajectories are not supported because "
+                        "PySlice Trajectory stores one fixed box_matrix."
+                    )
                 positions[i] = frame.get_positions()
                 if frame.get_velocities() is not None:
                     velocities[i] = frame.get_velocities()
 
             atom_types = np.asarray(first_frame.get_chemical_symbols())
-            box_matrix = np.array(first_frame.get_cell())
+            box_matrix = first_cell
         else:
             # Single frame
             positions = np.asarray([atoms.get_positions()])

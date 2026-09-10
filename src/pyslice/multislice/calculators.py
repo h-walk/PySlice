@@ -205,6 +205,17 @@ class MultisliceCalculator:
 
         b = self._backend
 
+        if slice_axis != 2:
+            raise NotImplementedError(
+                "Only z-axis (slice_axis=2) multislice propagation is currently supported"
+            )
+        if kth < 1 or not isinstance(kth, (int, np.integer)):
+            raise ValueError("kth must be a positive integer")
+        if loop_probes is not False and (
+            not isinstance(loop_probes, (int, np.integer)) or loop_probes < 1
+        ):
+            raise ValueError("loop_probes must be False or a positive integer")
+
         self.trajectory = trajectory
         self.aperture = aperture
         self.voltage_eV = voltage_eV
@@ -247,8 +258,10 @@ class MultisliceCalculator:
             self.nx = nx; self.ny = nx      # Q: check this for non square super cells
             self.probe_cropping = nx
 
-        self.kxs = b.fftshift(b.fftfreq(self.nx, self.sampling))  # k-space in 1/Å
-        self.kys = b.fftshift(b.fftfreq(self.ny, self.sampling))  # k-space in 1/Å
+        # Use the realized grid spacing, which can differ slightly from the
+        # requested sampling after the periodic box is divided into pixels.
+        self.kxs = b.fftshift(b.fftfreq(self.nx, self.dx))  # cycles/Å
+        self.kys = b.fftshift(b.fftfreq(self.ny, self.dy))  # cycles/Å
         kx_mask = b.zeros(self.nx)+1; ky_mask = b.zeros(self.ny)+1
         kx_mask[self.kxs < -max_kx] = 0; kx_mask[self.kxs > max_kx] = 0
         ky_mask[self.kys < -max_ky] = 0; ky_mask[self.kys > max_ky] = 0
@@ -271,6 +284,18 @@ class MultisliceCalculator:
         if self.probe_positions is None:
             self.probe_positions = [(lx/2, ly/2)]  # Center probe
             self.probe_xs = [lx/2]; self.probe_ys = [ly/2]
+
+        if self.ADF:
+            positions = np.asarray(self.probe_positions, dtype=float)
+            expected_order = np.array(
+                [(x, y) for y in self.probe_ys for x in self.probe_xs],
+                dtype=float,
+            )
+            if len(positions) != len(expected_order) or not np.allclose(positions, expected_order):
+                raise ValueError(
+                    "On-the-fly ADF requires the complete Cartesian product of "
+                    "probe_xs and probe_ys in PySlice grid order"
+                )
 
         if self.prism:
             # Prism algorithm works by passing a series of sinusoids (fourier components shared by all probes) through the sample. "PrismProbe" will therefore give us a series of sinusoids, and there is a reconstruction step later

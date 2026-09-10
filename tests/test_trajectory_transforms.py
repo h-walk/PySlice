@@ -27,6 +27,60 @@ def _trajectory():
     )
 
 
+def test_fold_positions_to_orthogonal_box_wraps_selected_axes():
+    folded = _trajectory().fold_positions_to_orthogonal_box(axes=(0,))
+
+    np.testing.assert_allclose(folded.box_matrix, np.diag([5.0, 4.0, 3.0]))
+    np.testing.assert_allclose(folded.positions[:, :, 0], [[4.0, 1.2], [2.5, 4.9]], atol=1e-6)
+    np.testing.assert_allclose(folded.positions[:, :, 1:], _trajectory().positions[:, :, 1:])
+    assert folded.timestep == 0.005
+
+
+def test_fold_positions_to_orthogonal_box_validates_inputs():
+    trajectory = _trajectory()
+
+    with pytest.raises(ValueError, match="axes"):
+        trajectory.fold_positions_to_orthogonal_box(axes=(3,))
+
+    with pytest.raises(ValueError, match="lengths"):
+        trajectory.fold_positions_to_orthogonal_box(lengths=(5.0, 4.0))
+
+    with pytest.raises(ValueError, match="Cannot build"):
+        trajectory.fold_positions_to_orthogonal_box(lengths=(5.0, 0.0, 3.0))
+
+
+def test_slice_positions_shifts_coordinates_into_new_box():
+    trajectory = Trajectory(
+        atom_types=np.array([5, 7]),
+        positions=np.array([[[5.5, 1.0, 1.0], [8.5, 1.0, 1.0]]]),
+        velocities=np.zeros((1, 2, 3)),
+        box_matrix=np.diag([10.0, 4.0, 3.0]),
+        timestep=0.005,
+    )
+
+    cropped = trajectory.slice_positions(x_range=(5.0, 9.0))
+
+    np.testing.assert_allclose(cropped.positions[0, :, 0], [0.5, 3.5])
+    assert cropped.box_matrix[0, 0] == pytest.approx(4.0)
+
+
+def test_tilt_positions_rotates_cell_with_atoms():
+    trajectory = _trajectory()
+    tilted = trajectory.tilt_positions(alpha=0.2, beta=-0.1)
+
+    assert not np.allclose(tilted.box_matrix, trajectory.box_matrix)
+    np.testing.assert_allclose(
+        np.linalg.norm(tilted.box_matrix, axis=1),
+        np.linalg.norm(trajectory.box_matrix, axis=1),
+    )
+
+
+def test_tile_positions_rejects_wrong_trajectory_count():
+    trajectory = _trajectory()
+    with pytest.raises(ValueError, match="one entry per tile"):
+        trajectory.tile_positions((2, 1, 1), trajectories=[trajectory])
+
+
 def test_to_ase_supports_numeric_types_and_selected_frame():
     trajectory = Trajectory(
         atom_types=np.array([14]),
@@ -86,3 +140,22 @@ def test_center_of_mass_drift_is_mass_weighted_and_removable():
         trajectory.positions[:, 1] - trajectory.positions[:, 0],
     )
     assert not np.shares_memory(corrected.positions, trajectory.positions)
+
+
+def test_trajectory_rejects_nonfinite_data_and_invalid_sampling_requests():
+    trajectory = _trajectory()
+    invalid_positions = trajectory.positions.copy()
+    invalid_positions[0, 0, 0] = np.nan
+    with pytest.raises(ValueError, match="finite"):
+        Trajectory(
+            atom_types=trajectory.atom_types,
+            positions=invalid_positions,
+            velocities=trajectory.velocities,
+            box_matrix=trajectory.box_matrix,
+            timestep=trajectory.timestep,
+        )
+
+    with pytest.raises(ValueError, match="between 1"):
+        trajectory.random_frames(trajectory.n_frames + 1)
+    with pytest.raises(ValueError, match="sigma"):
+        trajectory.generate_random_displacements(2, sigma=-0.1)
