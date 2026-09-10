@@ -1,24 +1,91 @@
-"""Public package namespace for PySlice.
+"""Intentional top-level imports for PySlice.
 
-PySlice exposes trajectory loading, multislice propagation, potential
-generation, and postprocessing helpers from this top-level package for
-interactive notebook use.
+The stable workflow core, optional integrations, advanced building blocks,
+experimental SED objects, and historical compatibility helpers are introduced
+in ``docs/user-guide/index.md`` and the linked workflow guides. Inclusion in
+:data:`__all__` means a name is an intentional convenience import; it is not by
+itself a blanket stability tier. Public docstrings are the current API source.
 """
-# here we read out the version info set in pyproject.toml
+
 try:
-    from importlib.metadata import version
-    __version__ = version("pyslice")
+    from importlib.metadata import version as _package_version
+    __version__ = _package_version("pyslice")
 except Exception:
     __version__ = "dev"
 
-from .io.loader import *
-from .backend import Backend, NumpyBackend, TORCH_AVAILABLE, make_backend, to_cpu, to_numpy
-from .md.molecular_dynamics import *
-from .multislice.calculators import *
-from .multislice.multislice import *
-from .multislice.potentials import *
-from .multislice.sed import *
-from .multislice.trajectory import *
-from .postprocessing.haadf_data import *
-from .postprocessing.tacaw_data import *
-from .postprocessing.testtools import *
+from .backend import (
+    Backend,
+    NumpyBackend,
+    TORCH_AVAILABLE,
+    TorchBackend,
+    make_backend,
+    to_cpu,
+    to_numpy,
+)
+from .io.loader import Loader
+from .md.molecular_dynamics import (
+    FAIRChemMDCalculator,
+    MDCalculator,
+    MDConvergenceChecker,
+    ORBMDCalculator,
+    analyze_md_trajectory,
+)
+from .multislice.calculators import MultisliceCalculator, SEDCalculator
+from .multislice.multislice import (
+    Probe,
+    PrismProbe,
+    Propagate,
+    aberrationFunction,
+    calculateObject,
+    create_batched_probes,
+    wavelength,
+)
+from .multislice.potentials import Potential, grid_from_trajectory
+from .multislice.sed import SED
+from .multislice.trajectory import Trajectory
+from .postprocessing.haadf_data import HAADFData
+from .postprocessing.tacaw_data import SEDData, TACAWData, bose_correction_factor
+from .postprocessing.testtools import differ
+from .postprocessing.wf_data import WFData
+
+__all__ = (
+    "__version__",
+    # Primary workflow
+    "Loader",
+    "Trajectory",
+    "MultisliceCalculator",
+    "WFData",
+    "TACAWData",
+    "HAADFData",
+    # Molecular dynamics
+    "MDCalculator",
+    "ORBMDCalculator",
+    "FAIRChemMDCalculator",
+    "MDConvergenceChecker",
+    "analyze_md_trajectory",
+    # Advanced multislice building blocks
+    "Probe",
+    "PrismProbe",
+    "Potential",
+    "Propagate",
+    "create_batched_probes",
+    "grid_from_trajectory",
+    "wavelength",
+    "aberrationFunction",
+    "calculateObject",
+    # Spectral-energy-density analysis
+    "SED",
+    "SEDData",
+    "SEDCalculator",
+    "bose_correction_factor",
+    # Backend interoperation
+    "Backend",
+    "NumpyBackend",
+    "TorchBackend",
+    "TORCH_AVAILABLE",
+    "make_backend",
+    "to_cpu",
+    "to_numpy",
+    # Historical validation helper used by the scientific regression scripts
+    "differ",
+)
