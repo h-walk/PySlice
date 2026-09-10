@@ -47,6 +47,23 @@ class WFData(PySliceSerial, Signal):
         backend: Backend,
         cache_dir: Optional[Path] = None,
     ):
+        """Create a wavefunction result container.
+
+        Args:
+            probe_positions: Flattened ``(x, y)`` probe coordinates in Angstroms.
+            probe_xs: Unique x coordinates of the probe grid in Angstroms.
+            probe_ys: Unique y coordinates of the probe grid in Angstroms.
+            time: Saved-frame times in picoseconds.
+            kxs: Reciprocal x coordinates in inverse Angstroms.
+            kys: Reciprocal y coordinates in inverse Angstroms.
+            xs: Real-space x coordinates in Angstroms.
+            ys: Real-space y coordinates in Angstroms.
+            layer: Returned multislice-layer indices.
+            array: Complex array shaped ``(probe, time, kx, ky, layer)``.
+            probe: Probe that generated the result.
+            backend: Array backend owning ``array`` and coordinate tensors.
+            cache_dir: Directory containing compatible frame and TACAW caches.
+        """
         self._backend = backend
 
         self.probe_positions = probe_positions
@@ -99,17 +116,29 @@ class WFData(PySliceSerial, Signal):
     # ------------------------------------------------------------------
 
     @property
-    def kxs(self)   -> np.ndarray: return to_numpy(self._kxs)
+    def kxs(self) -> np.ndarray:
+        """Reciprocal x coordinates in inverse Angstroms."""
+        return to_numpy(self._kxs)
     @property
-    def kys(self)   -> np.ndarray: return to_numpy(self._kys)
+    def kys(self) -> np.ndarray:
+        """Reciprocal y coordinates in inverse Angstroms."""
+        return to_numpy(self._kys)
     @property
-    def xs(self)    -> np.ndarray: return to_numpy(self._xs)
+    def xs(self) -> np.ndarray:
+        """Real-space x coordinates in Angstroms."""
+        return to_numpy(self._xs)
     @property
-    def ys(self)    -> np.ndarray: return to_numpy(self._ys)
+    def ys(self) -> np.ndarray:
+        """Real-space y coordinates in Angstroms."""
+        return to_numpy(self._ys)
     @property
-    def time(self)  -> np.ndarray: return to_numpy(self._time) if self._time is not None else None
+    def time(self) -> np.ndarray:
+        """Saved-frame times in picoseconds, or ``None`` when unavailable."""
+        return to_numpy(self._time) if self._time is not None else None
     @property
-    def layer(self) -> np.ndarray: return to_numpy(self._layer) if self._layer is not None else None
+    def layer(self) -> np.ndarray:
+        """Returned multislice-layer indices, or ``None`` when unavailable."""
+        return to_numpy(self._layer) if self._layer is not None else None
 
     @property
     def data(self):
@@ -153,12 +182,26 @@ class WFData(PySliceSerial, Signal):
     # ------------------------------------------------------------------
 
     def counts(self, N: int):
+        """Replace the wavefunction array with a simulated count histogram.
+
+        Args:
+            N: Total number of random detector events to draw.
+
+        Notes:
+            This mutates ``array`` in place and retains the original normalized
+            distribution on ``probability`` for subsequent calls.
+        """
         b = self._backend
+        if not isinstance(N, (int, np.integer)) or N < 0:
+            raise ValueError("N must be a nonnegative integer")
         npt, nt, nx, ny, nl = self._array.shape
         if self.probability is None:
-            self.probability = self._array
-            ary = self._array / b.sum(b.absolute(self._array))
-            ary = b.absolute(b.reshape(ary, (npt * nt * nx * ny * nl,)))
+            intensity = b.absolute(self._array) ** 2
+            total = b.sum(intensity)
+            if float(to_numpy(total)) <= 0:
+                raise ValueError("Cannot draw counts from zero total intensity")
+            self.probability = intensity / total
+            ary = b.reshape(self.probability, (npt * nt * nx * ny * nl,))
             self.buckets = b.zeros(len(ary) + 1, type_match=ary)
             self.buckets[1:] = b.cumsum(ary)
         detector_hits = b.asarray(b.randfloats(N))
@@ -177,6 +220,18 @@ class WFData(PySliceSerial, Signal):
                         extent=None,
                         nuke_zerobeam=False,
                         title=None):
+        """Plot reciprocal-space intensity from the final returned layer.
+
+        Args:
+            filename: Save destination. If omitted, display the figure.
+            whichProbe: Probe index, iterable of indices, or ``"mean"``.
+            whichTimestep: Frame index, iterable of indices, or ``"mean"``.
+            powerscaling: Exponent applied to intensity for display contrast.
+            extent: Optional ``(kx_min, kx_max, ky_min, ky_max)`` crop in
+                inverse Angstroms.
+            nuke_zerobeam: Set the reciprocal-origin pixel to zero before plotting.
+            title: Optional axes title.
+        """
         import matplotlib.pyplot as plt
 
         b = self._backend
@@ -191,7 +246,9 @@ class WFData(PySliceSerial, Signal):
 
         for p in probe_indices:
             for t in time_indices:
-                layer = b.absolute(raw[p, t, :, :])
+                # Thermal configurations and probe positions are incoherent
+                # samples here: average intensity, not amplitude magnitude.
+                layer = b.absolute(raw[p, t, :, :]) ** 2
                 if isinstance(raw, np.memmap):
                     layer = b.asarray(layer)
                 accum += layer
@@ -215,7 +272,7 @@ class WFData(PySliceSerial, Signal):
         if nuke_zerobeam:
             accum_np[np.argmin(np.abs(kys_np)), np.argmin(np.abs(kxs_np))] = 0
 
-        img = (np.abs(accum_np) ** 2) ** powerscaling
+        img = np.abs(accum_np) ** powerscaling
         fig, ax = plt.subplots()
         ax.imshow(img, cmap="inferno", extent=actual_extent, origin='lower', aspect=1)
         ax.set_xlabel("kx (Å⁻¹)")
@@ -232,6 +289,15 @@ class WFData(PySliceSerial, Signal):
 
     def plot_phase(self, filename=None, whichProbe=0, whichTimestep=0,
                    extent=None, avg=False):
+        """Plot real-space phase from a reciprocal-space wavefunction.
+
+        Args:
+            filename: Save destination. If omitted, display the figure.
+            whichProbe: Probe index.
+            whichTimestep: Frame index used when ``avg`` is false.
+            extent: Optional ``(x_min, x_max, y_min, y_max)`` crop in Angstroms.
+            avg: Average complex wavefunctions over time before taking phase.
+        """
         import matplotlib.pyplot as plt
 
         b = self._backend
@@ -268,6 +334,15 @@ class WFData(PySliceSerial, Signal):
 
     def plot_realspace(self, whichProbe="mean", whichTimestep="mean",
                        extent=None, filename=None,powerscaling=0.25):
+        """Plot real-space wave amplitude from the final returned layer.
+
+        Args:
+            whichProbe: Probe index or ``"mean"``.
+            whichTimestep: Frame index or ``"mean"``.
+            extent: Plot extent ``(x_min, x_max, y_min, y_max)`` in Angstroms.
+            filename: Save destination. If omitted, display the figure.
+            powerscaling: Exponent applied to amplitude for display contrast.
+        """
         import matplotlib.pyplot as plt
 
         b = self._backend
@@ -301,10 +376,21 @@ class WFData(PySliceSerial, Signal):
     # ------------------------------------------------------------------
 
     def recenter(self):
+        """Shift the real-space coordinate axes to have zero mean in place."""
         b = self._backend
         self._xs -= b.mean(self._xs)
         self._ys -= b.mean(self._ys)
     def pad_real_space(self,add_x=0,add_y=0):
+        """Zero-pad the real-space wavefunction and update both coordinate grids.
+
+        Args:
+            add_x: Padding added to each x edge in Angstroms.
+            add_y: Padding added to each y edge in Angstroms.
+
+        Notes:
+            The stored reciprocal-space array is transformed to real space,
+            padded symmetrically, and transformed back in place.
+        """
         b = self._backend
         dx = self._xs[1]-self._xs[0] ; dy = self._ys[1]-self._ys[0]
         pix_x = int(round(add_x/dx)) ; pix_y = int(round(add_y/dy))
@@ -322,6 +408,11 @@ class WFData(PySliceSerial, Signal):
 
 
     def propagate_through_lens(self,f):
+        """Apply a thin-lens quadratic phase to the final layer in place.
+
+        Args:
+            f: Lens focal length in Angstroms; its sign sets focusing direction.
+        """
         b = self._backend
         array = b.ifft2(self._array[:, :, :, :, -1])
         xs = b.asarray(self._xs)#-self.probe_positions[-1][0]
@@ -333,12 +424,24 @@ class WFData(PySliceSerial, Signal):
         self._array[:,:,:,:,-1] = b.fft2(array)
 
     def propagate_free_space(self, dz: float):
+        """Fresnel-propagate every stored wavefunction by ``dz`` Angstroms."""
         b = self._backend
         kx_grid, ky_grid = b.meshgrid(self._kxs, self._kys, indexing='ij')
         P = b.exp(-1j * b.pi * self.probe.wavelength * dz * (kx_grid ** 2 + ky_grid ** 2))
         self._array = P[None, None, :, :, None] * self._array
 
     def addSpatialDecoherence(self, sigma_dz: float, N: int):
+        """Expand the probe axis with a Gaussian ensemble of defocus offsets.
+
+        Args:
+            sigma_dz: Defocus spread in Angstroms.
+            N: Number of weighted defocus samples between ``-2*sigma_dz`` and
+                ``+2*sigma_dz``.
+
+        Notes:
+            This mutates the array and folds the new coherent-copy dimension
+            into the existing probe dimension.
+        """
         b = self._backend
         dzs = b.linspace(-2 * sigma_dz, 2 * sigma_dz, N)
         amplitudes = b.exp(-dzs ** 2 / sigma_dz ** 2)
@@ -352,6 +455,14 @@ class WFData(PySliceSerial, Signal):
         self._array = b.reshape(self._array, (nc * npt, nt, nx, ny, nl))
 
     def applyMask(self, radius: float, realOrReciprocal: str = "reciprocal"):
+        """Apply a centered circular aperture to all stored waves in place.
+
+        Args:
+            radius: Aperture radius in inverse Angstroms for reciprocal space,
+                or Angstroms for real space.
+            realOrReciprocal: ``"reciprocal"`` for a k-space mask; any other
+                value selects the real-space path for backward compatibility.
+        """
         b = self._backend
         if realOrReciprocal == "reciprocal":
             radii = b.sqrt(self._kxs[:, None] ** 2 + self._kys[None, :] ** 2)
@@ -370,6 +481,12 @@ class WFData(PySliceSerial, Signal):
             self._array = b.fftshift(b.fft2(real, axes=(2, 3)), axes=(2, 3))
 
     def crop(self, kx_range=None, ky_range=None):
+        """Crop reciprocal axes and wavefunction data in place.
+
+        Args:
+            kx_range: Optional inclusive ``(minimum, maximum)`` in inverse Angstroms.
+            ky_range: Optional inclusive ``(minimum, maximum)`` in inverse Angstroms.
+        """
         kxs_np = to_numpy(self._kxs)
         kys_np = to_numpy(self._kys)
         _, _, nx, ny, _ = self._array.shape
@@ -385,6 +502,12 @@ class WFData(PySliceSerial, Signal):
         self._kys = self._kys[j1:j2]
 
     def aberrate(self, aberrations: dict):
+        """Apply Cnm lens aberrations to every stored wavefunction in place.
+
+        Args:
+            aberrations: Mapping such as ``{"C30": 1e4, "C12": (50, 0)}``.
+                Coefficients are in Angstroms and tuple angles are in radians.
+        """
         dP = aberrationFunction(
             self._kxs, self._kys, self.probe.wavelength, aberrations, self._backend
         )

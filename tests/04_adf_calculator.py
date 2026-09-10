@@ -28,7 +28,7 @@ def test_on_the_fly_adf_returns_image_without_full_wavefunction_stack():
         max_ky=1.0,
         loop_probes=2,
         cache_wavefunctions=False,
-        ADF=(5, 40),
+        ADF=(5, 20),
         return_layers=None,
     )
     wf_data, haadf = calculator.run()

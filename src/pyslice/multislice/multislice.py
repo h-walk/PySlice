@@ -16,6 +16,9 @@ from pyslice.backend import Backend, make_backend, to_numpy
 
 logger = logging.getLogger(__name__)
 
+ANTIALIAS_CUTOFF_FRACTION = 2 / 3
+ANTIALIAS_TAPER_WIDTH = 0.02
+
 # ---------------------------------------------------------------------------
 # Physical constants (SI)
 # ---------------------------------------------------------------------------
@@ -75,8 +78,8 @@ def wavelength(eV, backend: Optional[Backend] = None):
 # ---------------------------------------------------------------------------
 
 def antialias_aperture(kxs, kys, backend: Backend,
-                       cutoff_fraction: float = 2/3,
-                       taper_width: float = 0.02):
+                       cutoff_fraction: float = ANTIALIAS_CUTOFF_FRACTION,
+                       taper_width: float = ANTIALIAS_TAPER_WIDTH):
     """
     2/3-Nyquist anti-aliasing aperture with a smooth cosine taper.
 

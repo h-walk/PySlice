@@ -2,12 +2,17 @@
 HAADF (High Angle Annular Dark Field) data structure.
 """
 import numpy as np
+import warnings
 from typing import Optional, Tuple, Dict, Any, List, Union
 from pathlib import Path
 import logging
 from .wf_data import WFData
 from ..data.pyslice_serial import PySliceSerial, Signal, Dimensions, Dimension, Metadata
 from pyslice.backend import Backend, to_numpy
+from ..multislice.multislice import (
+    ANTIALIAS_CUTOFF_FRACTION,
+    ANTIALIAS_TAPER_WIDTH,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +122,29 @@ class HAADFData(PySliceSerial, Signal):
         raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
 
     def getMask(self, inner_mrad: float = 45, outer_mrad: float = 150):
+        """Build the annular detector mask on the wavefunction k-grid.
+
+        Args:
+            inner_mrad: Inner collection semi-angle in milliradians.
+            outer_mrad: Outer collection semi-angle in milliradians.
+
+        Returns:
+            Backend-native array shaped ``(kx, ky)`` with ones inside the
+            annulus and zeros elsewhere.
+
+        Raises:
+            ValueError: If the detector angles do not define a positive
+                annulus, or if the inner angle begins outside the usable
+                anti-aliased reciprocal-space bandwidth.
+
+        Warns:
+            RuntimeWarning: If the requested outer angle exceeds the largest
+                fully represented annulus and enters a cropped or tapered
+                reciprocal-space region.
+        """
+        inner_mrad, outer_mrad = self._validate_detector_angles(
+            inner_mrad, outer_mrad
+        )
         b = self._backend
         q = b.sqrt(self._kxs[:,None]**2 + self._kys[None,:]**2)
         radius_inner = (inner_mrad * 1e-3) / self.probe.wavelength
@@ -129,13 +157,69 @@ class HAADFData(PySliceSerial, Signal):
         mask[q >= radius_outer] = 0
         return mask
 
+    @property
+    def max_detector_mrad(self) -> float:
+        """Largest fully represented annular-detector angle in milliradians.
+
+        Multislice propagation applies a circular 2/3-Nyquist anti-aliasing
+        aperture with a narrow cosine taper. Returned wavefunctions may be
+        cropped further in ``kx`` or ``ky``. The smaller of the untapered
+        passband and stored-grid limits determines the largest complete,
+        unattenuated detector circle.
+        """
+        probe_kx_max = float(np.max(np.abs(to_numpy(self.probe.kxs))))
+        probe_ky_max = float(np.max(np.abs(to_numpy(self.probe.kys))))
+        propagation_limit = (
+            (ANTIALIAS_CUTOFF_FRACTION - ANTIALIAS_TAPER_WIDTH)
+            * min(probe_kx_max, probe_ky_max)
+        )
+
+        stored_kx_max = float(np.max(np.abs(to_numpy(self._kxs))))
+        stored_ky_max = float(np.max(np.abs(to_numpy(self._kys))))
+        stored_limit = min(stored_kx_max, stored_ky_max)
+
+        wavelength_A = float(np.asarray(to_numpy(self.probe.wavelength)))
+        return min(propagation_limit, stored_limit) * wavelength_A * 1e3
+
+    def _validate_detector_angles(
+        self, inner_mrad: float, outer_mrad: float
+    ) -> Tuple[float, float]:
+        """Validate an annulus against ordering and reciprocal bandwidth."""
+        inner_mrad = float(inner_mrad)
+        outer_mrad = float(outer_mrad)
+        if not np.isfinite(inner_mrad) or not np.isfinite(outer_mrad):
+            raise ValueError("ADF detector angles must be finite milliradian values")
+        if inner_mrad < 0 or outer_mrad <= inner_mrad:
+            raise ValueError(
+                "ADF detector angles must satisfy 0 <= inner_mrad < outer_mrad"
+            )
+
+        limit_mrad = self.max_detector_mrad
+        if inner_mrad >= limit_mrad:
+            raise ValueError(
+                f"ADF inner angle {inner_mrad:g} mrad is outside the usable "
+                f"reciprocal-space bandwidth ({limit_mrad:.1f} mrad). "
+                "Decrease the real-space sampling or detector angle."
+            )
+        if outer_mrad > limit_mrad:
+            warnings.warn(
+                f"ADF outer angle {outer_mrad:g} mrad exceeds the largest fully "
+                f"represented detector angle ({limit_mrad:.1f} mrad); the "
+                "detector enters the cropped or tapered region of the "
+                "multislice anti-aliasing aperture.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+        return inner_mrad, outer_mrad
+
     def calculateADF(self, inner_mrad: float = 45, outer_mrad: float = 150, preview: bool = False) -> np.ndarray:
         """
         Calculate the ADF (Annular Dark Field) image.
 
         Args:
-            inner_mrad: Inner collection angle in milliradians (default: 45)
-            outer_mrad: Outer collection angle in milliradians (default: 150)
+            inner_mrad: Inner collection angle in milliradians (default: 45).
+            outer_mrad: Outer collection angle in milliradians (default: 150).
+                A warning is emitted when this exceeds ``max_detector_mrad``.
             preview: If True, show a preview of the first exit wave with mask
 
         Returns:
@@ -153,8 +237,18 @@ class HAADFData(PySliceSerial, Signal):
         if preview:
             import matplotlib.pyplot as plt
             fig, ax = plt.subplots()
-            preview_data = b.mean(b.absolute(self._wf_array), axis=(0,1,2,3,6))**.2 * (1 - mask)
-            ax.imshow(to_numpy(b.absolute(preview_data)), cmap="inferno")
+            preview_data = b.mean(b.absolute(self._wf_array), axis=(0,1,2,3,6))**.2 * mask
+            kxs = to_numpy(self._kxs)
+            kys = to_numpy(self._kys)
+            ax.imshow(
+                to_numpy(b.absolute(preview_data)).T,
+                cmap="inferno",
+                origin="lower",
+                extent=(kxs.min(), kxs.max(), kys.min(), kys.max()),
+            )
+            ax.set_xlabel("kx (Å⁻¹)")
+            ax.set_ylabel("ky (Å⁻¹)")
+            ax.set_title("ADF collection region")
             plt.show()
 
         nc,_,_,nt,_,_,nl = self._wf_array.shape
@@ -183,6 +277,7 @@ class HAADFData(PySliceSerial, Signal):
 
         Args:
             filename: If provided, save plot to this file instead of displaying
+            title: Optional axes title.
         """
         import matplotlib.pyplot as plt
 
@@ -190,14 +285,14 @@ class HAADFData(PySliceSerial, Signal):
             raise RuntimeError("calculateADF() must be called before plotting")
 
         fig, ax = plt.subplots()
-        array = self.array.T[::-1,:]  # imshow convention: y,x. our convention: x,y, and flip y (0,0 upper-left)
+        array = self.array.T  # imshow rows are y; PySlice stores x,y
         xs = to_numpy(self._xs)
         ys = to_numpy(self._ys)
 
         dx = (xs[-1] - xs[0]) / (len(xs) - 1) if len(xs) > 1 else 0
         dy = (ys[-1] - ys[0]) / (len(ys) - 1) if len(ys) > 1 else 0
         extent = (np.amin(xs) - dx/2, np.amax(xs) + dx/2, np.amin(ys) - dy/2, np.amax(ys) + dy/2)
-        ax.imshow(np.absolute(array), cmap="inferno", extent=extent)
+        ax.imshow(np.absolute(array), cmap="inferno", extent=extent, origin="lower")
         ax.set_xlabel("x ($\\AA$)")
         ax.set_ylabel("y ($\\AA$)")
 
