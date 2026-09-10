@@ -1,0 +1,12 @@
+{
+  "atom_mapping": {
+    "1": 5,
+    "2": 7
+  },
+  "mtime_ns": 1764341856032255769,
+  "ovitokwargs": {},
+  "schema": 2,
+  "sha256": "c3b2bd498abef534b39e93b5748fb0a9654e8aa68957b498183244967d56022f",
+  "size": 42906398,
+  "source": "/Users/harrisonwalker/Documents/Projects/PySlice/tests/inputs/hBN_truncated.lammpstrj"
+}
