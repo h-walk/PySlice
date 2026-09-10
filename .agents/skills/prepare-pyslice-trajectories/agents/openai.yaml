@@ -1,0 +1,4 @@
+interface:
+  display_name: "Prepare PySlice Trajectories"
+  short_description: "Load and verify simulation-ready trajectories"
+  default_prompt: "Use $prepare-pyslice-trajectories to load and preflight my atomic trajectory for PySlice."

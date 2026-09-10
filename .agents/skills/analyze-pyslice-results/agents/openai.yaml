@@ -1,0 +1,4 @@
+interface:
+  display_name: "Analyze PySlice Results"
+  short_description: "Interpret TACAW, wavefunction, and ADF data"
+  default_prompt: "Use $analyze-pyslice-results to inspect and interpret my PySlice output."

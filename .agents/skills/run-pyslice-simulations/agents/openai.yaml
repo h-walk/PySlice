@@ -1,0 +1,4 @@
+interface:
+  display_name: "Run PySlice Simulations"
+  short_description: "Run resource-aware diffraction and STEM"
+  default_prompt: "Use $run-pyslice-simulations to build and run a bounded PySlice simulation."
