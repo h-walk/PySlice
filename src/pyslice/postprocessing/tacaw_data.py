@@ -269,7 +269,15 @@ class TACAWData(PySliceSerial, Signal):
     # ------------------------------------------------------------------
 
     def spectrum(self, probe_index: Optional[int] = None) -> np.ndarray:
-        """Spectrum for one probe (or mean over all) by summing over k-space."""
+        """Integrate over k-space to obtain a frequency spectrum.
+
+        Args:
+            probe_index: Probe to use. ``None`` averages spectra over all probes.
+
+        Returns:
+            Array shaped ``(frequency,)`` in the same frequency order as
+            :attr:`frequencies`.
+        """
         b = self._backend
         if probe_index is None:
             spectra = [to_numpy(b.sum(self._array[i], axis=(1, 2)))
@@ -281,17 +289,58 @@ class TACAWData(PySliceSerial, Signal):
 
     def spectrum_image(self, frequency: float,
                        probe_indices: Optional[List[int]] = None) -> np.ndarray:
-        """Intensity at a given frequency for each probe position (real-space map)."""
+        """Integrate k-space at one frequency for each selected probe.
+
+        Args:
+            frequency: Requested signed frequency in THz. The nearest FFT bin
+                is selected.
+            probe_indices: Probe indices to include. Defaults to all probes.
+
+        Returns:
+            Flat array shaped ``(selected_probes,)``. Reshape it using the
+            original ``probe_xs`` and ``probe_ys`` grid for a spectrum image.
+        """
         b = self._backend
         freq_idx = int(np.argmin(np.abs(self.frequencies - frequency)))
         if probe_indices is None:
             probe_indices = list(range(len(self.probe_positions)))
         return np.array([to_numpy(b.sum(self._array[p, freq_idx, :, :])) for p in probe_indices])
 
+    def nearest_frequency(self, frequency: float) -> float:
+        """Return the represented FFT bin nearest ``frequency`` in THz."""
+        index = int(np.argmin(np.abs(self.frequencies - frequency)))
+        return float(self.frequencies[index])
+
+    def spectrum_image_reshaped(self, frequency: float) -> np.ndarray:
+        """Return a spectrum image shaped ``(probe_x, probe_y)``.
+
+        The helper requires the original probes to form the complete Cartesian
+        product of ``probe_xs`` and ``probe_ys``.
+        """
+        probe_xs = np.asarray(sorted(set(np.asarray(self.probe_positions)[:, 0])))
+        probe_ys = np.asarray(sorted(set(np.asarray(self.probe_positions)[:, 1])))
+        if len(probe_xs) * len(probe_ys) != len(self.probe_positions):
+            raise ValueError("Probe positions do not form a complete Cartesian grid")
+        expected = np.array([(x, y) for y in probe_ys for x in probe_xs])
+        if not np.allclose(np.asarray(self.probe_positions), expected):
+            raise ValueError("Probe positions are not in PySlice Cartesian-grid order")
+        return self.spectrum_image(frequency).reshape(len(probe_ys), len(probe_xs)).T
+
 
     def diffraction(self, probe_index: Optional[int] = None,
                     space: str = "reciprocal") -> np.ndarray:
-        """Diffraction pattern (kx, ky) summed over all frequencies."""
+        """Sum over frequency to obtain a two-dimensional pattern.
+
+        Args:
+            probe_index: Probe to use. ``None`` averages patterns over all probes.
+            space: ``"reciprocal"`` for a ``(kx, ky)`` pattern or ``"real"``
+                for the magnitude of its inverse FFT.
+
+        Returns:
+            Two-dimensional NumPy array on the selected coordinate grid.
+        """
+        if space not in {"reciprocal", "real"}:
+            raise ValueError("space must be 'reciprocal' or 'real'")
         b = self._backend
         array_dtype = getattr(self._array, "dtype", b.complex_dtype)
         if probe_index is None:
@@ -310,7 +359,18 @@ class TACAWData(PySliceSerial, Signal):
     def spectral_diffraction(self, frequency: float,
                              probe_index: Optional[int] = None,
                              space: str = "reciprocal") -> np.ndarray:
-        """Diffraction pattern at a specific frequency."""
+        """Return the two-dimensional pattern nearest a signed frequency.
+
+        Args:
+            frequency: Requested frequency in THz; the nearest FFT bin is used.
+            probe_index: Probe to use. ``None`` averages over all probes.
+            space: ``"reciprocal"`` or ``"real"`` as in :meth:`diffraction`.
+
+        Returns:
+            Two-dimensional NumPy array on the selected coordinate grid.
+        """
+        if space not in {"reciprocal", "real"}:
+            raise ValueError("space must be 'reciprocal' or 'real'")
         b = self._backend
         freq_idx = int(np.argmin(np.abs(self.frequencies - frequency)))
 
@@ -333,7 +393,18 @@ class TACAWData(PySliceSerial, Signal):
 
     def masked_spectrum(self, mask=None, probe_index: Optional[int] = None,
                         preview: bool = False) -> np.ndarray:
-        """Spectrum with k-space masking applied."""
+        """Integrate a reciprocal-space detector mask at every frequency.
+
+        Args:
+            mask: A ``(kx, ky)`` array, ``None`` for the full grid, or a round
+                mask dictionary with ``shape``, ``center``, and ``radius``.
+                Centers and radii are in inverse Angstroms.
+            probe_index: Probe to use. ``None`` averages over all probes.
+            preview: Display the first masked, frequency-integrated pattern.
+
+        Returns:
+            Array shaped ``(frequency,)``.
+        """
         b = self._backend
         kxs_np = to_numpy(self._kxs)
         kys_np = to_numpy(self._kys)
@@ -342,10 +413,13 @@ class TACAWData(PySliceSerial, Signal):
             mask = np.ones((len(kxs_np), len(kys_np)))
         elif isinstance(mask, dict):
             cx, cy = mask.get("center", (0, 0))
-            if mask["shape"] == "round":
-                r = mask["radius"]
-                radii = np.sqrt((kxs_np[:, None] - cx) ** 2 + (kys_np[None, :] - cy) ** 2)
-                mask = (radii <= r).astype(float)
+            if mask.get("shape") != "round":
+                raise ValueError("mask dictionary shape must be 'round'")
+            r = float(mask["radius"])
+            if r < 0:
+                raise ValueError("mask radius must be nonnegative")
+            radii = np.sqrt((kxs_np[:, None] - cx) ** 2 + (kys_np[None, :] - cy) ** 2)
+            mask = (radii <= r).astype(float)
         elif mask.shape != (len(kxs_np), len(kys_np)):
             raise ValueError(f"Mask shape {mask.shape} doesn't match "
                              f"k-space shape ({len(kxs_np)}, {len(kys_np)})")
@@ -353,6 +427,8 @@ class TACAWData(PySliceSerial, Signal):
         if not isinstance(self._array, (np.ndarray, np.memmap)):
             mask = b.asarray(mask, dtype=self._array.dtype)
 
+        if probe_index is not None and not (0 <= probe_index < len(self.probe_positions)):
+            raise ValueError(f"Probe index {probe_index} out of range")
         probe_indices = (np.arange(len(self.probe_positions))
                          if probe_index is None else [probe_index])
         spectra = []
@@ -375,10 +451,37 @@ class TACAWData(PySliceSerial, Signal):
     def dispersion(self, kx_path: np.ndarray, ky_path: np.ndarray,
                    probe_index: Optional[int] = None,
                    space: str = "reciprocal") -> np.ndarray:
-        """Extract dispersion relation along a k-path."""
+        """Sample TACAW magnitude along a requested two-dimensional path.
+
+        Args:
+            kx_path: Path x coordinates in inverse Angstroms, or Angstroms when
+                ``space="real"``.
+            ky_path: Path y coordinates with the same length and units as
+                ``kx_path``.
+            probe_index: Probe to use. ``None`` averages over all probes.
+            space: ``"reciprocal"`` to sample k-space or ``"real"`` to sample
+                inverse-FFT real space.
+
+        Returns:
+            Nonnegative array shaped ``(frequency, path_position)``.
+        """
+        if space not in {"reciprocal", "real"}:
+            raise ValueError("space must be 'reciprocal' or 'real'")
+        if len(kx_path) != len(ky_path):
+            raise ValueError("kx_path and ky_path must have the same length")
         b = self._backend
         kx_np = to_numpy(self._kxs) if space != "real" else to_numpy(self._xs)
         ky_np = to_numpy(self._kys) if space != "real" else to_numpy(self._ys)
+
+        if (
+            np.any(np.asarray(kx_path) < kx_np.min())
+            or np.any(np.asarray(kx_path) > kx_np.max())
+            or np.any(np.asarray(ky_path) < ky_np.min())
+            or np.any(np.asarray(ky_path) > ky_np.max())
+        ):
+            raise ValueError(
+                "dispersion path extends outside the available coordinate grid"
+            )
 
         kx_indices = np.array([np.argmin(np.abs(kx_np - v)) for v in kx_path])
         ky_indices = np.array([np.argmin(np.abs(ky_np - v)) for v in ky_path])
@@ -405,6 +508,19 @@ class TACAWData(PySliceSerial, Signal):
     def plot(self, intensities, xvals, yvals,
              xlabel="kx (Å⁻¹)", ylabel="ky (Å⁻¹)",
              filename=None, title=None, extent=None):
+        """Plot a TACAW-derived heatmap.
+
+        Args:
+            intensities: Two-dimensional array to display.
+            xvals: Coordinate array or one of ``"kx"``, ``"ky"``, ``"x"``,
+                ``"y"``, ``"k"``, or ``"omega"``.
+            yvals: Coordinate array or the same coordinate aliases as ``xvals``.
+            xlabel: Label used when ``xvals`` is an explicit array.
+            ylabel: Label used when ``yvals`` is an explicit array.
+            filename: Save destination. If omitted, display the figure.
+            title: Optional axes title.
+            extent: Explicit Matplotlib image extent.
+        """
         import matplotlib.pyplot as plt
 
         _AXIS_MAP = {
@@ -416,18 +532,46 @@ class TACAWData(PySliceSerial, Signal):
             "omega": ("frequency (THz)", lambda s: s.frequencies),
         }
 
+        x_alias = xvals if isinstance(xvals, str) else None
+        y_alias = yvals if isinstance(yvals, str) else None
         if isinstance(xvals, str) and xvals in _AXIS_MAP:
             xlabel, xvals = _AXIS_MAP[xvals][0], _AXIS_MAP[xvals][1](self)
         if isinstance(yvals, str) and yvals in _AXIS_MAP:
             ylabel, yvals = _AXIS_MAP[yvals][0], _AXIS_MAP[yvals][1](self)
 
-        if extent is None:
-            extent = (np.amin(xvals), np.amax(xvals), np.amin(yvals), np.amax(yvals))
+        xvals = np.asarray(xvals)
+        yvals = np.asarray(yvals)
         aspect = "auto" if ylabel == "frequency (THz)" else None
 
         fig, ax = plt.subplots()
-        ax.imshow(to_numpy(np.abs(intensities)), cmap="inferno",
-                  extent=extent, aspect=aspect)
+        values = to_numpy(np.abs(intensities))
+
+        # TACAW reciprocal/real patterns are stored (x, y), whereas imshow
+        # consumes (row=y, column=x). Dispersion is already (frequency, path).
+        pattern_aliases = {("kx", "ky"), ("k", "ky"), ("x", "y")}
+        if (x_alias, y_alias) in pattern_aliases:
+            values = values.T
+        elif values.shape == (len(xvals), len(yvals)) and values.shape != (len(yvals), len(xvals)):
+            values = values.T
+        elif values.shape != (len(yvals), len(xvals)):
+            raise ValueError(
+                "intensities must have shape (len(yvals), len(xvals)); "
+                "PySlice (x, y) patterns are transposed automatically for named axes"
+            )
+
+        if extent is not None:
+            xmin, xmax, ymin, ymax = extent
+            xmask = (xvals >= xmin) & (xvals <= xmax)
+            ymask = (yvals >= ymin) & (yvals <= ymax)
+            if not np.any(xmask) or not np.any(ymask):
+                raise ValueError("extent does not overlap the plotted coordinates")
+            values = values[np.ix_(ymask, xmask)]
+            xvals = xvals[xmask]
+            yvals = yvals[ymask]
+
+        actual_extent = (xvals.min(), xvals.max(), yvals.min(), yvals.max())
+        ax.imshow(values, cmap="inferno", extent=actual_extent, aspect=aspect,
+                  origin="lower")
         ax.set_xlabel(xlabel); ax.set_ylabel(ylabel)
         if title:
             ax.set_title(title)
@@ -436,6 +580,7 @@ class TACAWData(PySliceSerial, Signal):
         else:
             plt.show()
         plt.close(fig)
+        return fig, ax
 
 
 class SEDData(TACAWData):
