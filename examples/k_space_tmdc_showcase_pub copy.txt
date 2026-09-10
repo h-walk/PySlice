@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+"""
+TMDC Phonon Dispersion from First Principles
+
+Predicts momentum-resolved vibrational EELS across TMDC monolayers:
+1. Build crystal structure with ASE
+2. Run molecular dynamics with ORB force field
+3. Multislice electron scattering simulation
+4. TACAW frequency-domain analysis
+"""
+
+import os
+from pathlib import Path
+
+import gc
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+from ase.build import mx2, make_supercell
+
+from pyslice import Loader, MDCalculator, MultisliceCalculator, TACAWData
+
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+
+MATERIALS = {
+    "MoS2":  {"a": 3.160, "max_freq": 15.0, "spec_freq": 12.0},
+    "WS2":   {"a": 3.153, "max_freq": 15.0, "spec_freq": 11.0},
+    "MoSe2": {"a": 3.288, "max_freq": 10.0, "spec_freq": 3.5},
+    "WSe2":  {"a": 3.282, "max_freq": 10.0, "spec_freq": 6.5},
+}
+
+SUPERCELL = (50, 50, 1)
+TEMPERATURE = 300  # K
+MD_TIMESTEP = 5.0  # fs
+PRODUCTION_STEPS = 6000
+SAVE_INTERVAL = 6  # -> 1000 frames, Δf = 0.033 THz
+
+VOLTAGE_EV = 100e3
+SAMPLING = 0.1  # Å/pixel
+SLICE_THICKNESS = 0.5  # Å
+
+LOAD_FROM_CACHE = True
+SKIP_MD = True
+CACHED_WEIGHTS_PATH = os.environ.get("ORB_WEIGHTS_PATH")
+
+# =============================================================================
+# WORKFLOW
+# =============================================================================
+
+
+def build_tmdc_monolayer(formula: str, a: float):
+    """Build TMDC monolayer with orthogonal supercell."""
+    atoms = mx2(formula=formula, kind="2H", a=a, vacuum=15.0)
+    P = np.array([[1, 0, 0], [1, 2, 0], [0, 0, 1]])
+    ortho = make_supercell(atoms, P)
+    nx, ny, nz = SUPERCELL
+    supercell = ortho * (nx, ny // 2, nz)
+    supercell.pbc = True
+    return supercell
+
+
+def run_md(atoms, output_dir: Path):
+    """Run MD with ORB force field."""
+    traj_file = output_dir / "production.traj"
+    timestep_ps = MD_TIMESTEP * SAVE_INTERVAL / 1000
+
+    if SKIP_MD and traj_file.exists():
+        return Loader(filename=str(traj_file), timestep=timestep_ps).load()
+
+    md = MDCalculator(
+        model_name="orb-v3-conservative-inf-omat",
+        weights_path=CACHED_WEIGHTS_PATH,
+    )
+    md.setup(
+        atoms=atoms,
+        temperature=TEMPERATURE,
+        timestep=MD_TIMESTEP,
+        ensemble="nvt",
+        friction=0.2,
+        production_ensemble="nve",
+        production_relaxation_steps=100,
+        production_steps=PRODUCTION_STEPS,
+        save_interval=SAVE_INTERVAL,
+        output_dir=str(output_dir),
+    )
+    return md.run()
+
+
+def run_tacaw(trajectory, output_dir: Path):
+    """Run multislice + TACAW analysis."""
+    calc = MultisliceCalculator()
+    calc.setup(
+        trajectory,
+        aperture=0,
+        voltage_eV=VOLTAGE_EV,
+        sampling=SAMPLING,
+        slice_thickness=SLICE_THICKNESS,
+        save_path=output_dir,
+        cleanup_temp_files=False,
+    )
+    return TACAWData(calc.run(), chunkFFT=True)
+
+
+def compute_dispersion(tacaw, a: float, max_freq: float, name: str, output_dir: Path):
+    """Compute and plot dispersion along Γ-K-M-Γ path. Returns data dict."""
+    Gamma = np.array([0.0, 0.0])
+    M = np.array([1 / (2 * a), 1 / (2 * np.sqrt(3) * a)])
+    K = np.array([1 / (3 * a), 1 / (np.sqrt(3) * a)])
+
+    def interp(p1, p2, n):
+        t = np.linspace(0, 1, n, endpoint=False)
+        return p1[0] + t * (p2[0] - p1[0]), p1[1] + t * (p2[1] - p1[1])
+
+    d_GK, d_KM, d_MG = np.linalg.norm(K - Gamma), np.linalg.norm(M - K), np.linalg.norm(Gamma - M)
+    total = d_GK + d_KM + d_MG
+    n_GK, n_KM = int(500 * d_GK / total), int(500 * d_KM / total)
+    n_MG = 500 - n_GK - n_KM
+
+    kx = np.concatenate([interp(Gamma, K, n_GK)[0], interp(K, M, n_KM)[0], interp(M, Gamma, n_MG + 1)[0]])
+    ky = np.concatenate([interp(Gamma, K, n_GK)[1], interp(K, M, n_KM)[1], interp(M, Gamma, n_MG + 1)[1]])
+
+    k_dist = np.zeros(len(kx))
+    for i in range(1, len(kx)):
+        k_dist[i] = k_dist[i - 1] + np.sqrt((kx[i] - kx[i - 1])**2 + (ky[i] - ky[i - 1])**2)
+
+    dispersion = tacaw.dispersion(kx, ky)
+    freq_mask = (tacaw.frequencies >= 0) & (tacaw.frequencies <= max_freq)
+    disp = dispersion[freq_mask]
+    freq = tacaw.frequencies[freq_mask]
+
+    scaled = (disp * freq[:, None]**2) ** 0.25
+    scaled /= scaled.max()
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.imshow(scaled, cmap="inferno", origin="lower", aspect="auto",
+              extent=[k_dist.min(), k_dist.max(), freq.min(), freq.max()], vmin=0, vmax=1)
+    ax.set_ylabel("Frequency (THz)")
+    ax.set_title(f"{name} Phonon Dispersion", fontweight="bold")
+    ax.set_xticks([0, d_GK, d_GK + d_KM, total])
+    ax.set_xticklabels([r"$\Gamma$", "K", "M", r"$\Gamma$"])
+    for t in [0, d_GK, d_GK + d_KM, total]:
+        ax.axvline(t, color="white", alpha=0.4, lw=0.6)
+    plt.savefig(output_dir / f"{name}_dispersion.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+    return {
+        "dispersion": disp,
+        "frequencies": freq,
+        "k_dist": k_dist,
+        "pos_Gamma": 0.0,
+        "pos_K": d_GK,
+        "pos_M": d_GK + d_KM,
+        "pos_Gamma2": total,
+    }
+
+
+def compute_spectral_diffraction(tacaw, a: float, freq: float, name: str, output_dir: Path):
+    """Compute and plot spectral diffraction at given frequency. Returns data dict."""
+    spec = tacaw.spectral_diffraction(freq)
+
+    kx_zero = np.argmin(np.abs(tacaw.kxs))
+    ky_zero = np.argmin(np.abs(tacaw.kys))
+    spec[kx_zero, ky_zero] = 0
+
+    M = np.array([1 / (2 * a), 1 / (2 * np.sqrt(3) * a)])
+    k_max = 3 * np.linalg.norm(M)
+    kx_mask = np.abs(tacaw.kxs) <= k_max
+    ky_mask = np.abs(tacaw.kys) <= k_max
+
+    spec_cropped = spec[kx_mask][:, ky_mask]
+    kxs_cropped = tacaw.kxs[kx_mask]
+    kys_cropped = tacaw.kys[ky_mask]
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.imshow(spec_cropped.T ** 0.25, cmap="inferno", origin="lower", aspect="equal",
+              extent=[kxs_cropped.min(), kxs_cropped.max(), kys_cropped.min(), kys_cropped.max()])
+    ax.set_xlabel(r"$k_x$ ($\AA^{-1}$)")
+    ax.set_ylabel(r"$k_y$ ($\AA^{-1}$)")
+    ax.set_title(f"{name} Spectral Diffraction @ {freq} THz", fontweight="bold")
+    plt.savefig(output_dir / f"{name}_spectral_diffraction.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+    return {"spec_diff": spec_cropped, "kxs_cropped": kxs_cropped, "kys_cropped": kys_cropped}
+
+
+def compute_spectrum(tacaw, max_freq: float, name: str, output_dir: Path):
+    """Compute and plot frequency spectrum. Returns data dict."""
+    spectrum = tacaw.spectrum()
+    freq_mask = (tacaw.frequencies >= 0) & (tacaw.frequencies <= max_freq)
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(tacaw.frequencies[freq_mask], spectrum[freq_mask], "b-", lw=2)
+    ax.fill_between(tacaw.frequencies[freq_mask], spectrum[freq_mask], alpha=0.3)
+    ax.set_xlabel("Frequency (THz)")
+    ax.set_ylabel("Intensity")
+    ax.set_title(f"{name} Frequency Spectrum", fontweight="bold")
+    ax.set_xlim(0, max_freq)
+    ax.grid(alpha=0.3)
+    plt.savefig(output_dir / f"{name}_spectrum.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+    return {"spectrum": spectrum[freq_mask], "spectrum_freq": tacaw.frequencies[freq_mask]}
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
+
+def main():
+    output_base = Path(__file__).parent / "outputs"
+    output_base.mkdir(exist_ok=True)
+
+    for name, params in MATERIALS.items():
+        print(f"\n{'='*60}\n{name}\n{'='*60}")
+
+        output_dir = output_base / name
+        output_dir.mkdir(exist_ok=True)
+
+        result_file = output_dir / f"{name}_results.npz"
+        if LOAD_FROM_CACHE and result_file.exists():
+            print(f"Loading cached results for {name}...")
+            continue
+
+        atoms = build_tmdc_monolayer(name, params["a"])
+        trajectory = run_md(atoms, output_dir)
+        tacaw = run_tacaw(trajectory, output_dir)
+
+        disp_data = compute_dispersion(tacaw, params["a"], params["max_freq"], name, output_dir)
+        spec_diff_data = compute_spectral_diffraction(tacaw, params["a"], params["spec_freq"], name, output_dir)
+        spec_data = compute_spectrum(tacaw, params["max_freq"], name, output_dir)
+
+        # Save results
+        np.savez(
+            output_dir / f"{name}_results.npz",
+            dispersion=disp_data["dispersion"],
+            k_dist=disp_data["k_dist"],
+            frequencies=disp_data["frequencies"],
+            pos_Gamma=disp_data["pos_Gamma"],
+            pos_K=disp_data["pos_K"],
+            pos_M=disp_data["pos_M"],
+            pos_Gamma2=disp_data["pos_Gamma2"],
+            spec_diff=spec_diff_data["spec_diff"],
+            kxs_cropped=spec_diff_data["kxs_cropped"],
+            kys_cropped=spec_diff_data["kys_cropped"],
+            spectrum=spec_data["spectrum"],
+            spectrum_freq=spec_data["spectrum_freq"],
+        )
+
+        # Clear GPU memory
+        del trajectory, tacaw
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
+
+
+if __name__ == "__main__":
+    main()
