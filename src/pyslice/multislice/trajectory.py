@@ -5,12 +5,14 @@ from dataclasses import dataclass
 import numpy as np
 from typing import List, Tuple, Optional
 from ase import Atoms
+from ase import units as ase_units
 
 @dataclass
 class Trajectory:
     """Molecular trajectory data used by PySlice simulations.
 
-    Arrays use shape ``(n_frames, n_atoms, 3)`` for positions and velocities.
+    Arrays use shape ``(n_frames, n_atoms, 3)`` for positions (Angstroms) and
+    velocities (Angstroms per picosecond).
     ``box_matrix`` is a 3x3 cell matrix with lattice vectors stored by row, and
     ``timestep`` is measured in picoseconds.
     """
@@ -771,5 +773,5 @@ class Trajectory:
                 cell=self.box_matrix,
                 pbc=True,
             )
-        atoms.set_velocities(self.velocities[frame])
+        atoms.set_velocities(self.velocities[frame] / (1000 * ase_units.fs))
         return atoms

@@ -94,7 +94,9 @@ def test_to_ase_supports_numeric_types_and_selected_frame():
 
     assert atoms.get_chemical_symbols() == ["Si"]
     np.testing.assert_allclose(atoms.positions, [[1.0, 1.0, 1.0]])
-    np.testing.assert_allclose(atoms.get_velocities(), [[2.0, 2.0, 2.0]])
+    from ase import units
+    np.testing.assert_allclose(atoms.get_velocities(),
+                               np.full((1, 3), 2.0 / (1000 * units.fs)))
 
 
 def test_center_of_mass_drift_is_mass_weighted_and_removable():

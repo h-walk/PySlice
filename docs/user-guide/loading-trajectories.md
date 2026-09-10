@@ -8,7 +8,7 @@ It is not a lossless atomistic archive.
 | Field | Shape | Unit/meaning |
 |---|---|---|
 | `positions` | `(frame, atom, 3)` | Å |
-| `velocities` | `(frame, atom, 3)` | source-dependent; absent values become zero |
+| `velocities` | `(frame, atom, 3)` | Å/ps; absent values become zero |
 | `atom_types` | `(atom,)` | element symbols or atomic numbers |
 | `box_matrix` | `(3, 3)` | one fixed cell, row lattice vectors in Å |
 | `timestep` | scalar | spacing between saved frames in ps |
@@ -18,6 +18,14 @@ Variable-cell ASE trajectories are rejected rather than silently collapsed to
 one cell. PySlice does not preserve arbitrary ASE arrays/info, charges, tags,
 constraints, atom IDs, per-frame timestamps, per-frame cells, or PBC flags.
 Keep the source ASE/OVITO object or file as the archival record.
+
+ASE velocities are converted from ASE's internal time units to Å/ps on import,
+and converted back by `Trajectory.to_ase()` and `trajectory_to_ase()`. OVITO
+values are read unchanged: supply velocities in Å/ps (for example, LAMMPS
+`units metal`), or convert the source before loading. Choosing `timestep` sets
+saved-frame spacing; it does not rescale source velocities. Previously loaded
+in-memory trajectories with raw ASE velocities must be reloaded from ASE before
+exporting physically calibrated velocities.
 
 ## Format guidance
 
@@ -107,6 +115,7 @@ it when whole-body translation is itself part of the phenomenon being studied.
 ## File-loader cache
 
 File inputs create `.npy` sidecars and a `.cache.json` manifest beside the
-source. The manifest includes source size/modification time, mapping, and OVITO
-arguments. Editing the source or parser settings invalidates reuse. Delete the
+source. The manifest includes source and parser content hashes, mapping, OVITO
+arguments, and checksums of all four arrays. Interrupted or mixed-generation
+writes are rejected, as are edits to the source or parser settings. Delete the
 sidecars when moving or auditing a dataset if provenance is uncertain.

@@ -24,7 +24,8 @@ class WFData(PySliceSerial, Signal):
     """
 
     _sea_config = {
-        'tensor_attrs': ['_kxs', '_kys', '_xs', '_ys', '_time', '_layer', '_array'],
+        'tensor_attrs': ['_kxs', '_kys', '_xs', '_ys', '_time', '_layer', '_array',
+                         '_copy_wavelengths'],
         'path_attrs': ['cache_dir'],
         'tuple_list_attrs': ['probe_positions'],
         'exclude_attrs': ['probe', '_backend'],
@@ -77,6 +78,11 @@ class WFData(PySliceSerial, Signal):
         self._ys    = ys
         self._layer = layer
         self.probe  = probe
+        wavelengths = getattr(probe, 'wavelengths', None)
+        self._copy_wavelengths = (
+            backend.clone(backend.asarray(wavelengths))
+            if wavelengths is not None else None
+        )
         self.cache_dir = cache_dir
         self.probability = None
         self._array = array
@@ -89,7 +95,8 @@ class WFData(PySliceSerial, Signal):
             time_arr = to_numpy(time) if time is not None else np.array([0])
             self.dimensions = Dimensions([
                 Dimension(name='probe',  space='position',
-                          values=np.arange(len(probe_positions))),
+                          values=np.arange(array.shape[0] if array is not None
+                                           else len(probe_positions))),
                 Dimension(name='time',   space='temporal',   units='ps',
                           values=time_arr),
                 Dimension(name='kx',     space='scattering', units='Å⁻¹',
@@ -173,9 +180,11 @@ class WFData(PySliceSerial, Signal):
         to (nc, nx_probe, ny_probe, nt, kx, ky, nl).
         """
         b = self._backend
-        nc, nptp, _, _ = self.probe._array.shape
         nptp = len(self.probe_positions)
-        _, nt, nkx, nky, nl = self._array.shape
+        n_rows, nt, nkx, nky, nl = self._array.shape
+        if not nptp or n_rows % nptp:
+            raise ValueError("wavefunction rows must be a multiple of the scan-position count")
+        nc = n_rows // nptp
         intermediate = b.reshape(self._array, (nc, nptp, nt, nkx, nky, nl))
         nx, ny = len(self.probe_xs), len(self.probe_ys)
         reshaped = b.reshape(intermediate, (nc, ny, nx, nt, nkx, nky, nl))
@@ -389,7 +398,9 @@ class WFData(PySliceSerial, Signal):
     def _row_wavelengths(self):
         """Return one wavelength for each flattened copy/probe row."""
         b = self._backend
-        wavelengths = getattr(self.probe, "wavelengths", None)
+        wavelengths = getattr(self, "_copy_wavelengths", None)
+        if wavelengths is None:
+            wavelengths = getattr(self.probe, "wavelengths", None)
         if wavelengths is None:
             return b.zeros(self._array.shape[0]) + self.probe.wavelength
 
@@ -406,6 +417,24 @@ class WFData(PySliceSerial, Signal):
             wavelengths[:, None] * b.ones(n_positions)[None, :], (n_rows,)
         )
 
+    def _sync_dimension(self, name: str, values: np.ndarray) -> None:
+        """Update a regular Signal axis without replacing its metadata.
+
+        Parameters
+        ----------
+        name : str
+            Existing dimension name.
+        values : numpy.ndarray
+            New one-dimensional, regularly spaced coordinates.
+        """
+        if Dimensions is None:
+            return
+        dimension = self.dimensions[name]
+        dimension.values = np.array(values, copy=True)
+        dimension.size = len(values)
+        dimension.offset = float(values[0]) if len(values) else 0.0
+        dimension.scale = float(values[1] - values[0]) if len(values) > 1 else 1.0
+
     def pad_real_space(self,add_x=0,add_y=0):
         """Zero-pad the real-space wavefunction and update both coordinate grids.
 
@@ -418,7 +447,8 @@ class WFData(PySliceSerial, Signal):
             padded symmetrically, and transformed back in place.
         """
         b = self._backend
-        dx = self._xs[1]-self._xs[0] ; dy = self._ys[1]-self._ys[0]
+        dx = float(to_numpy(self._xs[1] - self._xs[0]))
+        dy = float(to_numpy(self._ys[1] - self._ys[0]))
         pix_x = int(round(add_x/dx)) ; pix_y = int(round(add_y/dy))
         npt, nt, nx, ny, nl = self._array.shape
         # self._array is an fftshifted spectrum, so undo the shift before the
@@ -436,6 +466,8 @@ class WFData(PySliceSerial, Signal):
         self._ys = b.linspace( self._ys[0]-dy*pix_y , self._ys[-1]+dy*pix_y , ny+pix_y*2 )
         self._kxs = b.fftshift(b.fftfreq(nx+pix_x*2, dx))  # k-space in 1/Å
         self._kys = b.fftshift(b.fftfreq(ny+pix_y*2, dy))  # k-space in 1/Å
+        self._sync_dimension('kx', self.kxs)
+        self._sync_dimension('ky', self.kys)
 
 
     def propagate_through_lens(
@@ -511,26 +543,52 @@ class WFData(PySliceSerial, Signal):
     def addSpatialDecoherence(self, sigma_dz: float, N: int):
         """Expand the probe axis with a Gaussian ensemble of defocus offsets.
 
-        Args:
-            sigma_dz: Defocus spread in Angstroms.
-            N: Number of weighted defocus samples between ``-2*sigma_dz`` and
-                ``+2*sigma_dz``.
+        Parameters
+        ----------
+        sigma_dz : float
+            Positive defocus spread in Angstroms, using the same Gaussian
+            amplitude convention as :meth:`Probe.addSpatialDecoherence`.
+        N : int
+            Positive number of samples between ``-2*sigma_dz`` and
+            ``+2*sigma_dz``. One sample is placed at zero defocus.
 
-        Notes:
-            This mutates the array and folds the new coherent-copy dimension
-            into the existing probe dimension.
+        Notes
+        -----
+        Every stored layer is expanded. Squared amplitude weights sum to one,
+        preserving intensity at each scan position. Rows remain copy-major,
+        with scan positions contiguous within each copy. Repeated calls add
+        another independent defocus ensemble without modifying the source Probe.
         """
+        if not np.isfinite(sigma_dz) or sigma_dz <= 0:
+            raise ValueError("sigma_dz must be finite and positive")
+        if isinstance(N, (bool, np.bool_)) or not isinstance(N, (int, np.integer)) or N < 1:
+            raise ValueError("N must be a positive integer")
         b = self._backend
-        dzs = b.linspace(-2 * sigma_dz, 2 * sigma_dz, N)
+        dzs = (b.asarray([0.0]) if N == 1 else
+               b.linspace(-2 * sigma_dz, 2 * sigma_dz, N))
         amplitudes = b.exp(-dzs ** 2 / sigma_dz ** 2)
-        self._array = self._array[:, None, :, :, :, :] * b.ones(N)[None, :, None, None, None, None]
-        nc, npt, nt, nx, ny, nl = self._array.shape
+        amplitudes /= b.sqrt(b.sum(amplitudes ** 2))
+        n_rows, nt, nx, ny, nl = self._array.shape
+        n_positions = len(self.probe_positions)
+        if not n_positions or n_rows % n_positions:
+            raise ValueError("wavefunction rows must be a multiple of the scan-position count")
+        wavelengths = self._row_wavelengths()
+        # Defocus is the outer copy index; the original flattened copy/position
+        # rows remain contiguous, as required by TACAW's incoherent summation.
+        expanded = (self._array[None, ...]
+                    * b.ones(N, dtype=b.complex_dtype)[:, None, None, None, None, None])
         kx_grid, ky_grid = b.meshgrid(self._kxs, self._kys, indexing='ij')
         k_sq = kx_grid ** 2 + ky_grid ** 2
         for i in range(N):
-            P = b.exp(-1j * b.pi * self.probe.wavelength * dzs[i] * k_sq)
-            self._array[:, i, :, :, :, :] *= amplitudes[i] * P[None, None, :, :, None]
-        self._array = b.reshape(self._array, (nc * npt, nt, nx, ny, nl))
+            P = b.exp(-1j * b.pi * wavelengths[:, None, None] * dzs[i] * k_sq)
+            expanded[i] *= amplitudes[i] * P[:, None, :, :, None]
+        copy_wavelengths = wavelengths[::n_positions]
+        self._copy_wavelengths = b.reshape(
+            b.ones(N)[:, None] * copy_wavelengths[None, :], (-1,)
+        )
+        self._array = b.reshape(expanded, (N * n_rows, nt, nx, ny, nl))
+        self.probability = None
+        self._sync_dimension('probe', np.arange(N * n_rows))
 
     def applyMask(self, radius: float, realOrReciprocal: str = "reciprocal"):
         """Apply a centered circular aperture to all stored waves in place.
@@ -570,14 +628,16 @@ class WFData(PySliceSerial, Signal):
         _, _, nx, ny, _ = self._array.shape
         i1, i2, j1, j2 = 0, nx, 0, ny
         if kx_range is not None:
-            i1 = int(np.argwhere(kxs_np >= kx_range[0])[0])
-            i2 = int(np.argwhere(kxs_np <= kx_range[1])[-1]) + 1
+            i1 = int(np.flatnonzero(kxs_np >= kx_range[0])[0])
+            i2 = int(np.flatnonzero(kxs_np <= kx_range[1])[-1]) + 1
         if ky_range is not None:
-            j1 = int(np.argwhere(kys_np >= ky_range[0])[0])
-            j2 = int(np.argwhere(kys_np <= ky_range[1])[-1]) + 1
+            j1 = int(np.flatnonzero(kys_np >= ky_range[0])[0])
+            j2 = int(np.flatnonzero(kys_np <= ky_range[1])[-1]) + 1
         self._array = self._array[:, :, i1:i2, j1:j2, :]
         self._kxs = self._kxs[i1:i2]
         self._kys = self._kys[j1:j2]
+        self._sync_dimension('kx', self.kxs)
+        self._sync_dimension('ky', self.kys)
 
     def aberrate(self, aberrations: dict):
         """Apply Cnm lens aberrations to every stored wavefunction in place.

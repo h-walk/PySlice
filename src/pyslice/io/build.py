@@ -81,7 +81,8 @@ def trajectory_to_ase(trajectory: Any, frame: int = 0):
     Returns
     -------
     ase.Atoms
-        The selected frame with periodic boundary conditions.
+        The selected frame with periodic boundary conditions and velocities
+        converted from Angstroms per picosecond to ASE internal units.
 
     Raises
     ------
@@ -93,13 +94,16 @@ def trajectory_to_ase(trajectory: Any, frame: int = 0):
     atom_symbols : The type normalization used here.
     """
     from ase import Atoms
+    from ase import units as ase_units
 
-    return Atoms(
+    atoms = Atoms(
         atom_symbols(trajectory),
         positions=trajectory.positions[frame],
         cell=trajectory.box_matrix,
         pbc=True,
     )
+    atoms.set_velocities(trajectory.velocities[frame] / (1000 * ase_units.fs))
+    return atoms
 
 
 def orthogonal_supercell_matrix(cell: np.ndarray, max_index: int = 6) -> np.ndarray:

@@ -29,6 +29,59 @@ def test_loader_cache_manifest_invalidates_changed_source(tmp_path):
     assert loader._load_from_cache() is None
 
 
+@pytest.mark.parametrize('failure', ['positions', 'velocities', 'atom_types',
+                                    'box_matrix', 'metadata'])
+def test_interrupted_cache_replacement_cannot_reuse_old_manifest(tmp_path, monkeypatch, failure):
+    """Every interrupted write leaves a cache miss, never wrong elements."""
+    import pyslice.io.loader as loader_module
+
+    source = tmp_path / 'trajectory.dump'
+    source.write_text('placeholder')
+    first = Loader(source, atom_mapping={1: 'Si'})
+    second = Loader(source, atom_mapping={1: 'C'})
+    first._save_to_cache(_trajectory())
+    replacement = _trajectory()
+    replacement.atom_types[:] = 6
+    save = np.save
+
+    def fail_save(filename, array):
+        """Fail at the selected array after writing its replacement."""
+        save(filename, array)
+        if filename == second._get_cache_files().get(failure):
+            raise OSError('interrupted cache write')
+
+    def fail_json(*args, **kwargs):
+        """Simulate interruption before the completion marker is published."""
+        raise OSError('interrupted cache write')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(loader_module.np, 'save', fail_save)
+        if failure == 'metadata':
+            patch.setattr(loader_module.json, 'dump', fail_json)
+        with pytest.raises(OSError, match='interrupted'):
+            second._save_to_cache(replacement)
+    assert first._load_from_cache() is None
+    assert second._load_from_cache() is None
+    assert not list(tmp_path.glob('*.tmp'))
+    second._save_to_cache(replacement)
+    np.testing.assert_array_equal(second._load_from_cache().atom_types, [6])
+    assert first._load_from_cache() is None
+
+
+@pytest.mark.parametrize('field', ['positions', 'velocities', 'atom_types', 'box_matrix'])
+def test_cache_rejects_mixed_payload_even_with_valid_manifest(tmp_path, field):
+    """A reader rejects arrays replaced by another writer or corrupted on disk."""
+    source = tmp_path / 'trajectory.dump'
+    source.write_text('placeholder')
+    loader = Loader(source, atom_mapping={1: 'Si'})
+    loader._save_to_cache(_trajectory())
+    cache_file = loader._get_cache_files()[field]
+    array = np.load(cache_file)
+    array.flat[0] += 1
+    np.save(cache_file, array)
+    assert loader._load_from_cache() is None
+
+
 def test_deprecated_loader_mapping_is_applied(tmp_path):
     source = tmp_path / "trajectory.dump"
     source.write_text("placeholder")

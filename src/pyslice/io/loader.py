@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import warnings
+from ase import units as ase_units
 from tqdm import tqdm
 from typing import Optional, Dict, Union
 
@@ -18,6 +19,25 @@ from ..multislice.potentials import get_z_from_element
 from ..backend import source_files_version
 
 logger = logging.getLogger(__name__)
+
+
+def _array_digest(array: np.ndarray) -> str:
+    """Hash a cache array's shape, dtype and values.
+
+    Parameters
+    ----------
+    array : numpy.ndarray
+        Numeric or fixed-width string cache array (never an object array).
+
+    Returns
+    -------
+    str
+        SHA-256 digest identifying the complete array contents.
+    """
+    array = np.ascontiguousarray(array)
+    digest = hashlib.sha256(repr((array.shape, array.dtype.str)).encode())
+    digest.update(array.reshape(-1).view(np.uint8))
+    return digest.hexdigest()
 
 
 def _ovito_cell_to_row_convention(matrix):
@@ -77,6 +97,9 @@ class Loader:
     file as ``*.npy`` files with a source/parser manifest. Variable-cell or
     identity-changing trajectories are rejected because ``Trajectory`` stores
     one fixed cell and atom ordering.
+
+    Velocities are stored in Angstroms per picosecond. ASE values are converted
+    automatically; OVITO sources must already use these units.
     """
 
     # The cache stores parser output, so parser changes must invalidate old
@@ -275,7 +298,9 @@ class Loader:
 
         try:
             with open(cache_files['metadata']) as f:
-                if json.load(f) != self._cache_identity():
+                metadata = json.load(f)
+                array_digests = metadata.pop('arrays_sha256', None)
+                if metadata != self._cache_identity() or array_digests is None:
                     logger.info("Ignoring stale cache for %s", self.filepath.name)
                     return None
 
@@ -285,6 +310,12 @@ class Loader:
             vel = np.load(cache_files['velocities'])
             atom_types = np.load(cache_files['atom_types'])
             box_mat = np.load(cache_files['box_matrix'])
+            arrays = dict(positions=pos, velocities=vel, atom_types=atom_types,
+                          box_matrix=box_mat)
+            if any(_array_digest(array) != array_digests.get(name)
+                   for name, array in arrays.items()):
+                logger.warning("Ignoring incomplete or mixed cache for %s", self.filepath.name)
+                return None
 
             if box_mat.shape != (3, 3):
                 raise ValueError(f"Invalid box_matrix shape: {box_mat.shape}")
@@ -311,17 +342,30 @@ class Loader:
         logger.info(f"Saving to cache for {self.filepath.name}")
         cache_files['positions'].parent.mkdir(parents=True, exist_ok=True)
 
-        np.save(cache_files['positions'], trajectory.positions)
-        np.save(cache_files['velocities'], trajectory.velocities)
-        np.save(cache_files['atom_types'], trajectory.atom_types)
-        np.save(cache_files['box_matrix'], trajectory.box_matrix)
+        # Invalidate the old completion marker BEFORE replacing any payload.
+        # Per-array digests also reject mixed generations during concurrent I/O.
+        cache_files['metadata'].unlink(missing_ok=True)
+        arrays = dict(positions=trajectory.positions, velocities=trajectory.velocities,
+                      atom_types=trajectory.atom_types, box_matrix=trajectory.box_matrix)
+        metadata = self._cache_identity()
+        metadata['arrays_sha256'] = {name: _array_digest(array)
+                                     for name, array in arrays.items()}
+        for name, array in arrays.items():
+            np.save(cache_files[name], array)
         # Written last: the metadata file is the completion marker for the
         # four-array cache, as well as its provenance record.
-        metadata_tmp = cache_files['metadata'].with_suffix(
-            cache_files['metadata'].suffix + '.tmp')
-        with open(metadata_tmp, 'w') as f:
-            json.dump(self._cache_identity(), f, sort_keys=True)
-        metadata_tmp.replace(cache_files['metadata'])
+        metadata_tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode='w', dir=cache_files['metadata'].parent,
+                prefix=cache_files['metadata'].name + '.', suffix='.tmp', delete=False,
+            ) as f:
+                metadata_tmp = Path(f.name)
+                json.dump(metadata, f, sort_keys=True)
+            metadata_tmp.replace(cache_files['metadata'])
+        finally:
+            if metadata_tmp is not None:
+                metadata_tmp.unlink(missing_ok=True)
 
     def load(self) -> Trajectory:
         """Load structure/trajectory from file or ASE Atoms object and return as Trajectory."""
@@ -671,7 +715,7 @@ np.savez(
         return self.ase2Trajectory(atoms)
 
     def ase2Trajectory(self, atoms):
-        """Convert ASE Atoms or list of Atoms to Trajectory.
+        """Convert ASE Atoms or list of Atoms to Trajectory with Å/ps velocities.
 
         Args:
             atoms: Either a single ASE Atoms object or a list/trajectory of Atoms objects
@@ -721,7 +765,7 @@ np.savez(
                     )
                 positions[i] = frame.get_positions()
                 if frame.get_velocities() is not None:
-                    velocities[i] = frame.get_velocities()
+                    velocities[i] = frame.get_velocities() * (1000 * ase_units.fs)
 
             atom_types = np.asarray(first_frame.get_chemical_symbols())
             box_matrix = first_cell
@@ -730,7 +774,7 @@ np.savez(
             positions = np.asarray([atoms.get_positions()])
             velocities_data = atoms.get_velocities()
             if velocities_data is not None:
-                velocities = np.asarray([velocities_data])
+                velocities = np.asarray([velocities_data]) * (1000 * ase_units.fs)
             else:
                 velocities = np.zeros_like(positions)
             atom_types = np.asarray(atoms.get_chemical_symbols())
