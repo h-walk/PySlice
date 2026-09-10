@@ -51,22 +51,34 @@ Use a path no denser than the effective reciprocal grid and check endpoints.
 Round-mask radii are also cycles/Å. Convert a detector semi-angle by
 `radius = angle_rad / tacaw.probe.wavelength`.
 
-## Bose correction
+## Bose correction and optional gain/loss folding
 
-Classical MD does not independently resolve electron energy-gain and energy-loss
-populations. Before quantum correction, PySlice therefore averages the
-inversion-related classical estimates
+Folding defaults to `fold=False`, including when Bose correction is enabled.
+`apply_bose=True` multiplies the existing signed-frequency intensity by
+`βhν / (1 - exp(-βhν))` without imposing inversion symmetry.
+
+Set `fold=True` to first average the inversion-related classical estimates
 
 ```text
 I(q, -frequency) = I(-q, frequency)
 ```
 
-with `fold_gain_loss()`. Pair averaging preserves spectral weight while using
-both frequency halves to reduce noise. `apply_bose_correction()` performs this
-fold automatically, then applies `βhν / (1 - exp(-βhν))` on the signed
-frequency axis. The retained negative-frequency side is consequently
-reconstructed by detailed balance rather than interpreted as an independent
-classical gain signal.
+Pair averaging preserves spectral weight and enforces this symmetry. Use it
+when that symmetry is appropriate for the observable being analyzed. Folding
+can be enabled independently of Bose correction:
+
+```python
+tacaw = TACAWData(wf, apply_bose=True, temperature_K=300.0)  # fold=False
+folded = TACAWData(wf, apply_bose=True, temperature_K=300.0, fold=True)
+classical_folded = TACAWData(wf, fold=True)  # no Bose weighting
+```
+
+For an existing, uncorrected object, call `apply_bose_correction(300.0, fold=True)`
+to fold before weighting, or `fold_gain_loss()` to fold alone. The method
+also defaults to `fold=False`; it does not undo an earlier fold. When folding
+is enabled before weighting, the retained gain and loss partners obey the
+imposed detailed-balance relation. FFT caches retain the uncorrected,
+unfolded data so later calls can select either option.
 
 For an even number of frames, the single Nyquist sample has no distinct
 positive/negative partner. It is treated as the periodic self-bin; do not use

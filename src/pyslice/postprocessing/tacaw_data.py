@@ -132,7 +132,8 @@ class TACAWData(PySliceSerial, Signal):
                  chunk_size_time: Optional[int] = None,
                  force_rerun: bool = False,
                  temperature_K: Optional[float] = None,
-                 apply_bose: bool = False) -> None:
+                 apply_bose: bool = False,
+                 fold: bool = False) -> None:
         """Transform time-domain exit waves into TACAW frequency data.
 
         Args:
@@ -146,9 +147,12 @@ class TACAWData(PySliceSerial, Signal):
                 and divide the number of saved frames exactly.
             force_rerun: Ignore a compatible ``tacaw.npy`` cache.
             temperature_K: Sample temperature used by the Bose correction.
-            apply_bose: Apply detailed-balance weighting after the FFT. This
-                first folds gain/loss partners and requires ``temperature_K``
-                and ``keep_complex=False``.
+            apply_bose: Apply signed Bose weighting after the FFT. Requires
+                ``temperature_K`` and ``keep_complex=False``. Does not enable
+                gain/loss folding by itself.
+            fold: Average inversion-related gain/loss intensity pairs before
+                any Bose weighting. Defaults to False and can be enabled
+                independently of ``apply_bose``. Requires ``keep_complex=False``.
 
         Notes:
             Frequencies are in THz. Negative bins represent gain and positive
@@ -184,7 +188,9 @@ class TACAWData(PySliceSerial, Signal):
 
         self._fft_from_wf_data(layer_index)
         if requested_bose_correction:
-            self.apply_bose_correction(self.temperature_K)
+            self.apply_bose_correction(self.temperature_K, fold=fold)
+        elif fold:
+            self.fold_gain_loss()
 
         if Dimensions is not None:
             self.dimensions = Dimensions([
@@ -260,16 +266,18 @@ class TACAWData(PySliceSerial, Signal):
         """TACAW data converted to a CPU NumPy array."""
         return to_numpy(self._array) if self._array is not None else None
 
-    def apply_bose_correction(self, temperature_K: float):
-        """Fold classical gain/loss pairs, then apply quantum weighting.
+    def apply_bose_correction(self, temperature_K: float, *, fold: bool = False):
+        """Apply signed Bose weighting, optionally folding gain/loss pairs first.
 
-        Before applying ``beta E / (1 - exp(-beta E))``, the classical
-        intensity is averaged under ``I(q, -frequency) = I(-q, frequency)``.
-        The signed weighting then reconstructs the gain side by detailed
-        balance rather than treating it as an independent classical signal.
+        By default, multiply the existing intensity by
+        ``beta E / (1 - exp(-beta E))`` without imposing inversion symmetry.
+        With ``fold=True``, first average the classical intensity under
+        ``I(q, -frequency) = I(-q, frequency)``. Already folded data stays folded.
 
         Args:
             temperature_K: Sample temperature in kelvin.
+            fold: Fold classical gain/loss partners before weighting. Defaults
+                to False; this flag does not undo an earlier explicit fold.
 
         Returns:
             This object, after mutating its intensity data and metadata.
@@ -283,7 +291,8 @@ class TACAWData(PySliceSerial, Signal):
         if self.apply_bose:
             raise ValueError("Bose correction has already been applied to this object")
 
-        self.fold_gain_loss()
+        if fold:
+            self.fold_gain_loss()
         b = self._backend
         factor = b.asarray(bose_correction_factor(self._frequencies, temperature_K), dtype=self._array.dtype)
         self._array = self._array * factor[None, :, None, None]
@@ -291,7 +300,7 @@ class TACAWData(PySliceSerial, Signal):
         self.apply_bose = True
         if hasattr(self, "metadata") and self.metadata is not None:
             self.metadata.Simulation.temperature_K = float(temperature_K)
-            self.metadata.Simulation.gain_loss_folded = True
+            self.metadata.Simulation.gain_loss_folded = bool(self.gain_loss_folded)
             self.metadata.Simulation.bose_corrected = True
         return self
 
