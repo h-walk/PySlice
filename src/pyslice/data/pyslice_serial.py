@@ -10,15 +10,17 @@ from pathlib import Path
 from h5py import File, Group, Dataset
 from ..backend import to_numpy
 
-try:
-    import sys
-    sys.path.insert(1,"../../")
-    from pySEA.sea_eco.architecture.base_structure_numpy import Signal, Dimensions, Dimension, Metadata, safe_decode
-except Exception:
-    class Signal:
-        def to_sea(self,*args,**kwargs):
-            raise ImportError("pySEA is required for .to_sea() serialization")
-    Dimensions,Dimension,Metadata = None,None,None
+from .seashell import (
+    Dimension,
+    Dimensions,
+    Metadata,
+    Signal,
+    SignalQuantities,
+    adopt_signal_state,
+    safe_decode,
+    sea_available,
+)
+
 
 def _to_numpy(x):
     """Convert tensor or array-like to numpy array."""
@@ -52,6 +54,39 @@ class PySliceSerial:
     """
 
     _sea_config = {}
+
+    @property
+    def signal_quantities(self):
+        """Lazily provide the ``SignalQuantities`` Signal.__init__ would set.
+
+        PySlice data classes bypass ``Signal.__init__``, but sea-eco methods
+        such as ``Signal.show`` dereference ``signal_quantities.axis``. This
+        returns (and caches) an empty ``SignalQuantities`` — scalar measured
+        quantities, ``axis`` is ``None`` — or ``None`` when sea-eco is absent.
+
+        Returns
+        -------
+        SignalQuantities | None
+            Cached empty quantity description, or ``None`` without sea-eco.
+        """
+        cached = getattr(self, '_signal_quantities', None)
+        if cached is None:
+            if SignalQuantities is None:
+                return None
+            cached = SignalQuantities()
+            self._signal_quantities = cached
+        return cached
+
+    @signal_quantities.setter
+    def signal_quantities(self, value):
+        """Store an explicit quantity description.
+
+        Parameters
+        ----------
+        value : SignalQuantities | None
+            Replacement quantity description (e.g. set on reload).
+        """
+        self._signal_quantities = value
 
     def to_hdf5_group(self, parent_group, force_datasets=None, name=None):
         """Serialize to HDF5 group with automatic type conversions."""
@@ -195,8 +230,8 @@ class PySliceSerial:
                     dims = Dimensions()
                     dims.from_hdf5_group(item)
                     self._local_dimensions = dims
-                elif sea_type == 'GeneralMetadata':
-                    meta = GeneralMetadata()
+                elif sea_type in ('Metadata', 'GeneralMetadata'):
+                    meta = Metadata()
                     meta.from_hdf5_group(item)
                     if key == 'metadata' or key == 'Metadata':
                         self.metadata = meta

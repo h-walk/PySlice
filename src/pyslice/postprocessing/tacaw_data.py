@@ -15,6 +15,7 @@ from tqdm import tqdm
 
 from .wf_data import WFData
 from ..data.pyslice_serial import PySliceSerial, Signal, Dimensions, Dimension, Metadata
+from ..data.seashell import adopt_signal_state
 from pyslice.backend import Backend, to_numpy, source_files_version
 
 logger = logging.getLogger(__name__)
@@ -217,7 +218,7 @@ class TACAWData(PySliceSerial, Signal):
                           values=to_numpy(self._kxs)),
                 Dimension(name='ky',        space='scattering', units='Å⁻¹',
                           values=to_numpy(self._kys)),
-            ], nav_dimensions=[0, 1], sig_dimensions=[2, 3])
+            ], nav_dimensions=[0, 1], det_dimensions=[2, 3])
 
             self.metadata = Metadata({
                 'General':    {'title': 'TACAW Intensity', 'signal_type': 'TACAW'},
@@ -232,6 +233,7 @@ class TACAWData(PySliceSerial, Signal):
                 },
             })
             self.sea_type = "Signal"
+        adopt_signal_state(self, 'TACAW')
 
     # ------------------------------------------------------------------
     # Properties

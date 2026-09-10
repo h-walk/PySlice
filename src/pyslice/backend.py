@@ -90,6 +90,29 @@ class Backend(ABC):
     complex_dtype: Any
     device: Any
 
+    def __deepcopy__(self, memo: dict[int, Any]) -> Backend:
+        """Copy backend settings while sharing the array-library module.
+
+        Parameters
+        ----------
+        memo : dict
+            Object memo supplied by Python's deep-copy protocol.
+
+        Returns
+        -------
+        Backend
+            An independent copy of backend settings. The ``xp`` module is
+            shared, since Python modules cannot be deep-copied. This permits
+            SEA Signal reductions and plotting to copy PySlice results.
+        """
+        from copy import deepcopy
+
+        result = type(self).__new__(type(self))
+        memo[id(self)] = result
+        for name, value in self.__dict__.items():
+            setattr(result, name, value if name == "xp" else deepcopy(value, memo))
+        return result
+
     # ------------------------------------------------------------------
     # Private kwarg-translation helpers
     # Written once here; eliminates per-function if/else throughout the module.

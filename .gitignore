@@ -9,6 +9,9 @@ wheels/
 # Virtual environments
 .venv
 
+# Documentation build output
+docs/_build/
+
 # Large data directories (exclude from version control)
 psi_data/
 extras/

@@ -9,6 +9,7 @@ from typing import List, Optional, Tuple
 
 from ..multislice.multislice import Probe, aberrationFunction
 from ..data.pyslice_serial import PySliceSerial, Signal, Dimensions, Dimension, Metadata
+from ..data.seashell import adopt_signal_state
 from pyslice.backend import Backend, to_numpy
 
 
@@ -83,18 +84,21 @@ class WFData(PySliceSerial, Signal):
         # Build Signal dimensions
         if Dimensions is not None:
             layer_arr = to_numpy(layer) if layer is not None else np.array([0])
+            if layer_arr.size == 0:  # return_layers=None: wavefunction output suppressed
+                layer_arr = np.array([0])
+            time_arr = to_numpy(time) if time is not None else np.array([0])
             self.dimensions = Dimensions([
                 Dimension(name='probe',  space='position',
                           values=np.arange(len(probe_positions))),
                 Dimension(name='time',   space='temporal',   units='ps',
-                          values=to_numpy(time)),
+                          values=time_arr),
                 Dimension(name='kx',     space='scattering', units='Å⁻¹',
                           values=to_numpy(kxs)),
                 Dimension(name='ky',     space='scattering', units='Å⁻¹',
                           values=to_numpy(kys)),
                 Dimension(name='layer',  space='position',
                           values=layer_arr),
-            ], nav_dimensions=[0, 1], sig_dimensions=[2, 3, 4])
+            ], nav_dimensions=[0, 1], det_dimensions=[2, 3, 4])
 
             pp_array = np.array(probe_positions).flatten().tolist()
             self.metadata = Metadata({
@@ -110,6 +114,7 @@ class WFData(PySliceSerial, Signal):
                     'n_probes': len(probe_positions),
                 },
             })
+        adopt_signal_state(self, 'Wavefunction')
 
     # ------------------------------------------------------------------
     # Properties — public interface always returns numpy

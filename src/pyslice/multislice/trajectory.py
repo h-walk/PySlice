@@ -712,6 +712,46 @@ class Trajectory:
             timestep=0.0
         )
 
+    @property
+    def sea(self):
+        """Return this trajectory as a SEA ``atomic-structure`` collection.
+
+        Resolution is implicit: no conversion call and no ``to_sea`` step is
+        needed. The result is a marked, validated ``SignalCollection`` per
+        sea-eco's ``signal-containers`` schema (``atomic-structure`` profile
+        v1) — ``atoms`` and ``cell`` SignalSets with calibrated, categorical
+        axes — and is cached, since transforms return new ``Trajectory``
+        objects and therefore resolve fresh.
+
+        Returns
+        -------
+        SignalCollection
+            The calibrated SEA form of this trajectory.
+
+        Raises
+        ------
+        ImportError
+            If sea-eco is not installed; the message names the install extra.
+
+        See Also
+        --------
+        pyslice.data.atomic_structure.trajectory_to_atomic_structure : Builder.
+        pyslice.data.seashell.resolve : The generic resolution entry point.
+
+        Examples
+        --------
+        >>> trajectory.sea["atoms"]["element"].data  # doctest: +SKIP
+        array(['C', 'C'], dtype='<U1')
+        """
+        cached = getattr(self, "_sea_cache", None)
+        if cached is None:
+            from ..data import atomic_structure  # registers the resolver
+            from ..data.seashell import resolve
+
+            cached = resolve(self, kind="Sample")
+            object.__setattr__(self, "_sea_cache", cached)
+        return cached
+
     # returns an ase object
     def to_ase(self, frame: int = 0):
         """Convert one selected frame to an ASE ``Atoms`` object."""

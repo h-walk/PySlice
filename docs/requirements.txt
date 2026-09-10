@@ -1,0 +1,9 @@
+# Documentation build dependencies (see docs/sea-weeds/index.md "Building the docs").
+sphinx>=7.0
+myst-parser>=2.0
+sphinx-rtd-theme>=2.0
+# PySlice core imports needed for autodoc; heavy extras are mocked in conf.py.
+numpy
+scipy
+matplotlib
+ase

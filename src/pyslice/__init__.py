@@ -22,6 +22,7 @@ from .backend import (
     to_cpu,
     to_numpy,
 )
+from .io.databases import DatabaseError, search_structures, fetch_cif, load_structure_from_database
 from .io.loader import Loader
 from .md.molecular_dynamics import (
     FAIRChemMDCalculator,
@@ -57,6 +58,11 @@ __all__ = (
     "WFData",
     "TACAWData",
     "HAADFData",
+    # Structure database integrations
+    "DatabaseError",
+    "search_structures",
+    "fetch_cif",
+    "load_structure_from_database",
     # Molecular dynamics
     "MDCalculator",
     "ORBMDCalculator",

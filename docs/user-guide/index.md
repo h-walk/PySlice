@@ -1,6 +1,6 @@
 # PySlice user guide
 
-Start with the [README quick start](../../README.md#quick-start), then open only
+Start with the [README quick start](https://github.com/h-walk/PySlice#quick-start), then open only
 the guide relevant to the next decision:
 
 - [Loading trajectories](loading-trajectories.md)
@@ -14,3 +14,16 @@ the guide relevant to the next decision:
 
 Use public docstrings for current signatures. Examples are demonstrations
 unless they explicitly report convergence.
+
+```{toctree}
+:hidden:
+
+loading-trajectories
+multislice-grids
+stem-and-4dstem
+tacaw-analysis
+md-to-tacaw
+results-and-storage
+scaling
+troubleshooting
+```

@@ -87,6 +87,9 @@ notebook tutorial. Numbered files in `tests/` are regressions, not tutorials.
 
 ## Focused guides
 
+The [documentation home](docs/index.rst) also covers the optional MCP service,
+structure-database clients, periodic slab builder, and calibrated SEA results.
+
 - [Loading trajectories](docs/user-guide/loading-trajectories.md)
 - [Multislice grids](docs/user-guide/multislice-grids.md)
 - [STEM and 4D-STEM](docs/user-guide/stem-and-4dstem.md)

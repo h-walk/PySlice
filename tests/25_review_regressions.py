@@ -1251,18 +1251,19 @@ def test_adf_depth_stack_exposes_a_layer_dimension(monkeypatch):
             self.units = kwargs.get('units')
 
     class FakeDimensions:
-        def __init__(self, dimensions, nav_dimensions, sig_dimensions):
+        def __init__(self, dimensions, nav_dimensions, det_dimensions):
             self.dimensions = dimensions
             self.nav_dimensions = nav_dimensions
-            self.sig_dimensions = sig_dimensions
+            self.det_dimensions = det_dimensions
 
     class FakeMetadata:
         def __init__(self, values):
             self.Simulation = SimpleNamespace(**values['Simulation'])
 
-    monkeypatch.setattr(haadf_module, 'Dimension', FakeDimension)
-    monkeypatch.setattr(haadf_module, 'Dimensions', FakeDimensions)
-    monkeypatch.setattr(haadf_module, 'Metadata', FakeMetadata)
+    if haadf_module.Dimensions is None:
+        monkeypatch.setattr(haadf_module, 'Dimension', FakeDimension)
+        monkeypatch.setattr(haadf_module, 'Dimensions', FakeDimensions)
+        monkeypatch.setattr(haadf_module, 'Metadata', FakeMetadata)
 
     wf = _make_layered_wf(None, n_layers=2)
     adf = haadf_module.HAADFData(wf)

@@ -8,6 +8,7 @@ from pathlib import Path
 import logging
 from .wf_data import WFData
 from ..data.pyslice_serial import PySliceSerial, Signal, Dimensions, Dimension, Metadata
+from ..data.seashell import adopt_signal_state
 from pyslice.backend import Backend, to_numpy
 from ..multislice.multislice import (
     ANTIALIAS_CUTOFF_FRACTION,
@@ -84,6 +85,7 @@ class HAADFData(PySliceSerial, Signal):
             }
             self.metadata = Metadata(metadata_dict)
             self.sea_type="Signal"
+        adopt_signal_state(self, 'HAADF')
 
     def _set_dimensions(self, layer_values=None, layer_name='layer',
                         layer_units=None):
@@ -109,7 +111,7 @@ class HAADFData(PySliceSerial, Signal):
         dims = Dimensions(
             dimensions,
             nav_dimensions=list(range(len(dimensions))),
-            sig_dimensions=[],
+            det_dimensions=[],
         )
         # PySEA uses the public dimensions during normal operation and the
         # local copy during serialisation/deserialisation. Keep both congruent.
