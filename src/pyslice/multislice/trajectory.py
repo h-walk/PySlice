@@ -341,7 +341,8 @@ class Trajectory:
     def slice_positions(self,
                        x_range: Optional[Tuple[float, float]] = None,
                        y_range: Optional[Tuple[float, float]] = None,
-                       z_range: Optional[Tuple[float, float]] = None) -> 'Trajectory':
+                       z_range: Optional[Tuple[float, float]] = None,
+                       reset_coordinate_system=True) -> 'Trajectory':
         """
         Slice trajectory to include only atoms within specified spatial ranges.
 
@@ -379,24 +380,30 @@ class Trajectory:
         if mean_pos.shape[0] == 0:
             return self
 
-        # Apply filters
+        # Apply filters. The box is shrunk to each range's width, so the kept
+        # atoms must also be translated by the range lower bound; otherwise they
+        # keep their original coordinates and fall outside the new [0, width) box.
         atom_mask = np.ones(self.n_atoms, dtype=bool)
         new_box = self.box_matrix.copy()
+        origin_shift = np.zeros(3, dtype=self.positions.dtype)
 
         if x_range is not None:
             min_x, max_x = x_range
             atom_mask &= (mean_pos[:, 0] >= min_x) & (mean_pos[:, 0] <= max_x)
             new_box[0, 0] = max_x - min_x
+            origin_shift[0] = min_x
 
         if y_range is not None:
             min_y, max_y = y_range
             atom_mask &= (mean_pos[:, 1] >= min_y) & (mean_pos[:, 1] <= max_y)
             new_box[1, 1] = max_y - min_y
+            origin_shift[1] = min_y
 
         if z_range is not None:
             min_z, max_z = z_range
             atom_mask &= (mean_pos[:, 2] >= min_z) & (mean_pos[:, 2] <= max_z)
             new_box[2, 2] = max_z - min_z
+            origin_shift[2] = min_z
 
         # Check results
         n_filtered = np.sum(atom_mask)
@@ -407,15 +414,15 @@ class Trajectory:
             if z_range: ranges_desc.append(f"Z∈[{z_range[0]:.2f},{z_range[1]:.2f}]")
             raise ValueError(f"Filter {' AND '.join(ranges_desc)} resulted in 0 atoms")
 
-        new_positions = self.positions[:, atom_mask, :].copy()
-        for axis, coordinate_range in enumerate((x_range, y_range, z_range)):
-            if coordinate_range is not None:
-                new_positions[:, :, axis] -= coordinate_range[0]
+        if not reset_coordinate_system:
+            origin_shift *=  0
 
-        # Create filtered trajectory
+        # Create the cropped trajectory even when every atom survives. A range
+        # request changes the coordinate origin and box; returning self in that
+        # case silently discarded the requested crop.
         return Trajectory(
             atom_types=self.atom_types[atom_mask],
-            positions=new_positions,
+            positions=self.positions[:, atom_mask, :] - origin_shift,
             velocities=self.velocities[:, atom_mask, :],
             box_matrix=new_box,
             timestep=self.timestep
@@ -531,7 +538,7 @@ class Trajectory:
             timestep=0.0
         )
 
-    def plot(self, timestep=0, view='3d', alpha=0.6, size=20):
+    def plot(self, timestep=0, view='3d', alpha=0.6, size=20, filename = None):
         """
         Plot atomic positions.
 
@@ -542,6 +549,14 @@ class Trajectory:
             size: Marker size
         """
         import matplotlib.pyplot as plt
+
+        # Draw box outline
+        box = self.box_matrix
+        corners = np.array([
+            [0, 0, 0], [box[0,0], 0, 0], [box[0,0], box[1,1], 0], [0, box[1,1], 0],
+            [0, 0, box[2,2]], [box[0,0], 0, box[2,2]], [box[0,0], box[1,1], box[2,2]], [0, box[1,1], box[2,2]]
+        ])
+        edges = [(0,1), (1,2), (2,3), (3,0), (4,5), (5,6), (6,7), (7,4), (0,4), (1,5), (2,6), (3,7)]
 
         if view == '3d':
             fig = plt.figure(figsize=(10, 8))
@@ -563,18 +578,16 @@ class Trajectory:
             ax.set_zlabel('Z (Å)')
             ax.legend()
 
-            # Draw box outline
-            box = self.box_matrix
-            corners = np.array([
-                [0, 0, 0], [box[0,0], 0, 0], [box[0,0], box[1,1], 0], [0, box[1,1], 0],
-                [0, 0, box[2,2]], [box[0,0], 0, box[2,2]], [box[0,0], box[1,1], box[2,2]], [0, box[1,1], box[2,2]]
-            ])
-            edges = [(0,1), (1,2), (2,3), (3,0), (4,5), (5,6), (6,7), (7,4), (0,4), (1,5), (2,6), (3,7)]
             for edge in edges:
                 pts = corners[list(edge)]
                 ax.plot3D(pts[:,0], pts[:,1], pts[:,2], 'k-', alpha=0.3, linewidth=1)
         else:
             fig, ax = plt.subplots(figsize=(8, 8))
+
+            for edge in edges:
+                pts = corners[list(edge)]
+                xyzs = [[pts[:,0], pts[:,1], pts[:,2]]["xyz".index(c)] for c in view ]
+                ax.plot(xyzs[0], xyzs[1], 'k-', alpha=0.3, linewidth=1)
 
             # Select projection
             if view == 'xy':
@@ -604,7 +617,11 @@ class Trajectory:
             ax.set_aspect('equal')
 
         plt.tight_layout()
-        plt.show()
+
+        if filename is not None:
+            plt.savefig(filename)
+        else:
+            plt.show()
 
 
     def rotate_to(self, direction: Tuple[int, int, int]) -> 'Trajectory':

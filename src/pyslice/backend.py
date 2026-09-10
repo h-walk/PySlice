@@ -1,6 +1,7 @@
 # backend.py - Backend abstraction layer for NumPy/PyTorch support
 from __future__ import annotations
 
+import hashlib
 import os
 import logging
 from abc import ABC, abstractmethod
@@ -10,6 +11,27 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
+
+
+def source_files_version(paths, length: int = 8) -> str:
+    """Short content hash of the given source files.
+
+    Used to derive cache-version tags automatically: when any listed module's
+    source changes, the hash changes, so caches keyed on it are not reused with
+    stale physics. It errs toward over-invalidation (any edit, even a comment,
+    changes the hash) because recomputing is the safe failure mode. Missing or
+    unreadable files contribute a fixed marker instead of raising, so this never
+    breaks importing the package (e.g. from a zipapp).
+    """
+    h = hashlib.sha256()
+    for path in sorted(str(p) for p in paths):
+        h.update(path.encode())
+        try:
+            with open(path, "rb") as f:
+                h.update(f.read())
+        except OSError:
+            h.update(b"\x00<unreadable>")
+    return h.hexdigest()[:length]
 
 # ---------------------------------------------------------------------------
 # Optional torch import
@@ -511,7 +533,11 @@ class TorchBackend(Backend):
 
         if device_spec is None:
             if torch.cuda.is_available():
+                devices = os.environ.get('CUDA_VISIBLE_DEVICES', '')
+                #if len(devices)==0 or len(devices.split(","))==1: # not specified, or single-gpu specified
                 device = torch.device('cuda')
+                #else:
+                #    device = [ torch.device('cuda:'+d) for d in devices.split(",") ]
             elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
                 device = torch.device('mps')
             else:
@@ -536,7 +562,10 @@ class TorchBackend(Backend):
     def asarray(self, arraylike: Any, dtype=None, device=None) -> Any:
         dtype = self._normalize_dtype(dtype)
         if dtype is None:
-            dtype = self.float_dtype
+            if hasattr(arraylike,"dtype") and "complex" in str(arraylike.dtype):
+                dtype = self.complex_dtype
+            else:
+                dtype = self.float_dtype
         if device is None:
             device = self.device
         input_dtype = getattr(arraylike, 'dtype', None)

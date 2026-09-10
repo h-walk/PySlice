@@ -274,6 +274,21 @@ class MDCalculator:
 
         return atoms
 
+    @staticmethod
+    def _npt_barostat_params(pressure_bar: float, bulk_modulus_GPa: float):
+        """Return (externalstress, pfactor) for ase.md.npt.NPT, in ASE units.
+
+        externalstress is the target pressure converted from bar to eV/A^3;
+        pfactor = ptime^2 * B with ptime = 75 fs (ASE's suggested value) and B
+        the bulk modulus. Passing the bar value directly (as before) applied
+        ~1.6e5 bar, and pfactor = 75*fs**2 both dropped the square on ptime and
+        omitted B, so the barostat mass was ~10^5x too small.
+        """
+        externalstress = pressure_bar * units.bar
+        ptime = 75 * units.fs
+        pfactor = ptime ** 2 * (bulk_modulus_GPa * units.GPa)
+        return externalstress, pfactor
+
     def setup(
         self,
         atoms: Atoms,
@@ -300,6 +315,7 @@ class MDCalculator:
         save_xyz: bool = True,
         rng: Optional[np.random.Generator] = None,
         overwrite: bool = False,
+        bulk_modulus: Optional[float] = None,
     ):
         """
         Set up MD simulation.
@@ -315,6 +331,8 @@ class MDCalculator:
                 NPT barostat factor. Required when ensemble='npt'.
             thermostat_timescale: NPT thermostat timescale (fs).
             barostat_timescale: NPT barostat timescale (fs).
+            bulk_modulus: Compatibility alias for bulk_modulus_GPa (GPa).
+                Supply only one spelling.
             friction: Friction coefficient for Langevin thermostat during equilibration (fs^-1)
             production_ensemble: Fixed-cell ensemble for production: 'nvt' or
                 'nve'. Defaults to the equilibration ensemble, except NPT
@@ -346,6 +364,11 @@ class MDCalculator:
         self.timestep = timestep
         self.ensemble = ensemble.lower()
         self.pressure = pressure
+        if bulk_modulus is not None:
+            if bulk_modulus_GPa is not None:
+                raise TypeError("Supply only one of bulk_modulus and bulk_modulus_GPa")
+            bulk_modulus_GPa = bulk_modulus
+        self.bulk_modulus = bulk_modulus_GPa
         self.bulk_modulus_GPa = bulk_modulus_GPa
         self.thermostat_timescale = thermostat_timescale
         self.barostat_timescale = barostat_timescale

@@ -46,3 +46,40 @@ def test_ase_variable_cell_trajectory_is_rejected():
 
     with pytest.raises(ValueError, match="Variable-cell"):
         Loader(atoms=[first, second], timestep=0.01).load()
+
+
+@pytest.mark.parametrize("variable_cell", [False, True])
+def test_ovito_validates_fixed_triclinic_cells_in_row_convention(
+    tmp_path, monkeypatch, variable_cell
+):
+    import sys
+    from types import SimpleNamespace
+
+    source = tmp_path / "tilted.dump"
+    source.write_text("mock OVITO input")
+    cell = np.array([[3., 0., 0.], [1., 4., 0.], [0.5, 1., 5.]])
+    origin = np.array([1., 2., 3.])
+    frames = []
+    for i in range(2):
+        frame_cell = cell * (1.01 if variable_cell and i else 1)
+        frames.append(SimpleNamespace(
+            cell=SimpleNamespace(matrix=np.column_stack((frame_cell.T, origin))),
+            particles=SimpleNamespace(
+                positions=np.array([[1.5, 2.5, 3.5]]),
+                particle_types=np.array([1]),
+            ),
+        ))
+    pipeline = SimpleNamespace(source=SimpleNamespace(num_frames=2),
+                               modifiers=[], compute=lambda i: frames[i])
+    monkeypatch.setitem(sys.modules, "ovito.io", SimpleNamespace(
+        import_file=lambda *_args, **_kwargs: pipeline))
+    monkeypatch.setitem(sys.modules, "ovito.modifiers", SimpleNamespace(
+        UnwrapTrajectoriesModifier=lambda: None))
+    loader = Loader(source, atom_mapping={1: "Si"})
+    if variable_cell:
+        with pytest.raises(RuntimeError, match="Variable-cell"):
+            loader._load_via_ovito_direct()
+    else:
+        result = loader._load_via_ovito_direct()
+        np.testing.assert_allclose(result.box_matrix, cell)
+        np.testing.assert_allclose(result.positions, np.full((2, 1, 3), 0.5))

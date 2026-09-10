@@ -20,6 +20,9 @@ Python 3.12. A NumPy-only installation is available with
 `python -m pip install -e .`. See [INSTALL.md](INSTALL.md) for environment,
 backend, and verification details.
 
+For a small checkout without the historical simulation datasets, see the
+[lightweight checkout instructions](INSTALL.md#lightweight-checkout) below.
+
 ## Quick start
 
 This small calculation runs on CPU, downloads no model, and produces one static

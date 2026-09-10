@@ -4,6 +4,20 @@ The [README](README.md#installation) is the canonical installation guide.
 PySlice requires Python 3.12 or newer; ORB molecular dynamics currently
 requires Python 3.12 specifically.
 
+## Lightweight checkout
+
+For a fresh installation without the large historical test datasets, use:
+
+```bash
+git clone --filter=blob:none --no-checkout https://github.com/h-walk/PySlice.git
+cd PySlice
+git sparse-checkout set --no-cone '/*' '!/tests/*'
+git checkout main
+```
+
+This optional workflow is for a new clone, not for reorganizing an existing
+working directory. The full clone in the README also works.
+
 ## Recommended editable installation
 
 ```bash

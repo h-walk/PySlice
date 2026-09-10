@@ -3,10 +3,10 @@ Core data structure for TACAW EELS calculations.
 """
 from __future__ import annotations
 
-import logging
-import os
 import hashlib
 import json
+import logging
+import os
 from pathlib import Path
 from typing import List, Optional, Union
 
@@ -15,13 +15,12 @@ from tqdm import tqdm
 
 from .wf_data import WFData
 from ..data.pyslice_serial import PySliceSerial, Signal, Dimensions, Dimension, Metadata
-from pyslice.backend import Backend, to_numpy
+from pyslice.backend import Backend, to_numpy, source_files_version
 
 logger = logging.getLogger(__name__)
 
 K_B_EV_PER_K = 8.617333262145e-5
 THZ_TO_EV = 4.135667696e-3
-TACAW_CACHE_SCHEMA_VERSION = 2
 
 
 def _hash_array(array) -> str:
@@ -185,6 +184,22 @@ class TACAWData(PySliceSerial, Signal):
         self._wf_array   = wf_data._array
         self._array      = None
         self._frequencies = None
+
+        self.n_scan_positions = len(self.probe_positions)
+        if self.n_scan_positions == 0:
+            raise ValueError("TACAWData requires at least one probe position")
+        n_wave_rows = int(self._wf_array.shape[0])
+        if n_wave_rows % self.n_scan_positions != 0:
+            raise ValueError(
+                "Wavefunction probe rows must be an integer multiple of the "
+                f"{self.n_scan_positions} scan positions; got {n_wave_rows} rows."
+            )
+        self.n_copies = n_wave_rows // self.n_scan_positions
+        if self.keep_complex and self.n_copies > 1:
+            raise ValueError(
+                "keep_complex=True cannot combine incoherent decoherence copies; "
+                "use keep_complex=False to sum their spectral intensities."
+            )
 
         self._fft_from_wf_data(layer_index)
         if requested_bose_correction:
@@ -381,7 +396,7 @@ class TACAWData(PySliceSerial, Signal):
         cache_dir = None if self.cache_dir is None else Path(self.cache_dir)
         cache_tacaw = None if cache_dir is None else cache_dir / "tacaw.npy"
         cache_freq = None if cache_dir is None else cache_dir / "tacaw_freq.npy"
-        cache_manifest = None if cache_dir is None else cache_dir / "tacaw_manifest.json"
+        cache_meta = None if cache_dir is None else cache_dir / "tacaw_manifest.json"
 
         fft_len = self.chunk_size_time if self.chunk_size_time is not None else len(self._time)
         if self.chunk_size_time is None:
@@ -396,37 +411,39 @@ class TACAWData(PySliceSerial, Signal):
             else:
                 self.n_chunks = len(self._time) // self.chunk_size_time
 
-        source_fingerprint = self.source_fingerprint
-        if source_fingerprint is None:
-            source_fingerprint = _hash_array(self._wf_array[:, :, :, :, layer_index])
-        expected_manifest = {
-            "schema": TACAW_CACHE_SCHEMA_VERSION,
-            "source_fingerprint": source_fingerprint,
-            "source_shape": list(self._wf_array.shape),
-            "time_hash": _hash_array(self._time),
-            "kx_hash": _hash_array(self._kxs),
-            "ky_hash": _hash_array(self._kys),
-            "layer_index": self.layer_index,
-            "source_layer": int(to_numpy(self._layer)[self.layer_index]),
-            "keep_complex": bool(self.keep_complex),
-            "chunk_size_time": self.chunk_size_time,
-        }
+        # Resolve the layer up front: it — together with keep_complex, the
+        # chunking and the source-wavefunction identity — is part of the cache
+        # identity, so a different layer / dtype / dataset sharing this cache_dir
+        # is never served the wrong cached spectrum (a shape-only check was).
+        if layer_index is None:
+            layer_index = len(self._layer) - 1
+        if not (0 <= layer_index < len(self._layer)):
+            raise ValueError(
+                f"layer_index {layer_index} out of range [0, {len(self._layer) - 1}]")
 
-        if (
-            not self.force_rerun
-            and cache_tacaw is not None
-            and cache_tacaw.exists()
-            and cache_freq.exists()
-            and cache_manifest.exists()
-        ):
-            manifest = json.loads(cache_manifest.read_text())
-            cached = np.load(cache_tacaw, mmap_mode="r" if self.use_memmap else None)
-            _, nt, nx, ny, _ = self._wf_array.shape
-            _, nw, nx2, ny2  = cached.shape
-            if manifest == expected_manifest and nw == fft_len and nx == nx2 and ny == ny2:
-                self._frequencies = b.asarray(np.load(cache_freq))
-                self._array = b.asarray(cached)
-                return
+        meta = self._tacaw_cache_meta(layer_index, fft_len)
+        if (not self.force_rerun and cache_dir is not None
+                and cache_tacaw.exists() and cache_meta.exists()
+                and cache_freq.exists()):
+            try:
+                with open(cache_meta) as f:
+                    cached_meta = json.load(f)
+            except (OSError, ValueError):
+                cached_meta = None
+            if cached_meta == meta:
+                cached = np.load(cache_tacaw)
+                if list(cached.shape) == meta["array_shape"]:
+                    self._frequencies = b.asarray(np.load(cache_freq))
+                    self._array = b.asarray(cached)
+                    return
+
+        # A (re)compute invalidates any previous completion marker first, so an
+        # interrupted run (partial tacaw.npy — notably the memmap accumulator)
+        # is never mistaken for a complete cache on the next load.
+        if cache_dir is not None:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            if cache_meta.exists():
+                cache_meta.unlink()
 
         wf_layer = self._wf_array[:, :, :, :, layer_index]  # p,t,kx,ky
 
@@ -437,7 +454,7 @@ class TACAWData(PySliceSerial, Signal):
         if self.chunkFFT:
             # Memory-conservative path: loop over kx
             dtype = b.complex_dtype if self.keep_complex else b.float_dtype
-            shape = (wf_layer.shape[0], fft_len,
+            shape = (self.n_scan_positions, fft_len,
                      wf_layer.shape[2], wf_layer.shape[3])
             if self.use_memmap:
                 if cache_tacaw is None:
@@ -455,6 +472,7 @@ class TACAWData(PySliceSerial, Signal):
                     wf_fft  = b.fftshift(b.fft(sl - wf_mean, axes=1), axes=1)
                     if not self.keep_complex:
                         wf_fft = b.absolute(wf_fft) ** 2
+                        wf_fft = self._fold_incoherent_copies(wf_fft)
                     self._array[:, :, kx_i, :] += wf_fft
         else:
             # Standard path: FFT over full time window
@@ -465,17 +483,72 @@ class TACAWData(PySliceSerial, Signal):
                 wf_fft  = b.fftshift(b.fft(sl - wf_mean, axes=1), axes=1)
                 if not self.keep_complex:
                     wf_fft = b.absolute(wf_fft) ** 2
+                    wf_fft = self._fold_incoherent_copies(wf_fft)
                 self._array = wf_fft if self._array is None else self._array + wf_fft
 
-        # Persist to cache
+        # Completion marker is written last, after the entire array is flushed.
         if cache_dir is not None:
-            cache_dir.mkdir(parents=True, exist_ok=True)
             np.save(cache_freq, to_numpy(self._frequencies))
-            if not self.use_memmap:
+            if isinstance(self._array, np.memmap):
+                self._array.flush()
+            else:
                 np.save(cache_tacaw, to_numpy(self._array))
-            cache_manifest.write_text(
-                json.dumps(expected_manifest, indent=2, sort_keys=True)
-            )
+            metadata_tmp = cache_meta.with_suffix(".json.tmp")
+            metadata_tmp.write_text(json.dumps(meta, sort_keys=True))
+            metadata_tmp.replace(cache_meta)
+
+    # Derived automatically from the sources that determine the TACAW spectrum
+    # values, so a change to the FFT/normalisation invalidates stale tacaw.npy
+    # caches without a manual bump. "v1" allows a manual bump if ever needed.
+    _TACAW_CACHE_VERSION = "v1-" + source_files_version([
+        os.path.join(os.path.dirname(__file__), "tacaw_data.py"),
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "backend.py"),
+    ])
+
+    def _tacaw_cache_meta(self, layer_index: int, fft_len: int) -> dict:
+        """Identity of the cached spectrum: everything that changes its values."""
+        n_probes = self.n_scan_positions
+        nkx = int(self._wf_array.shape[2])
+        nky = int(self._wf_array.shape[3])
+        return {
+            "cache_version": self._TACAW_CACHE_VERSION,
+            "layer_index": int(layer_index),
+            "keep_complex": bool(self.keep_complex),
+            "fft_len": int(fft_len),
+            "n_chunks": int(self.n_chunks),
+            "n_copies": int(self.n_copies),
+            "array_shape": [n_probes, int(fft_len), nkx, nky],
+            "wf_dtype": str(getattr(self._wf_array, "dtype", "")),
+            "wf_fingerprint": self._array_fingerprint(
+                self._wf_array[:, :, :, :, layer_index]),
+            "time_fingerprint": self._array_fingerprint(self._time),
+            "kx_fingerprint": self._array_fingerprint(self._kxs),
+            "ky_fingerprint": self._array_fingerprint(self._kys),
+        }
+
+    def _fold_incoherent_copies(self, intensity):
+        """Sum copy-major spectral intensities onto physical scan positions."""
+        if self.n_copies == 1:
+            return intensity
+        b = self._backend
+        folded_shape = (
+            self.n_copies,
+            self.n_scan_positions,
+        ) + tuple(int(s) for s in intensity.shape[1:])
+        return b.sum(b.reshape(intensity, folded_shape), axis=0)
+
+    @staticmethod
+    def _array_fingerprint(arr) -> str:
+        """Hash every value without materialising a potentially huge CPU copy."""
+        flat = arr.reshape(-1)
+        n = int(flat.shape[0])
+        digest = hashlib.sha256()
+        digest.update(repr(tuple(int(s) for s in arr.shape)).encode())
+        digest.update(str(getattr(arr, "dtype", "")).encode())
+        for start in range(0, n, 1 << 20):
+            block = np.ascontiguousarray(to_numpy(flat[start:start + (1 << 20)]))
+            digest.update(block.tobytes())
+        return digest.hexdigest()
 
     def fft_from_wf_data(self, layer_index: Optional[int] = None):
         """Recompute TACAW data from the stored wavefunctions.

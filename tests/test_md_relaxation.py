@@ -109,6 +109,19 @@ def test_md_setup_requires_bulk_modulus_for_npt(tmp_path):
         calc.setup(atoms, ensemble="npt", output_dir=tmp_path)
 
 
+def test_npt_accepts_upstream_bulk_modulus_alias(tmp_path):
+    calc = EMTMDCalculator()
+    calc.setup(bulk("Cu", "fcc", a=3.8, cubic=True), ensemble="npt",
+               bulk_modulus=140.0, barostat_timescale=100.0,
+               output_dir=tmp_path)
+    assert calc.bulk_modulus_GPa == 140.0
+    assert calc.production_ensemble == "nvt"
+    assert np.isclose(calc.dyn.pfactor_given,
+                      (100 * units.fs) ** 2 * (140 * units.GPa))
+    with pytest.raises(TypeError, match="only one"):
+        calc.setup(calc.atoms, bulk_modulus=140, bulk_modulus_GPa=140)
+
+
 def test_md_setup_rejects_npt_production(tmp_path):
     calc = EMTMDCalculator()
     atoms = bulk("Cu", "fcc", a=3.8, cubic=True)

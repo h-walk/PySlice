@@ -114,3 +114,29 @@ def test_haadf_plot_uses_ascending_xy_orientation(tmp_path, monkeypatch):
     assert image.origin == "lower"
     np.testing.assert_array_equal(np.asarray(image.get_array()), haadf.array.T)
     close_figure(plt.gcf())
+
+
+def test_depth_resolved_plot_tiles_nonzero_origin_without_flipping(tmp_path):
+    import matplotlib.pyplot as plt
+
+    haadf = _make_haadf_data()
+    haadf._xs = np.array([2.0, 3.0])
+    haadf._ys = np.array([5.0, 7.0, 9.0])
+    haadf._array = np.arange(12).reshape(2, 2, 3)
+    haadf.plot(tmp_path / "depth_tiles.png", layer=1, tiling=(2, 2))
+    image = plt.gcf().axes[0].images[0]
+    np.testing.assert_array_equal(image.get_array(),
+                                  np.tile(haadf._array[1], (2, 2)).T)
+    np.testing.assert_allclose(image.get_extent(), [1.5, 5.5, 4, 16])
+    assert image.origin == "lower"
+    plt.close(plt.gcf())
+
+
+def test_plot_rejects_unknown_singleton_tiling_period(tmp_path):
+    import matplotlib.pyplot as plt
+
+    haadf = _make_haadf_data()
+    haadf._array = np.ones((1, 1))
+    with pytest.raises(ValueError, match="singleton"):
+        haadf.plot(tmp_path / "invalid.png", tiling=(2, 1))
+    plt.close(plt.gcf())

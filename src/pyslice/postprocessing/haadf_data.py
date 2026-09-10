@@ -57,6 +57,9 @@ class HAADFData(PySliceSerial, Signal):
 
         # Store reference to source WFData array for ADF calculation
         self._wf_array = wf_data.reshaped() # nprobes,x,y,t,kx,ky,l indices
+        # Identity of each stored layer (thickness); used when calculateADF
+        # returns one ADF image per layer.
+        self.layers = getattr(wf_data, '_layer', None)
 
         # Initialize ADF as None, will be computed by calculateADF
         self._array = None
@@ -64,11 +67,7 @@ class HAADFData(PySliceSerial, Signal):
         self._ys = wf_data.probe_ys
 
         if Dimensions is not None:
-            # Build placeholder dimensions (will be updated after calculateADF)
-            self.dimensions = Dimensions([
-                Dimension(name='x', space='position', units='Å', values=np.array([0])),
-                Dimension(name='y', space='position', units='Å', values=np.array([0])),
-            ], nav_dimensions=[0, 1], sig_dimensions=[])
+            self._set_dimensions()
 
             # Build metadata
             metadata_dict = {
@@ -85,6 +84,37 @@ class HAADFData(PySliceSerial, Signal):
             }
             self.metadata = Metadata(metadata_dict)
             self.sea_type="Signal"
+
+    def _set_dimensions(self, layer_values=None, layer_name='layer',
+                        layer_units=None):
+        """Synchronise Signal dimensions with the current ADF array shape."""
+        if Dimensions is None:
+            return
+        dimensions = []
+        if layer_values is not None:
+            layer_kwargs = {
+                'name': layer_name,
+                'space': 'position',
+                'values': to_numpy(layer_values),
+            }
+            if layer_units is not None:
+                layer_kwargs['units'] = layer_units
+            dimensions.append(Dimension(**layer_kwargs))
+        dimensions.extend([
+            Dimension(name='x', space='position', units='Å',
+                      values=to_numpy(self._xs)),
+            Dimension(name='y', space='position', units='Å',
+                      values=to_numpy(self._ys)),
+        ])
+        dims = Dimensions(
+            dimensions,
+            nav_dimensions=list(range(len(dimensions))),
+            sig_dimensions=[],
+        )
+        # PySEA uses the public dimensions during normal operation and the
+        # local copy during serialisation/deserialisation. Keep both congruent.
+        self.dimensions = dims
+        self._local_dimensions = dims
 
     @property
     def data(self):
@@ -153,6 +183,8 @@ class HAADFData(PySliceSerial, Signal):
         mask = b.zeros(q.shape, type_match=self._wf_array)
         if isinstance(self._wf_array, np.memmap):
             q = to_numpy(q)
+            radius_inner = to_numpy(radius_inner)
+            radius_outer = to_numpy(radius_outer)
         mask[q >= radius_inner] = 1
         mask[q >= radius_outer] = 0
         return mask
@@ -251,18 +283,33 @@ class HAADFData(PySliceSerial, Signal):
             ax.set_title("ADF collection region")
             plt.show()
 
-        nc,_,_,nt,_,_,nl = self._wf_array.shape
-        wf_intensity = b.absolute(self._wf_array)**2 ; mask = b.absolute(mask)
-        self._array = b.einsum('cxytkql,kq->xy', wf_intensity, mask) / (nc*nt*nl)
+        nc,nx,ny,nt,_,_,nl = self._wf_array.shape
+
+        # TWP 20260717 loop time (or frozen phonon configs) should cost cut ram usage by nt (reasonably 10-100x) and a for loop (over reasonably 10-100) shouldn't kill us
+        stack = b.zeros((nl,nx,ny)) ; mask = b.absolute(mask)
+        for t in range(nt):
+            wf_intensity = b.absolute(self._wf_array[:,:,:,t,:,:,:])**2
+            stack += b.einsum('cxykql,kq->lxy', wf_intensity, mask) / nt
+
+        #wf_intensity = b.absolute(self._wf_array)**2 ; mask = b.absolute(mask)
+        # One ADF image per stored layer (thickness). Only the exit wave
+        # physically reaches the detector, but storing several layers gives ADF
+        # vs thickness. Collapse to a plain 2D image for the single-layer case.
+        # Probe copies already carry normalised intensity weights; sum them,
+        # then average only over time. Dividing by nc would make the signal
+        # vanish as more quadrature points are used.
+        #stack = b.einsum('cxytkql,kq->lxy', wf_intensity, mask) / nt
+        self._array = stack[0] if nl == 1 else stack
 
         xs_np = to_numpy(self._xs)
         ys_np = to_numpy(self._ys)
 
         if Dimensions is not None:
-            self._local_dimensions = Dimensions([
-                Dimension(name='x', space='position', units='Å', values=xs_np),
-                Dimension(name='y', space='position', units='Å', values=ys_np),
-            ], nav_dimensions=[0, 1], sig_dimensions=[])
+            layer_values = None
+            if nl > 1:
+                layer_values = (self.layers if self.layers is not None
+                                else np.arange(nl))
+            self._set_dimensions(layer_values)
 
             # Update metadata with detector settings
             #if hasattr(self.signal.metadata, 'Simulation'):
@@ -271,13 +318,17 @@ class HAADFData(PySliceSerial, Signal):
 
         return self.data  # Return numpy array for backward compatibility
 
-    def plot(self, filename=None, title=None):
+    def plot(self, filename=None, title=None, layer=-1, tiling=(1,1)):
         """
         Plot the HAADF image.
 
         Args:
             filename: If provided, save plot to this file instead of displaying
             title: Optional axes title.
+            layer: Which thickness to plot when the ADF is a per-layer stack
+                (default -1, i.e. the exit wave). Ignored for a single-layer ADF.
+            tiling: Positive integer repeats along x and y. Repeating a
+                singleton axis is unsupported because its period is unknown.
         """
         import matplotlib.pyplot as plt
 
@@ -285,9 +336,26 @@ class HAADFData(PySliceSerial, Signal):
             raise RuntimeError("calculateADF() must be called before plotting")
 
         fig, ax = plt.subplots()
-        array = self.array.T  # imshow rows are y; PySlice stores x,y
-        xs = to_numpy(self._xs)
-        ys = to_numpy(self._ys)
+        img = to_numpy(self._array)
+        if img.ndim == 3:
+            img = img[layer]
+        if (len(tiling) != 2 or any(
+                isinstance(v, (bool, np.bool_))
+                or not isinstance(v, (int, np.integer)) or v <= 0
+                for v in tiling)):
+            raise ValueError("tiling must contain two positive integers")
+        coordinates = []
+        for axis, repeats in zip((self._xs, self._ys), tiling):
+            values = np.asarray(to_numpy(axis))
+            if repeats > 1 and len(values) < 2:
+                raise ValueError("Cannot infer the tiling period of a singleton axis")
+            spacing = (values[-1] - values[0]) / (len(values) - 1) if len(values) > 1 else 0
+            period = spacing * len(values)
+            coordinates.append(np.concatenate([
+                values + period * i for i in range(repeats)
+            ]))
+        xs, ys = coordinates
+        array = np.tile(img, tiling).T  # imshow rows are y; PySlice stores x,y
 
         dx = (xs[-1] - xs[0]) / (len(xs) - 1) if len(xs) > 1 else 0
         dy = (ys[-1] - ys[0]) / (len(ys) - 1) if len(ys) > 1 else 0
