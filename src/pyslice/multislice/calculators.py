@@ -7,7 +7,7 @@ import time, os
 import hashlib
 
 from .potentials import grid_from_trajectory, Potential
-from .multislice import Probe, PrismProbe, Propagate, create_batched_probes
+from .multislice import Probe, PrismProbe, Propagate, create_batched_probes, _propagation_operators
 from .trajectory import Trajectory
 from ..postprocessing.wf_data import WFData
 from .sed import SED
@@ -200,6 +200,7 @@ class MultisliceCalculator:
         kth=1,
         ADF=False,
         skip_vacuum=False,
+        potential_cache_max_bytes: int = 16 * 1024**2,
         **kwargs,
     ):
         """
@@ -234,6 +235,11 @@ class MultisliceCalculator:
                 optional exit-wave caching.
             cache_wavefunctions: Whether to read/write per-frame wavefunction cache files
             cache_potentials: Whether to read/write potential-slice cache data
+            potential_cache_max_bytes: Maximum retained potential-volume bytes
+                for reuse across probe batches within one frame (default 16 MiB).
+                Only volumes fitting completely are retained; larger volumes
+                stream as before. Set zero to disable. Separate from disk caching
+                and from wavefunction/FFT working memory.
             max_kx: Maximum stored absolute kx in inverse Angstroms.
             max_ky: Maximum stored absolute ky in inverse Angstroms.
             use_memmap: Store large intermediate and result arrays as NumPy
@@ -295,6 +301,10 @@ class MultisliceCalculator:
             not isinstance(loop_probes, (int, np.integer)) or loop_probes < 1
         ):
             raise ValueError("loop_probes must be False or a positive integer")
+        if (isinstance(potential_cache_max_bytes, (bool, np.bool_))
+                or not isinstance(potential_cache_max_bytes, (int, np.integer))
+                or potential_cache_max_bytes < 0):
+            raise ValueError("potential_cache_max_bytes must be a nonnegative integer; use 0 to disable")
 
         self.trajectory = trajectory
         self.aperture = aperture
@@ -321,6 +331,7 @@ class MultisliceCalculator:
         self.return_layers = return_layers
         self.cache_wavefunctions = cache_wavefunctions
         self.cache_potentials = cache_potentials
+        self.potential_cache_max_bytes = int(potential_cache_max_bytes)
         self.max_kx = max_kx
         self.max_ky = max_ky
         self.use_memmap = use_memmap   # bool: frame_data (p,x,y,l,1) and wavefunction_data (p,t,x,y,l) will be memmapped instead of held in RAM
@@ -532,7 +543,7 @@ class MultisliceCalculator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # if probes are over vacuum (e.g. nanoparticles), we don't need to propagate them?
-        self.probe_indices = b.arange(len(self.probe_positions))
+        self.probe_indices = np.arange(len(self.probe_positions))
         if self.skip_vacuum and len(self.probe_positions) > 1 and self.aperture > 1 and self.min_dk:
             if os.path.exists(self.output_dir / f"probe_indices.npy"):
                 self.probe_indices = np.load(self.output_dir / f"probe_indices.npy")
@@ -545,7 +556,7 @@ class MultisliceCalculator:
                     if d_to_nearest_atom < self.probe_cropping*self.sampling:
                         self.probe_indices.append(i)
                 np.save(self.output_dir / f"probe_indices.npy", self.probe_indices)
-            self.probe_indices = b.asarray(self.probe_indices, dtype=int)
+            self.probe_indices = np.asarray(self.probe_indices, dtype=int)
             print("filtered to", len(self.probe_indices), "probe positions")
 
         nc, npt, nx, ny = self.base_probe._array.shape
@@ -560,6 +571,24 @@ class MultisliceCalculator:
         # Storage: [probe, frame, x, y, layer] - matches WFData expected format
         self.n_layers = len(_stored_layers)
         stores_exit_wave_only = self._stores_exit_wave_only(_stored_layers)
+        # CPU selection metadata is independent of frames. Only device-side
+        # indexing arrays are uploaded, once, and never downloaded for copying.
+        npt = len(self.base_probe.probe_positions)
+        chunksize = int(self.loop_probes) if self.loop_probes else npt
+        chunks = []
+        allowed = to_numpy(self.probe_indices)
+        for start in range(0, npt, chunksize):
+            selected = np.arange(start, min(start + chunksize, npt))
+            if self.loop_probes:
+                selected = selected[np.isin(selected, allowed)]
+            if not len(selected):
+                continue
+            rows = (np.arange(nc)[:, None] * npt + selected[None, :]).reshape(-1)
+            copy_indices = b.asarray(selected, dtype=int) if self.prism else selected
+            output_rows = rows if self.use_memmap else b.asarray(rows, dtype=int)
+            chunks.append((selected, copy_indices, rows, output_rows))
+        operators = None
+        potential_static = None
         if self.returns_wavefunctions:
             fd_nx = self.nx; fd_ny = self.ny; fd_npt = self.n_probes
             if self.use_memmap:
@@ -625,21 +654,18 @@ class MultisliceCalculator:
                     b,
                     expected_n_layers=self.n_layers,
                     expected_n_probes=expected_cache_rows,
+                    mmap=not self.prism,
                 )
                 if cache_exists and not self.prism and self.ADF:
                     # Keep the layer axis so each stored thickness gets its own
                     # ADF image (previously all layers were summed together).
-                    intensities = b.einsum('pxyln,xy->pl', b.absolute(frame_data)**2, self.ADFmask)
-                    n_copies = frame_data.shape[0] // n_scan_positions
-                    intensities = b.sum(
-                        b.reshape(
-                            intensities,
-                            (n_copies, n_scan_positions, self.n_layers),
-                        ),
-                        axis=0,
-                    )
-                    for out_idx in range(self.n_layers):
-                        self.ADF._array[out_idx] += intensities[self.ADFindex, out_idx]
+                    for selected, _, rows, _ in chunks:
+                        cached_batch = b.asarray(frame_data[rows], dtype=self.complex_dtype)
+                        intensities = b.einsum('pxyln,xy->pl', b.absolute(cached_batch)**2, self.ADFmask)
+                        intensities = b.sum(b.reshape(intensities, (nc, len(selected), self.n_layers)), axis=0)
+                        for out_idx in range(self.n_layers):
+                            for value, pp in zip(intensities[:, out_idx], selected):
+                                self.ADF._array[out_idx][self.ADFindex == int(pp)] += value
 
                 if not os.path.exists(self.output_dir / f"kx.npy"):
                     np.save(self.output_dir / f"kx.npy", to_numpy(self.kxs[self.keep_kxs_indices]))
@@ -652,14 +678,15 @@ class MultisliceCalculator:
                 if cache_exists:
                     frames_cached += 1
                 else:
-                    potential = Potential(
-                        self.xs, self.ys, self.zs,
-                        positions, atom_type_names,
-                        backend=b,
-                        kind="kirkland",
-                        slice_axis=self.slice_axis,
-                        cache_dir=cache_file.parent if self.cache_potentials else None,
-                        frame_idx=frame_idx)
+                    if potential_static is None:
+                        potential = Potential(
+                            self.xs, self.ys, self.zs, positions, atom_type_names,
+                            backend=b, kind="kirkland", slice_axis=self.slice_axis,
+                            cache_dir=cache_file.parent if self.cache_potentials else None,
+                            frame_idx=frame_idx)
+                        potential_static = potential._static_state()
+                    else:
+                        potential = Potential._from_static(potential_static, positions, frame_idx)
 
                     nc, npt, nx, ny = self.base_probe._array.shape; npt = len(self.base_probe.probe_positions)
                     n_slices = len(self.zs)
@@ -670,7 +697,11 @@ class MultisliceCalculator:
                                if self.prism else self.n_probes)
 
                     # frame_data is always: p,x,y,l,1 (self.wavefunction_data expects p,t,x,y,l, since we loop time. recall Propagate gave l,p,x,y)
-                    if self.returns_wavefunctions or self.cache_wavefunctions or self.prism:
+                    if self.returns_wavefunctions and not self.prism:
+                        # Write batches directly into the final output, whether
+                        # that output is a device array or a disk-backed array.
+                        frame_data = self.wavefunction_data[:, frame_idx, :, :, :, None]
+                    elif self.cache_wavefunctions or self.prism:
                         fd_nx = self.nx; fd_ny = self.ny; fd_npt = self.n_probes
                         if self.use_memmap:
                             frame_data = b.memmap((n_waves, fd_nx, fd_ny, self.n_layers, 1), dtype=self.complex_dtype, filename=cache_file)
@@ -678,32 +709,24 @@ class MultisliceCalculator:
                             frame_data = b.zeros((n_waves, fd_nx, fd_ny, self.n_layers, 1), dtype=self.complex_dtype)
 
                     # Propagate returns: [l,p,x,y] where l,p are both optional (if store_all_slices=True, and if n_probes>1)
-                    chunks = []
-                    if self.loop_probes:
-                        chunksize = self.loop_probes if isinstance(self.loop_probes, int) else 1
-                        for start in range(0, npt, chunksize):
-                            chunk = b.arange(start, min(start + chunksize, npt))
-                            # only keep chunk indices if they're also in probe_indices
-                            chunk_np = to_numpy(chunk)
-                            indices_np = to_numpy(self.probe_indices)
-                            chunk = b.asarray(
-                                chunk_np[np.any(indices_np[None, :] == chunk_np[:, None], axis=1)],
-                                dtype=int,
-                            )
-                            if len(chunk) == 0:
-                                continue
-                            chunks.append(chunk)
-                        pbar2 = tqdm(total=npt, desc="looping probes", unit="probe")
-                    else:
-                        chunks.append(b.arange(npt))
-                        pbar2 = None
+                    pbar2 = tqdm(total=npt, desc="looping probes", unit="probe") if self.loop_probes else None
 
-                    for selected in chunks:
+                    # Retain a single frame's potential only when every slice
+                    # fits the explicit byte budget. Large volumes keep the
+                    # existing one-slice path (and optional disk cache).
+                    potential_bytes = (potential.nx * potential.ny * potential.n_slices
+                                       * to_numpy(b.zeros(0)).dtype.itemsize)
+                    if len(chunks) > 1 and potential_bytes <= self.potential_cache_max_bytes:
+                        potential.build()
+
+                    for selected, copy_indices, rows, selected_rows in chunks:
                         if len(selected) == npt:
                             probe = self.base_probe
                         else:
-                            probe = self.base_probe.copy(selected_probes=selected)
+                            probe = self.base_probe.copy(selected_probes=copy_indices)
                         probe.applyShifts()
+                        if operators is None:
+                            operators = _propagation_operators(probe, potential, b)
                         # propagate single probe
                         exit_waves_single = Propagate(
                             probe,
@@ -713,6 +736,7 @@ class MultisliceCalculator:
                             onthefly=True,
                             store_all_slices=not stores_exit_wave_only,
                             stored_slice_indices=_stored_layers if not stores_exit_wave_only else None,
+                            _operators=operators,
                         )  # [l],p,x,y indices
 
                         # expand out to fixed l,p,x,y indices
@@ -724,17 +748,10 @@ class MultisliceCalculator:
                             diffraction_patterns = diffraction_patterns[:, self.keep_kxs_indices, :][:, :, self.keep_kys_indices]*self.kth**2
                             if self.use_memmap:
                                 diffraction_patterns = to_numpy(diffraction_patterns)
-                                selected = to_numpy(selected)
                             if self.returns_wavefunctions or self.cache_wavefunctions or self.prism:
                                 # Propagation flattens (copy, selected-probe) in
                                 # copy-major order. Expand the selected position
                                 # indices across copies to preserve that layout.
-                                if self.use_memmap:
-                                    selected_rows = np.reshape(
-                                        np.arange(nc)[:, None] * npt + selected[None, :], (-1,))
-                                else:
-                                    selected_rows = b.reshape(
-                                        b.arange(nc)[:, None] * npt + selected[None, :], (-1,))
                                 frame_data[selected_rows, :, :, out_idx, 0] = diffraction_patterns
                             if self.ADF and not self.prism:
                                 intensities = b.einsum('pxy,xy->p', b.absolute(diffraction_patterns[:, :, :])**2, self.ADFmask)
@@ -751,14 +768,15 @@ class MultisliceCalculator:
                         if pbar2 is not None:
                             pbar2.update(len(selected))
 
-                    if not self.use_memmap and self.cache_wavefunctions:
+                    if pbar2 is not None:
+                        pbar2.close()
+                    if self.cache_wavefunctions:
                         # Convert to CPU numpy array for saving
-                        frame_data_cpu = to_numpy(frame_data)
-                        np.save(cache_file, frame_data_cpu)
+                        if isinstance(frame_data, np.memmap) and Path(frame_data.filename) == cache_file:
+                            frame_data.flush()
+                        else:
+                            np.save(cache_file, to_numpy(frame_data))
                     frames_computed += 1
-
-                if self.returns_wavefunctions or self.prism:
-                    cropped = frame_data[:, :, :, :, 0]
 
                 if self.prism:
                     # Recall: Prism algorithm passes a series of sinusoids through the sample (fourier components shared by all real-space probes), so now for each real-space probe, we need to calculate the exitwaves from components
@@ -768,10 +786,14 @@ class MultisliceCalculator:
                     if self.returns_wavefunctions:
                         kwarg["load_into"] = self.wavefunction_data[:, frame_idx, :, :, :]
                     self.base_probe.calculateProbesFromS(frame_data, self.probe_positions, **kwarg, chunksize=self.loop_probes)
-                elif self.returns_wavefunctions:
-                    if self.use_memmap:
-                        cropped = to_numpy(cropped)
-                    self.wavefunction_data[:, frame_idx, :, :, :] = cropped  # load p,x,y,l,1 --> p,t,x,y,l indices
+                elif self.returns_wavefunctions and cache_exists:
+                    # Cache files stay mapped on the host. Upload only a batch
+                    # when output lives on the GPU; memmapped output stays CPU.
+                    for _, _, rows, output_rows in chunks:
+                        values = frame_data[rows, :, :, :, 0]
+                        if not self.use_memmap:
+                            values = b.asarray(values, dtype=self.complex_dtype)
+                        self.wavefunction_data[output_rows, frame_idx, :, :, :] = values
                 # Update progress bar for this frame
                 pbar.update(1)
 
@@ -858,8 +880,12 @@ class MultisliceCalculator:
 logging_tracker = []
 
 def checkCache(cache_file, cache_wavefunctions, b, expected_n_layers=None,
-               expected_n_probes=None):
-    """Load a compatible cached frame into the active array backend.
+               expected_n_probes=None, mmap=False):
+    """Load a compatible cached frame, optionally leaving it mapped on the CPU.
+
+    Args:
+        mmap: Return a read-only NumPy memory map for batched cache consumption.
+            Defaults to False to retain the standalone backend-array API.
 
     Returns:
         ``(True, frame_data)`` when a compatible cache is loaded, otherwise
@@ -867,7 +893,7 @@ def checkCache(cache_file, cache_wavefunctions, b, expected_n_layers=None,
     """
     global logging_tracker
     if cache_wavefunctions and cache_file.exists():
-        frame_data = np.load(cache_file)
+        frame_data = np.load(cache_file, mmap_mode='r' if mmap else None)
         if expected_n_layers is not None and frame_data.shape[-2] != expected_n_layers:
             logging.warning(
                 "Ignoring cache with %d layers at %s; expected %d",
@@ -886,7 +912,7 @@ def checkCache(cache_file, cache_wavefunctions, b, expected_n_layers=None,
         if "cache_exists-"+parent not in logging_tracker:
             logging_tracker.append("cache_exists-"+parent)
             logging.warning("One or more frames reloaded from cache: "+str(cache_file.parent))
-        return True, b.asarray(frame_data, dtype=b.complex_dtype)  # cache is saved as numpy, so cast back to the active backend
+        return True, frame_data if mmap else b.asarray(frame_data, dtype=b.complex_dtype)
     return False, 0
 
 

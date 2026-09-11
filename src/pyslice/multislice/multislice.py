@@ -379,34 +379,40 @@ class Probe:
             # run()).  npt > 1 additionally guards an already-expanded array.
             return
 
-        # Broadcast the single template probe to all npt positions.
+        # Transform the template once, then position one caller-sized batch.
+        template = self._array[:, 0, :, :]
+        positions = np.asarray(self.probe_positions, dtype=float).reshape(-1, 2)
+        shifts = positions - [self.lx / 2, self.ly / 2]
+        centered = np.flatnonzero(np.all(shifts == 0, axis=1))
         if self.cropping:
             # Crop the probe to a sub-window centred at lx/2, ly/2.
             i1 = nx // 2 - self.cropping // 2; i2 = i1 + self.cropping
             j1 = ny // 2 - self.cropping // 2; j2 = j1 + self.cropping
-            self._array = (
-                self._array[:, 0, None, i1:i2, j1:j2]
-                * b.ones(len(self.probe_positions))[:, None, None][None, :]
-            )
+            template = template[:, i1:i2, j1:j2]
+            pixels = shifts // [self.dx, self.dy]
+            self.offsets = (pixels + [i1, j1]).astype(int)
+            shifts -= pixels * [self.dx, self.dy]
+            kxs = b.fftfreq(self.cropping, d=self.dx)
+            kys = b.fftfreq(self.cropping, d=self.dy)
+        elif self.crop_reciprocal:
+            kxs = b.midcrop(self.kxs, self.crop_reciprocal[0])
+            kys = b.midcrop(self.kys, self.crop_reciprocal[1])
         else:
-            self._array = (
-                self._array[:, 0, None, :, :]
-                * b.ones(len(self.probe_positions))[None, :, None, None]
-            )
+            kxs, kys = self.kxs, self.kys
 
-        for i, (px, py) in enumerate(self.probe_positions):
-            if px - self.lx / 2 == 0 and py - self.ly / 2 == 0:
-                # Already centred: no phase ramp needed, but a cropped probe's
-                # window still begins at the crop origin (i1, j1), not the grid
-                # corner (0, 0), so record that offset for Propagate.
-                if self.cropping:
-                    self.offsets[i, 0] = self.nx // 2 - self.cropping // 2
-                    self.offsets[i, 1] = self.ny // 2 - self.cropping // 2
-                continue
-            self._array[:, i, :, :], (dpx, dpy) = self.placeProbe(
-                self._array[:, i, :, :], px, py)
-            self.offsets[i, 0] = int(dpx)
-            self.offsets[i, 1] = int(dpy)
+        if len(centered) == len(positions):
+            self._array = template[:, None, :, :] * b.ones(len(positions))[None, :, None, None]
+        else:
+            probe_k = template if self.stay_reciprocal else b.fft2(template)
+            shifts = b.asarray(shifts)
+            kx_shift = b.exp(-2j * b.pi * kxs[None, :] * shifts[:, 0, None])
+            ky_shift = b.exp(-2j * b.pi * kys[None, :] * shifts[:, 1, None])
+            shifted = (probe_k[:, None, :, :] * kx_shift[None, :, :, None]
+                       * ky_shift[None, :, None, :])
+            self._array = shifted if self.stay_reciprocal else b.ifft2(shifted)
+            # Preserve the old exact no-op for already-centred positions.
+            if len(centered):
+                self._array[:, centered, :, :] = template[:, None, :, :]
 
         self._shifts_applied = True
 
@@ -519,7 +525,7 @@ class Probe:
 
         energy_samples = ([self.eV] if N == 1 else
                           b.linspace(self.eV - 2*sigma_eV,
-                                     self.eV + 2*sigma_eV, N))
+                                     self.eV + 2*sigma_eV, N, dtype=b.float_dtype))
         self.eVs        = b.asarray(energy_samples,
                                     dtype=b.float_dtype)
         self.wavelengths = wavelength(self.eVs, b)
@@ -566,7 +572,7 @@ class Probe:
         self.spatial_decoherence = (sigma_dz, N)
 
         defocus_samples = ([0.0] if N == 1 else
-                           b.linspace(-2*sigma_dz, 2*sigma_dz, N))
+                           b.linspace(-2*sigma_dz, 2*sigma_dz, N, dtype=b.float_dtype))
         dzs        = b.asarray(defocus_samples,
                                dtype=b.float_dtype)
         amplitudes = b.exp(-dzs**2 / sigma_dz**2)
@@ -950,6 +956,40 @@ def create_batched_probes(base_probe: Probe, probe_positions,
 # Multislice propagator
 # ---------------------------------------------------------------------------
 
+def _propagation_operators(probe, potential, b: Backend) -> tuple:
+    """Prepare fixed operators for one calculator run.
+
+    Parameters
+    ----------
+    probe : Probe or PrismProbe
+        Realized energy copies and crop geometry.
+    potential : Potential
+        Fixed reciprocal grid and slice spacing.
+    b : Backend
+        Active device and precision.
+
+    Returns
+    -------
+    tuple
+        Interaction parameters and copy-wise Fresnel/anti-alias planes.
+        The calculator owns their lifetime and rebuilds them on every run.
+    """
+    wavelengths, eVs = probe.wavelengths, probe.eVs
+    e0 = m_electron * c_light**2 / q_electron
+    sigma = (2 * b.pi) / (wavelengths * eVs) * (e0 + eVs) / (2 * e0 + eVs)
+    dz = float(to_numpy(potential.zs[1] - potential.zs[0])) if len(potential.zs) > 1 else .5
+    kx, ky = potential.kxs, potential.kys
+    if probe.cropping:
+        kx = b.fftfreq(probe.cropping, d=probe.dx)
+        ky = b.fftfreq(probe.cropping, d=probe.dy)
+    kx_grid, ky_grid = b.meshgrid(kx, ky, indexing='ij')
+    k_sq = kx_grid**2 + ky_grid**2
+    aa = antialias_aperture(kx, ky, b)
+    propagator = (b.exp(-1j * b.pi * wavelengths[:, None, None] * dz * k_sq[None, :, :])
+                  * aa[None, :, :])[:, None, :, :]
+    return sigma, propagator
+
+
 def Propagate(
         probe,
         potential,
@@ -959,6 +999,7 @@ def Propagate(
         onthefly: bool = True,
         store_all_slices: bool = False,
         stored_slice_indices=None,
+        _operators=None,
 ):
     """
     Multislice wave propagation (Kirkland 2010, §6.5).
@@ -980,8 +1021,9 @@ def Propagate(
        folded into P to bandwidth-limit the wavefunction at every slice
        and suppress aliasing from the transmission step.
 
-    The probe array shape is (nc, npt, nx, ny); it is flattened to
-    (nc·npt, nx, ny) for vectorised propagation then returned as-is.
+    The internal wave array keeps shape (nc, npt, nx, ny), allowing operators
+    shared by scan positions to broadcast without duplication. Returned waves
+    retain the flattened copy-major shape (nc·npt, nx, ny).
 
     Args:
         probe:            Probe or PrismProbe object.
@@ -1000,6 +1042,8 @@ def Propagate(
         stored_slice_indices: Optional 0-based slice indices to return when
                           ``store_all_slices`` is True. ``None`` returns all
                           slices.
+        _operators: Internal run-scoped operators for identical geometry and
+                    energy copies. Omit for standalone calls.
 
     Returns:
         Array of shape (nc·npt, nx, ny) or (n_slices, nc·npt, nx, ny).
@@ -1009,52 +1053,17 @@ def Propagate(
         b = make_backend(device)
 
     nc, npt, nx, ny = probe._array.shape
-    # Flatten coherent copies and probe positions into a single batch index.
-    array = b.reshape(probe._array, (nc * npt, nx, ny))
+    array = probe._array
+    sigma, P = _propagation_operators(probe, potential, b) if _operators is None else _operators
 
-    # Expand wavelength and eV arrays to match the flattened batch dimension.
-    # probe.wavelengths has shape (nc,); each wavelength applies to all npt positions.
-    probe_wavelengths = b.reshape(
-        probe.wavelengths[:, None] * b.ones(npt)[None, :], (nc * npt,))
-    probe_eVs = b.reshape(
-        probe.eVs[:, None] * b.ones(npt)[None, :], (nc * npt,))
-
-    # ------------------------------------------------------------------
-    # Interaction parameter σ  (Kirkland Eq. 5.6)
-    # ------------------------------------------------------------------
-    # σ = (2π / λ·eV) · (E₀ + eV) / (2E₀ + eV)
-    # where E₀ = m_e·c² / q  is the rest energy in eV.
-    # σ has units of 1/(V·Å) so that σ·V(Å) is dimensionless.
-    E0_eV = m_electron * c_light**2 / q_electron   # rest energy, eV
-    sigma = (
-        (2 * b.pi) / (probe_wavelengths * probe_eVs)
-        * (E0_eV + probe_eVs) / (2 * E0_eV + probe_eVs)
-    )
-
-    # ------------------------------------------------------------------
-    # Slice thickness
-    # ------------------------------------------------------------------
-    dz = float(to_numpy(potential.zs[1] - potential.zs[0])) if len(potential.zs) > 1 else 0.5
-
-    # ------------------------------------------------------------------
-    # k-space grids and Fresnel propagator
-    # ------------------------------------------------------------------
-    kx, ky = potential.kxs, potential.kys
     if probe.cropping:
-        # Use a smaller k-grid matching the cropped probe size.
-        kx = b.fftfreq(probe.cropping, d=probe.dx)
-        ky = b.fftfreq(probe.cropping, d=probe.dy)
-
-    kx_grid, ky_grid = b.meshgrid(kx, ky, indexing='ij')
-    k_sq = kx_grid**2 + ky_grid**2
-
-    # Anti-aliasing aperture: zeros out the outer 1/3 of k-space.
-    aa = antialias_aperture(kx, ky, b)
-
-    # Fresnel propagator folded with anti-aliasing aperture.
-    # Shape: (nc·npt, nx, ny) — one P per wavelength in the batch.
-    # The aa aperture is broadcast over the batch dimension.
-    P = b.exp(-1j * b.pi * probe_wavelengths[:, None, None] * dz * k_sq[None, :, :]) * aa[None, :, :]
+        # Geometry is invariant across slices. Modular indexing replaces full
+        # grid rolls and avoids per-position device scalar synchronizations.
+        offsets = b.asarray(probe.offsets, dtype=int)
+        position_ids = b.arange(npt, dtype=int) % len(offsets)
+        pixels = b.arange(probe.cropping, dtype=int)
+        xi = (offsets[position_ids, 0, None] + pixels[None, :]) % len(potential.kxs)
+        yi = (offsets[position_ids, 1, None] + pixels[None, :]) % len(potential.kys)
 
     if not onthefly:
         potential.build()
@@ -1088,36 +1097,18 @@ def Propagate(
             potential_slice = potential.array[:, :, z]
 
         if probe.cropping:
-            # Build index arrays to extract the cropped sub-window for each
-            # probe position without allocating a full (npt, nx, ny) array.
-            nx_full, ny_full = potential_slice.shape
-            xr = b.arange(nx_full); yr = b.arange(ny_full)
-            n_batch = len(sigma)
-            npt_off = probe.offsets.shape[0]
-            xi = b.zeros((n_batch, probe.cropping), dtype=int)
-            yi = b.zeros((n_batch, probe.cropping), dtype=int)
-            # The batch axis flattens (nc, npt) as c*npt + p (see reshape above),
-            # so batch row bi belongs to probe position bi % npt and must use
-            # that position's window offset — shared across all nc coherent
-            # copies.  (Previously only the first npt rows were filled, so every
-            # decoherence copy beyond the first read the grid-corner window.)
-            for bi in range(n_batch):
-                ox, oy = probe.offsets[bi % npt_off]
-                xi[bi, :] = b.roll(xr, -int(ox), 0)[:probe.cropping]
-                yi[bi, :] = b.roll(yr, -int(oy), 0)[:probe.cropping]
-            # Advanced indexing: pot_stack[p, i, j] = potential_slice[xi[p,i], yi[p,j]]
+            # Windows depend on position but are shared across energy copies.
             pot_stack = potential_slice[xi[:, :, None], yi[:, None, :]]
-            t = b.exp(1j * sigma[:, None, None] * pot_stack)
+            t = b.exp(1j * sigma[:, None, None, None] * pot_stack[None, :, :, :])
         else:
-            # Broadcast: sigma shape (nc·npt,), potential_slice shape (nx, ny).
-            t = b.exp(1j * sigma[:, None, None] * potential_slice[None, :, :])
+            t = b.exp(1j * sigma[:, None, None] * potential_slice[None, :, :])[:, None, :, :]
 
         array = t * array
 
         if store_all_slices and (
             stored_slice_indices is None or z in stored_slice_indices
         ):
-            slice_wavefunctions.append(b.clone(array))
+            slice_wavefunctions.append(b.clone(b.reshape(array, (nc * npt, nx, ny))))
 
         # ------------------------------------------------------------------
         # Fresnel propagation:  ψ(z+dz) = ℱ⁻¹[ P · ℱ[ψ'(z)] ]
@@ -1130,7 +1121,7 @@ def Propagate(
         # Shape: (n_slices, nc·npt, nx, ny)
         return b.stack(slice_wavefunctions, axis=0)
 
-    return array
+    return b.reshape(array, (nc * npt, nx, ny))
 
 
 # ---------------------------------------------------------------------------

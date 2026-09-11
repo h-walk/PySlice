@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import logging
+from functools import lru_cache
+from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import Optional, Union
 
@@ -55,21 +57,26 @@ def _resolve_z(atom_type: Union[str, int]) -> int:
     return int(atom_type)
 
 
-def load_kirkland(backend: Backend) -> any:
-    """
-    Load and return the Kirkland scattering parameters as a backend array.
+@lru_cache(maxsize=1)
+def _read_kirkland_table(source: Traversable) -> np.ndarray:
+    """Read the bundled parameter table once, retaining only a small CPU array.
 
-    Shape: (103, 3, 4)  — 103 elements, 3 Gaussian terms, 4 columns (a, b, c, d).
+    Parameters
+    ----------
+    source : importlib.resources.abc.Traversable
+        Kirkland text resource, with one header and three rows per element.
 
-    The returned array lives on the backend's default device. This function
-    no longer uses module-level global state; callers are responsible for
-    caching the result if they need it.
+    Returns
+    -------
+    numpy.ndarray
+        Read-only float64 coefficients shaped ``(103, 3, 4)``.
     """
+    lines = source.read_text().splitlines()
     params = []
     for i in range(103):
         skip = i * 4 + 1
         try:
-            abcd = np.loadtxt(kirkland_file, skiprows=skip, max_rows=3)
+            abcd = np.asarray([line.split() for line in lines[skip:skip + 3]], dtype=float)
             a1, b1, a2, b2, a3, b3, c1, d1, c2, d2, c3, d3 = abcd.flat
             # Reorder to columns (a, b, c, d) — Kirkland p. 291
             params.append([[a1, b1, c1, d1],
@@ -79,7 +86,26 @@ def load_kirkland(backend: Backend) -> any:
             logger.warning("Kirkland parameters unavailable for element %d; using zeros.", i + 1)
             params.append([[0, 0, 0, 0]] * 3)
 
-    return backend.asarray(params)   # shape (103, 3, 4)
+    table = np.asarray(params, dtype=np.float64)
+    table.setflags(write=False)
+    return table
+
+
+def load_kirkland(backend: Backend):
+    """Return an independent parameter array on the requested backend.
+
+    Parameters
+    ----------
+    backend : Backend
+        Backend supplying the array's device and floating-point precision.
+
+    Returns
+    -------
+    array_like
+        Coefficients shaped ``(103, 3, 4)``. Only the immutable CPU table is
+        shared; modifying this result cannot affect another caller or device.
+    """
+    return backend.asarray(_read_kirkland_table(kirkland_file).copy())
 
 
 def kirkland_form_factor(qsq: any, Z: int, kirkland_params: any,
@@ -243,6 +269,7 @@ class Potential:
         self.slice_spacing = spacings[slice_axis]
         self.n_slices = len(self.slice_coords)
         self.slice_period = float(to_numpy(self.slice_coords[-1] + self.slice_spacing))
+        self._slice_coords_np = to_numpy(self.slice_coords).copy()
 
         # ----------------------------------------------------------------
         # k-space frequencies and |q|²
@@ -260,8 +287,6 @@ class Potential:
 
         if positions is None or atom_types is None:
             raise ValueError("positions and atom_types are required unless array is provided")
-
-        positions = backend.asarray(positions)
 
         # ----------------------------------------------------------------
         # Resolve atom types to atomic numbers
@@ -289,13 +314,95 @@ class Potential:
         # ----------------------------------------------------------------
         # Store everything needed by _calculate_slice
         # ----------------------------------------------------------------
-        self._positions = positions
+        # Keep one host snapshot for slice selection, not a device array that
+        # must be downloaded afresh for every element of every slice.
         self._atom_types = atom_types
         self._atom_z_np = atom_z_np
         self._unique_types = unique_types
         self._form_factors = form_factors
         self._chunk_size = chunk_size
-        self.array: Optional[any] = None
+        self._set_frame(positions, frame_idx)
+
+    def _set_frame(self, positions, frame_idx: Optional[int]) -> None:
+        """Replace only frame-dependent state, retaining backend precision.
+
+        Parameters
+        ----------
+        positions : array_like
+            Atomic coordinates for this frame, in the original atom order.
+        frame_idx : int or None
+            Slice-cache frame identifier.
+        """
+        self._positions = np.array(to_numpy(self._backend.asarray(positions)), copy=True)
+        self._frame_idx = frame_idx
+        self.array = None
+        self._index_slice_atoms()
+
+    def _static_state(self) -> dict:
+        """Extract run-invariant geometry without retaining a frame's volume.
+
+        Returns
+        -------
+        dict
+            Shared grid, atom identities, and element form factors. No positions,
+            slice membership, or computed potential values are retained.
+        """
+        names = ('_backend', 'xs', 'ys', 'zs', 'nx', 'ny', 'nz', 'dx', 'dy', 'dz',
+                 'slice_axis', 'inplane_axis1', 'inplane_axis2', 'slice_coords',
+                 'slice_spacing', 'n_slices', 'slice_period', '_slice_coords_np',
+                 'kxs', 'kys', '_cache_dir', '_atom_types', '_atom_z_np',
+                 '_unique_types', '_form_factors', '_chunk_size')
+        return {name: getattr(self, name) for name in names}
+
+    @classmethod
+    def _from_static(cls, state: dict, positions, frame_idx: int) -> Potential:
+        """Construct another frame within a fixed-geometry calculator run.
+
+        Parameters
+        ----------
+        state : dict
+            State from ``_static_state`` for this run's grid, backend, and atoms.
+        positions : array_like
+            New atomic coordinates, with unchanged identities and ordering.
+        frame_idx : int
+            Slice-cache frame identifier.
+
+        Returns
+        -------
+        Potential
+            Frame-local potential sharing only invariant arrays with its peers.
+        """
+        result = cls.__new__(cls)
+        result.__dict__.update(state)
+        result._set_frame(positions, frame_idx)
+        return result
+
+    def _index_slice_atoms(self) -> None:
+        """Index atoms once per frame while preserving the original slice rules.
+
+        Notes
+        -----
+        Sorted wrapped coordinates allow binary searches for each slice's
+        original half-open bounds, including first/last-slice asymmetry and
+        roundoff-sized gaps or overlaps. Indices are restored to input order
+        inside each group so structure-factor chunking and summation order
+        remain unchanged. Storage scales with atom indices, not potential voxels.
+        """
+        coords = self._positions[:, self.slice_axis]
+        if self.slice_period > 0:
+            coords = np.mod(coords, self.slice_period)
+        # Cast bounds as NumPy's comparisons against the coordinate array did.
+        bounds = np.asarray([self._slice_bounds(i) for i in range(self.n_slices)],
+                            dtype=coords.dtype)
+        self._slice_atom_indices = [{} for _ in range(self.n_slices)]
+        for at in self._unique_types:
+            mask = (np.asarray([t == at for t in self._atom_types], dtype=bool)
+                    if isinstance(at, str) else self._atom_z_np == int(at))
+            indices = np.flatnonzero(mask)
+            ordered = indices[np.argsort(coords[indices], kind='stable')]
+            edges = np.searchsorted(coords[ordered], bounds, side='left')
+            for slice_idx, (lo, hi) in enumerate(edges):
+                self._slice_atom_indices[slice_idx][at] = np.sort(ordered[lo:hi])
 
     # ------------------------------------------------------------------
     # Internal slice calculation
@@ -315,35 +422,12 @@ class Potential:
         reciprocal = backend.zeros(
             (self.nx, self.ny), dtype=backend.complex_dtype)
 
-        slice_min, slice_max = self._slice_bounds(slice_idx)
-
         for at in self._unique_types:
             form_factor = self._form_factors[at]
-
-            # Build atom-type mask (numpy, to avoid sending booleans to GPU)
-            if isinstance(at, str):
-                type_mask_np = np.array(
-                    [t == at for t in self._atom_types], dtype=bool)
-            else:
-                type_mask_np = (self._atom_z_np == int(at))
-
-            if not type_mask_np.any():
+            indices = self._slice_atom_indices[slice_idx][at]
+            if not len(indices):
                 continue
-
-            # Pull relevant positions to numpy for masking, then back to backend
-            positions_np = to_numpy(self._positions)
-            type_positions_np = positions_np[type_mask_np]
-
-            slice_coords_np = type_positions_np[:, self.slice_axis]
-            if self.slice_period > 0:
-                slice_coords_np = np.mod(slice_coords_np, self.slice_period)
-            spatial_mask_np = (
-                (slice_coords_np >= slice_min) & (slice_coords_np < slice_max))
-
-            if not spatial_mask_np.any():
-                continue
-
-            slice_positions_np = type_positions_np[spatial_mask_np]
+            slice_positions_np = self._positions[indices]
             atomsx = backend.asarray(slice_positions_np[:, self.inplane_axis1])
             atomsy = backend.asarray(slice_positions_np[:, self.inplane_axis2])
 
@@ -377,7 +461,7 @@ class Potential:
 
     def _slice_bounds(self, slice_idx: int):
         """Return (min, max) coordinate bounds for a given slice index."""
-        coords_np = to_numpy(self.slice_coords)
+        coords_np = self._slice_coords_np
         half = self.slice_spacing / 2.0
         lo = coords_np[slice_idx] - half if slice_idx > 0 else 0.0
         hi = (coords_np[slice_idx] + half

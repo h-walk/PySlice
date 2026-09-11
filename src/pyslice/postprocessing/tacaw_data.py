@@ -16,7 +16,7 @@ from tqdm import tqdm
 from .wf_data import WFData
 from ..data.pyslice_serial import PySliceSerial, Signal, Dimensions, Dimension, Metadata
 from ..data.seashell import adopt_signal_state
-from pyslice.backend import Backend, to_numpy, source_files_version
+from pyslice.backend import Backend, NumpyBackend, to_numpy, source_files_version
 
 logger = logging.getLogger(__name__)
 
@@ -53,16 +53,21 @@ def _inversion_indices(coordinates, axis_name: str) -> np.ndarray:
     Ordinary coordinate pairs are matched explicitly. For an even FFT grid,
     the lone negative Nyquist bin is its own periodic partner.
     """
-    values = np.asarray(to_numpy(coordinates), dtype=np.float64)
+    source = np.asarray(to_numpy(coordinates))
+    values = np.asarray(source, dtype=np.float64)
     if values.ndim != 1 or len(values) == 0:
         raise ValueError(f"{axis_name} coordinates must be a nonempty one-dimensional array")
 
     scale = max(1.0, float(np.max(np.abs(values))))
-    atol = 1e-10 * scale
+    # MPS frequency coordinates are float32. Casting to float64 cannot recover
+    # precision lost when those bins were formed (notably the Nyquist spacing).
+    eps = np.finfo(source.dtype).eps if np.issubdtype(source.dtype, np.floating) else 0.0
+    rtol = max(1e-9, 4 * eps)
+    atol = max(1e-10, 4 * eps) * scale
     indices = np.empty(len(values), dtype=np.int64)
     unmatched = []
     for index, value in enumerate(values):
-        matches = np.flatnonzero(np.isclose(values, -value, rtol=1e-9, atol=atol))
+        matches = np.flatnonzero(np.isclose(values, -value, rtol=rtol, atol=atol))
         if len(matches) == 1:
             indices[index] = int(matches[0])
         elif len(matches) == 0:
@@ -77,12 +82,12 @@ def _inversion_indices(coordinates, axis_name: str) -> np.ndarray:
         uniform_shifted_grid = (
             len(values) > 1
             and np.all(differences > 0.0)
-            and np.allclose(differences, differences[0], rtol=1e-9, atol=atol)
+            and np.allclose(differences, differences[0], rtol=rtol, atol=atol)
             and np.any(np.isclose(values, 0.0, rtol=0.0, atol=atol))
             and np.isclose(
                 abs(values[unmatched[0]]),
                 values[-1] + differences[0],
-                rtol=1e-9,
+                rtol=rtol,
                 atol=atol,
             )
         )
@@ -133,7 +138,8 @@ class TACAWData(PySliceSerial, Signal):
                  force_rerun: bool = False,
                  temperature_K: Optional[float] = None,
                  apply_bose: bool = False,
-                 fold: bool = False) -> None:
+                 fold: bool = False,
+                 fft_batch_max_bytes: Optional[int] = None) -> None:
         """Transform time-domain exit waves into TACAW frequency data.
 
         Args:
@@ -142,7 +148,7 @@ class TACAWData(PySliceSerial, Signal):
                 to the last returned layer.
             keep_complex: Keep complex FFT amplitudes instead of converting to
                 intensity ``abs(FFT)**2``.
-            chunkFFT: Loop over reciprocal x values to reduce peak FFT memory.
+            chunkFFT: Batch reciprocal x values to reduce peak FFT memory.
             chunk_size_time: Optional time-window length. It must be positive
                 and divide the number of saved frames exactly.
             force_rerun: Ignore a compatible ``tacaw.npy`` cache.
@@ -153,6 +159,12 @@ class TACAWData(PySliceSerial, Signal):
             fold: Average inversion-related gain/loss intensity pairs before
                 any Bose weighting. Defaults to False and can be enabled
                 independently of ``apply_bose``. Requires ``keep_complex=False``.
+            fft_batch_max_bytes: Positive target for estimated spatial FFT
+                temporaries, in bytes. Supplying it enables ``chunkFFT``.
+                With ``chunkFFT=True``, None uses 16 MiB on GPUs and retains
+                one-column batching on CPU. At least one kx
+                column is processed; input/output storage and FFT-library
+                workspace are additional. Does not change the time window.
 
         Notes:
             Frequencies are in THz. Negative bins represent gain and positive
@@ -172,7 +184,14 @@ class TACAWData(PySliceSerial, Signal):
         self.probe  = wf_data.probe
         self.cache_dir   = wf_data.cache_dir
         self.keep_complex  = keep_complex
-        self.chunkFFT      = chunkFFT
+        if fft_batch_max_bytes is not None and (
+                isinstance(fft_batch_max_bytes, (bool, np.bool_))
+                or not isinstance(fft_batch_max_bytes, (int, np.integer))
+                or fft_batch_max_bytes < 1):
+            raise ValueError("fft_batch_max_bytes must be a positive integer or None")
+        self.chunkFFT = bool(chunkFFT or fft_batch_max_bytes is not None)
+        self._fft_batch_budget_explicit = fft_batch_max_bytes is not None
+        self.fft_batch_max_bytes = 16 * 1024**2 if fft_batch_max_bytes is None else int(fft_batch_max_bytes)
         self.use_memmap    = isinstance(wf_data._array, np.memmap)
         self.chunk_size_time = chunk_size_time
         self.force_rerun   = force_rerun
@@ -311,7 +330,9 @@ class TACAWData(PySliceSerial, Signal):
         if fold:
             self.fold_gain_loss()
         b = self._backend
-        factor = b.asarray(bose_correction_factor(self._frequencies, temperature_K), dtype=self._array.dtype)
+        factor = bose_correction_factor(self._frequencies, temperature_K)
+        factor = (factor.astype(self._array.dtype, copy=False) if isinstance(self._array, np.ndarray)
+                  else b.asarray(factor, dtype=self._array.dtype))
         self._array = self._array * factor[None, :, None, None]
         self.temperature_K = temperature_K
         self.apply_bose = True
@@ -353,9 +374,10 @@ class TACAWData(PySliceSerial, Signal):
         ky_indices = _inversion_indices(self._kys, "ky")
 
         b = self._backend
-        frequency_indices = b.asarray(frequency_indices, dtype=int)
-        kx_indices = b.asarray(kx_indices, dtype=int)
-        ky_indices = b.asarray(ky_indices, dtype=int)
+        if not isinstance(self._array, np.ndarray):
+            frequency_indices = b.asarray(frequency_indices, dtype=int)
+            kx_indices = b.asarray(kx_indices, dtype=int)
+            ky_indices = b.asarray(ky_indices, dtype=int)
         partner = self._array[:, frequency_indices, :, :]
         partner = partner[:, :, kx_indices, :]
         partner = partner[:, :, :, ky_indices]
@@ -433,10 +455,11 @@ class TACAWData(PySliceSerial, Signal):
             except (OSError, ValueError):
                 cached_meta = None
             if cached_meta == meta:
-                cached = np.load(cache_tacaw)
+                cached = np.load(cache_tacaw, mmap_mode='r' if self.use_memmap else None)
                 if list(cached.shape) == meta["array_shape"]:
                     self._frequencies = b.asarray(np.load(cache_freq))
-                    self._array = b.asarray(cached)
+                    self._array = cached if self.use_memmap else b.asarray(
+                        cached, dtype=b.complex_dtype if self.keep_complex else b.float_dtype)
                     return
 
         # A (re)compute invalidates any previous completion marker first, so an
@@ -454,7 +477,9 @@ class TACAWData(PySliceSerial, Signal):
         self._frequencies = b.fftshift(b.fftfreq(fft_len, d=dt))
 
         if self.chunkFFT:
-            # Memory-conservative path: loop over kx
+            # Spatial batching preserves the full selected time window and
+            # copy-major intensity folding. Estimate four complex work arrays;
+            # a single column remains the minimum indivisible batch.
             dtype = b.complex_dtype if self.keep_complex else b.float_dtype
             shape = (self.n_scan_positions, fft_len,
                      wf_layer.shape[2], wf_layer.shape[3])
@@ -466,16 +491,28 @@ class TACAWData(PySliceSerial, Signal):
             else:
                 self._array = b.zeros(shape, dtype=dtype)
 
+            complex_bytes = to_numpy(b.zeros(0, dtype=b.complex_dtype)).dtype.itemsize
+            column_bytes = 4 * int(wf_layer.shape[0]) * fft_len * int(wf_layer.shape[3]) * complex_bytes
+            width = max(1, min(len(self._kxs), max(1, self.fft_batch_max_bytes // max(1, column_bytes))))
+            if str(b.device) == 'cpu' and not self._fft_batch_budget_explicit:
+                width = 1
+            self.fft_batch_kx = width
+
             for chunk_i in range(self.n_chunks):
                 i1, i2 = int(to_numpy(indices[chunk_i])), int(to_numpy(indices[chunk_i + 1]))
-                for kx_i in tqdm(range(len(self._kxs))):
-                    sl = wf_layer[:, i1:i2, kx_i, :]
+                for kx_i in tqdm(range(0, len(self._kxs), width)):
+                    kx_end = min(kx_i + width, len(self._kxs))
+                    sl = wf_layer[:, i1:i2, kx_i:kx_end, :]
+                    if isinstance(sl, np.ndarray) and not isinstance(b, NumpyBackend):
+                        sl = b.asarray(sl, dtype=b.complex_dtype)
                     wf_mean = b.mean(sl, axis=1, keepdims=True)
                     wf_fft  = b.fftshift(b.fft(sl - wf_mean, axes=1), axes=1)
                     if not self.keep_complex:
                         wf_fft = b.absolute(wf_fft) ** 2
                         wf_fft = self._fold_incoherent_copies(wf_fft)
-                    self._array[:, :, kx_i, :] += wf_fft
+                    if self.use_memmap:
+                        wf_fft = to_numpy(wf_fft)
+                    self._array[:, :, kx_i:kx_end, :] += wf_fft
         else:
             # Standard path: FFT over full time window
             for chunk_i in range(self.n_chunks):

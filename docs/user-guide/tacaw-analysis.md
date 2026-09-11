@@ -37,7 +37,8 @@ normalization.
 
 | Setting | Effect | Scientific consequence |
 |---|---|---|
-| `chunkFFT=True` | loops over kx | memory only; same full-time FFT |
+| `chunkFFT=True` | batches kx (GPU: 16 MiB target; CPU: one column) | same full-time FFT |
+| `fft_batch_max_bytes=N` | enables spatial batching with a byte target | does not change frequency resolution; see [memory limits](scaling.md) |
 | `chunk_size_time=None` | one full window | best available `Δf` |
 | `chunk_size_time=M` | sums block intensities | coarser `Δf`; block phases discarded |
 
