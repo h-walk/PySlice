@@ -95,3 +95,47 @@ __all__ = (
     # Historical validation helper used by the scientific regression scripts
     "differ",
 )
+
+def _warn_on_pbc_jumps(obj: "Trajectory") -> None:
+    """Warn when consecutive frames contain displacements typical of wrapped PBC jumps."""
+    try:
+        import numpy as np
+
+        positions = np.asarray(obj.positions, dtype=float)
+        box = np.asarray(obj.box_matrix, dtype=float)
+    except Exception:
+        return
+    if positions.ndim != 3 or positions.shape[0] < 2:
+        return
+    step = np.diff(positions, axis=0)
+    magnitudes = np.linalg.norm(step, axis=-1)
+    max_step = float(magnitudes.max())
+    threshold = 5.0
+    if box.ndim == 2 and box.shape == (3, 3) and np.all(np.isfinite(box)):
+        lengths = np.linalg.norm(box, axis=1)
+        lengths = lengths[lengths > 0]
+        if lengths.size:
+            threshold = max(1.0, 0.5 * float(lengths.min()))
+    if max_step > threshold:
+        import warnings
+        warnings.warn(
+            "PySlice detected inter-frame atomic displacements "
+            f"up to {max_step:.2f} Å (threshold {threshold:.2f} Å). "
+            "This can indicate atoms jumping across a periodic boundary because "
+            "MD coordinates were wrapped rather than unwrapped/haircut. "
+            "PySlice does not automatically remove these jumps; if they are "
+            "unphysical for your analysis, unwrap the trajectory or apply a "
+            "haircutting/minimum-image correction before TACAW or other "
+            "frame-difference calculations.",
+            stacklevel=2,
+        )
+
+_pyslice_trajectory_init = Trajectory.__init__
+
+
+def _pyslice_trajectory_init_with_pbc_warning(self, *args, **kwargs):
+    _pyslice_trajectory_init(self, *args, **kwargs)
+    _warn_on_pbc_jumps(self)
+
+
+Trajectory.__init__ = _pyslice_trajectory_init_with_pbc_warning
