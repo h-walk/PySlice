@@ -42,7 +42,7 @@ from .multislice.multislice import (
     create_batched_probes,
     wavelength,
 )
-from .multislice.potentials import Potential, grid_from_trajectory
+from .multislice.potentials import Potential, grid_from_trajectory, next_fast_len
 from .multislice.sed import SED
 from .multislice.trajectory import Trajectory
 from .postprocessing.haadf_data import HAADFData
@@ -83,6 +83,7 @@ __all__ = (
     "Propagate",
     "create_batched_probes",
     "grid_from_trajectory",
+    "next_fast_len",
     "wavelength",
     "aberrationFunction",
     "calculateObject",

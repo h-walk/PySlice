@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import logging
+import operator
 from functools import lru_cache
 from importlib.resources.abc import Traversable
 from pathlib import Path
@@ -140,15 +141,64 @@ def kirkland_form_factor(qsq: any, Z: int, kirkland_params: any,
     return term1 + term2
 
 
+def next_fast_len(n: int, primes=(2, 3, 5, 7)) -> int:
+    """
+    Smallest integer m >= n whose prime factors all lie in ``primes``.
+
+    GPU FFT libraries (cuFFT, rocFFT) document 2, 3, 5 and 7 as their fast
+    radices; other sizes fall back to slower kernels (Bluestein for large prime
+    factors). ``scipy.fft.next_fast_len`` targets pocketfft and also admits 11,
+    so it is not used here.
+
+    Raises:
+        ValueError: if n < 1, or if a prime is < 2.
+    """
+    n = operator.index(n)
+    if n < 1:
+        raise ValueError(f"next_fast_len needs n >= 1, got {n}")
+    primes = tuple(operator.index(p) for p in primes)
+    if not primes or min(primes) < 2:
+        raise ValueError(f"next_fast_len needs primes >= 2, got {primes}")
+    m = n
+    while True:
+        rest = m
+        for p in primes:
+            while rest % p == 0:
+                rest //= p
+        if rest == 1:
+            return m
+        m += 1
+
+
+def _validate_fft_friendly(fft_friendly) -> bool:
+    """Return the ``fft_friendly`` flag as a bool: True/False, None -> False."""
+    if fft_friendly is None:
+        return False
+    if isinstance(fft_friendly, (bool, np.bool_)):
+        return bool(fft_friendly)
+    raise TypeError(
+        f"fft_friendly must be True or False, got {fft_friendly!r} "
+        f"({type(fft_friendly).__name__})")
+
+
 def grid_from_trajectory(trajectory, sampling: float = 0.1,
                          slice_thickness: float = 0.5,
-                         backend: Optional[Backend] = None):
+                         backend: Optional[Backend] = None,
+                         fft_friendly: bool = False):
     """
     Build coordinate grids from a trajectory box matrix.
+
+    The lateral sizes are nx = int(lx / sampling) + 1 and likewise ny. With
+    ``fft_friendly=True`` each is rounded up to the next 2,3,5,7-smooth integer
+    (``next_fast_len``), so ``sampling`` becomes an upper bound on the actual
+    spacing lx / nx. The reciprocal spacing 1 / lx is unchanged; only the
+    Nyquist limit moves outwards. nz counts slices, which are not Fourier
+    transformed, and is never rounded.
 
     Returns:
         xs, ys, zs, lx, ly, lz
     """
+    fft_friendly = _validate_fft_friendly(fft_friendly)
     box = np.asarray(trajectory.box_matrix, dtype=float)
     if box.shape != (3, 3):
         raise ValueError("trajectory.box_matrix must have shape (3, 3)")
@@ -166,6 +216,9 @@ def grid_from_trajectory(trajectory, sampling: float = 0.1,
     nx = int(lx / sampling) + 1
     ny = int(ly / sampling) + 1
     nz = int(lz / slice_thickness) + 1
+    if fft_friendly:
+        nx = next_fast_len(nx)
+        ny = next_fast_len(ny)
 
     xs = np.linspace(0, lx, nx, endpoint=False)
     ys = np.linspace(0, ly, ny, endpoint=False)
