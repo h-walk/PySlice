@@ -6,7 +6,7 @@ from tqdm import tqdm
 import time, os
 import hashlib
 
-from .potentials import grid_from_trajectory, Potential
+from .potentials import grid_from_trajectory, next_fast_len, Potential, _validate_fft_friendly
 from .multislice import Probe, PrismProbe, Propagate, create_batched_probes, _propagation_operators
 from .trajectory import Trajectory
 from ..postprocessing.wf_data import WFData
@@ -77,7 +77,7 @@ class MultisliceCalculator:
                             slice_thickness, sampling, probe_positions,
                             spatial_decoherence, temporal_decoherence,
                             probe_array=None, stored_layer_indices=None,
-                            output_options=None, skip_vacuum=False):
+                            output_options=None, skip_vacuum=False, fft_friendly=False):
         """Hash all inputs that affect cached wavefunction output."""
         params = {
             'cache_schema': CACHE_SCHEMA_VERSION,
@@ -101,6 +101,9 @@ class MultisliceCalculator:
             'skip_vacuum': bool(skip_vacuum),
             'backend': 'torch' if not isinstance(self._backend, NumpyBackend) else 'numpy',
         }
+        if fft_friendly:
+            # Only added when enabled, so keys of default runs are unchanged.
+            params['fft_friendly'] = True
         if stored_layer_indices is not None:
             params['stored_layer_indices'] = tuple(stored_layer_indices)
         if spatial_decoherence is not None:
@@ -201,6 +204,7 @@ class MultisliceCalculator:
         ADF=False,
         skip_vacuum=False,
         potential_cache_max_bytes: int = 16 * 1024**2,
+        fft_friendly=False,
         **kwargs,
     ):
         """
@@ -256,6 +260,20 @@ class MultisliceCalculator:
                 In ADF mode, :meth:`run` returns ``(WFData, HAADFData)``.
             skip_vacuum: Skip probe positions far from atoms when probe
                 cropping is active.
+            fft_friendly: If True, round the lateral FFT sizes nx and ny up to
+                the next 2,3,5,7-smooth integers, the sizes GPU FFT libraries
+                have fast kernels for (sizes with large prime factors fall back
+                to much slower ones). ``sampling`` then becomes an upper bound
+                on the realized spacing lx / nx. The reciprocal spacing 1/L is
+                unchanged, so the retained k pixels are the same ones; the
+                Nyquist limit and the anti-aliasing cutoff move out by the
+                rounding, at most 6.5 % for grids of 256 to 4096 pixels. A
+                convergent probe keeps its normalisation; a plane wave
+                (``aperture=0``) has unit amplitude per pixel, so its k-space
+                intensities scale with (nx * ny)**2. With ``min_dk`` the
+                cropped window is the smallest smooth size whose k spacing is
+                at most ``min_dk`` along both axes. Not supported with
+                ``prism``. ``None`` means False.
 
         Returns:
             None. The configured simulation state is stored on the calculator.
@@ -305,6 +323,12 @@ class MultisliceCalculator:
                 or not isinstance(potential_cache_max_bytes, (int, np.integer))
                 or potential_cache_max_bytes < 0):
             raise ValueError("potential_cache_max_bytes must be a nonnegative integer; use 0 to disable")
+        fft_friendly = _validate_fft_friendly(fft_friendly)
+        if fft_friendly and prism:
+            # PrismProbe picks its Fourier components from the centre of the
+            # full grid, and how many it picks depends on the parity of nx and
+            # ny, which rounding to a smooth size can change.
+            raise NotImplementedError("fft_friendly=True is not supported with prism.")
 
         self.trajectory = trajectory
         self.aperture = aperture
@@ -341,9 +365,11 @@ class MultisliceCalculator:
         self.kth = kth                 # int: Δk=1/L, nk = nx. huge systems waste RAM with ultra-fine Δk. this sparsifies the exitwaves via ::kth
         self.ADF = ADF                 # bool or (inner,outer): allows on-the-fly calculation of the ADF signal
         self.skip_vacuum = skip_vacuum # bool: if True, we skip propagation of probes in locations where there are no atoms
+        self.fft_friendly = fft_friendly  # bool: round nx, ny (and the min_dk window) up to 2,3,5,7-smooth FFT sizes
 
         # Set up spatial grids
-        xs, ys, zs, lx, ly, lz = grid_from_trajectory(trajectory, sampling=sampling, slice_thickness=slice_thickness)
+        xs, ys, zs, lx, ly, lz = grid_from_trajectory(trajectory, sampling=sampling, slice_thickness=slice_thickness,
+                                                      fft_friendly=self.fft_friendly)
         nx = len(xs); ny = len(ys); nz = len(zs)
         self.xs = xs; self.ys = ys; self.zs = zs
         self.lx = lx; self.ly = ly; self.lz = lz
@@ -355,7 +381,19 @@ class MultisliceCalculator:
 
         self.probe_cropping = 0
         if self.min_dk > 0:  # dk = 1/L = 1/(nx*sampling)
-            nx = int(np.round(1/(self.min_dk*self.sampling)))
+            if self.fft_friendly:
+                # The window is the same number of pixels along x and y, so it
+                # spans nx*dx by nx*dy; size it for the finer spacing so that
+                # dk = 1/(nx*d) <= min_dk along both axes. Rounding 1/(min_dk*d)
+                # to 9 decimals keeps float noise from adding a pixel.
+                nx = next_fast_len(int(np.ceil(np.round(1/(self.min_dk*min(self.dx, self.dy)), 9))))
+                if nx > min(len(xs), len(ys)):
+                    raise ValueError(
+                        f"min_dk={self.min_dk} needs a {nx}-pixel window, larger than the "
+                        f"{len(xs)} x {len(ys)} grid; use a larger min_dk, or min_dk=0 not to crop."
+                    )
+            else:
+                nx = int(np.round(1/(self.min_dk*self.sampling)))
             self.nx = nx; self.ny = nx      # Q: check this for non square super cells
             self.probe_cropping = nx
 
@@ -478,6 +516,7 @@ class MultisliceCalculator:
             self._cache_key_stored_layers(self._stored_layers),
             output_options=self._cache_output_options(),
             skip_vacuum=self.skip_vacuum,
+            fft_friendly=self.fft_friendly,
         )
         self.output_dir = self._cache_output_dir(self.cache_key)
 
@@ -536,7 +575,8 @@ class MultisliceCalculator:
                                              self.base_probe._array,
                                              self._cache_key_stored_layers(_stored_layers),
                                              output_options=self._cache_output_options(),
-                                             skip_vacuum=self.skip_vacuum)
+                                             skip_vacuum=self.skip_vacuum,
+                                             fft_friendly=self.fft_friendly)
         if self.cache_key != cache_key:
             self.cache_key = cache_key
         self.output_dir = self._cache_output_dir(cache_key)
@@ -549,6 +589,9 @@ class MultisliceCalculator:
                 self.probe_indices = np.load(self.output_dir / f"probe_indices.npy")
             else:
                 xy_atoms = b.asarray(self.trajectory.positions[0, :, :2])
+                # Keep probes within one window width of an atom. Under
+                # fft_friendly dx <= sampling, so probe_cropping*sampling is at
+                # least the window's actual edge: it can only keep extra probes.
                 self.probe_indices = []
                 for i, p in enumerate(tqdm(self.probe_positions)):
                     p = b.asarray(p)
