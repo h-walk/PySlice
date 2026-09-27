@@ -628,6 +628,9 @@ class TACAWData(PySliceSerial, Signal):
         n_segments = len(starts)
 
         def _segment_periodogram(seg):
+            # host (memmap) slices go to the backend first: the window lives there
+            if isinstance(seg, np.ndarray) and not isinstance(b, NumpyBackend):
+                seg = b.asarray(seg, dtype=b.complex_dtype)
             # detrend (remove elastic/DC line) -> window -> FFT along time
             seg = seg - b.mean(seg, axis=1, keepdims=True)
             seg = seg * window.reshape((1, L) + (1,) * (seg.ndim - 2))
@@ -662,10 +665,7 @@ class TACAWData(PySliceSerial, Signal):
             for start in starts:
                 for kx_i in tqdm(range(0, len(self._kxs), width)):
                     kx_end = min(kx_i + width, len(self._kxs))
-                    sl = wf_layer[:, start:start + L, kx_i:kx_end, :]
-                    if isinstance(sl, np.ndarray) and not isinstance(b, NumpyBackend):
-                        sl = b.asarray(sl, dtype=b.complex_dtype)
-                    contrib = _segment_periodogram(sl)
+                    contrib = _segment_periodogram(wf_layer[:, start:start + L, kx_i:kx_end, :])
                     if self.use_memmap:
                         contrib = to_numpy(contrib)
                     self._array[:, :, kx_i:kx_end, :] += contrib
