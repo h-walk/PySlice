@@ -443,12 +443,14 @@ def test_tacaw_spatial_batches_preserve_spectra_and_cache(backend, tmp_path, kee
                 kys=np.fft.fftshift(np.fft.fftfreq(3)),
                 xs=np.arange(7.), ys=np.arange(3.), layer=[1.],
                 array=array, probe=probe, backend=b, cache_dir=tmp_path)
-    reference = TACAWData(wf, keep_complex=keep_complex, chunk_size_time=6, force_rerun=True)
+    # Welch averaging of complex spectra is rejected, so the complex case uses one segment
+    segment = None if keep_complex else 6
+    reference = TACAWData(wf, keep_complex=keep_complex, chunk_size_time=segment, force_rerun=True)
     expected = reference.array.copy()
     itemsize = to_numpy(b.zeros(0, dtype=b.complex_dtype)).dtype.itemsize
     # Exactly two kx columns per batch, plus an incomplete final column.
-    budget = 4 * 2*copies * 6 * 3 * itemsize * 2
-    result = TACAWData(wf, keep_complex=keep_complex, chunk_size_time=6,
+    budget = 4 * 2*copies * (12 if segment is None else segment) * 3 * itemsize * 2
+    result = TACAWData(wf, keep_complex=keep_complex, chunk_size_time=segment,
                        fft_batch_max_bytes=budget, force_rerun=True)
     assert result.fft_batch_kx == 2
     assert result.array.shape == expected.shape
@@ -456,7 +458,7 @@ def test_tacaw_spatial_batches_preserve_spectra_and_cache(backend, tmp_path, kee
     tolerance = 30 * max(np.finfo(expected.real.dtype).eps,
                          np.finfo(to_numpy(b.zeros(0)).dtype).eps)
     np.testing.assert_allclose(result.array, expected, rtol=tolerance, atol=tolerance)
-    reloaded = TACAWData(wf, keep_complex=keep_complex, chunk_size_time=6,
+    reloaded = TACAWData(wf, keep_complex=keep_complex, chunk_size_time=segment,
                          fft_batch_max_bytes=budget)
     np.testing.assert_array_equal(reloaded.array, result.array)
     if memmap:
