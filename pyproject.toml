@@ -3,7 +3,7 @@ name = "PySlice"
 version = "0.1.0"
 description = "Multislice electron scattering and TACAW vibrational EELS simulations"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "ase",
     "matplotlib",
