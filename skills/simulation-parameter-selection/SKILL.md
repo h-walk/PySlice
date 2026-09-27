@@ -28,7 +28,12 @@ All lengths in Å, angles in mrad (θ below in radians), voltage in eV.
    θ_max: **sampling ≤ λ / (3·θ_max)**. Pick θ_max as 1.2× the ADF outer
    angle for HAADF, ≥3× the aperture for 4D-STEM, or the largest diffraction
    angle of interest. Finer sampling is never wrong, only slower (cost ∝
-   N² log N per slice).
+   N² log N per slice). The FFT cost also depends on the factors of N:
+   sizes with large prime factors were 2-4x slower than the next smooth size
+   on an MI250X GPU (an `fft2` + `ifft2` pair: 1.99 ms at 1279², 0.58 ms at
+   1280²).
+   `setup(fft_friendly=True)` rounds nx and ny up to 2,3,5,7-smooth sizes,
+   which keeps dx ≤ sampling.
 
 3. **Slice thickness.** Target ~0.5 Å; must divide the cell height along the
    beam axis evenly: `n = round(h/0.5); slice_thickness = h/n`. Thicker

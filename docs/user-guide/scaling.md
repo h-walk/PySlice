@@ -10,7 +10,13 @@ bytes ≈ probes × frames × retained_kx × retained_ky × returned_layers
 PySlice currently uses complex128 (16 bytes) on NumPy, Torch CPU, and CUDA;
 MPS uses complex64 (8 bytes). Frame caches can add another copy. Benchmark one
 frame and a small probe batch, then extrapolate runtime approximately with
-`frames × slices × probes × nx × ny × log(nx×ny)`.
+`frames × slices × probes × nx × ny × log(nx×ny)`. The estimate assumes FFT sizes
+whose prime factors are small; for sizes with large prime factors, FFT libraries
+(on GPUs in particular) fall back to slower algorithms. On one AMD MI250X GCD
+(PyTorch/rocFFT, complex128), an `fft2` + `ifft2` pair took 1.78 ms at 1138²
+(1138 = 2·569) against 0.46 ms at 1152², and 1.99 ms at 1279² (a prime) against
+0.58 ms at 1280². `fft_friendly=True` rounds nx and ny up to 2,3,5,7-smooth
+sizes; see [Multislice grids](multislice-grids.md).
 
 | Option | Reduces device peak? | Reduces result/disk? | Caveat |
 |---|---:|---:|---|
