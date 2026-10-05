@@ -193,6 +193,33 @@ def test_list_constructor_pools_segments_of_trajectories(tmp_path):
                              **_kw()), "segment_std", None) is None
 
 
+@pytest.mark.parametrize("chunk_fft", [False, True])
+def test_list_constructor_pools_memmapped_trajectories_on_a_cache_hit(tmp_path, chunk_fft):
+    # The second call reads every trajectory's spectrum and moment from read-only caches.
+    trajs = [_random_series(15 + i, 40) for i in range(3)]
+    pooled = np.concatenate([_periodograms(s) for s in trajs], axis=0)
+
+    def wfs():
+        out = []
+        for i, s in enumerate(trajs):
+            d = tmp_path / f"{chunk_fft}_{i}"
+            d.mkdir(exist_ok=True)
+            source = NumpyBackend().memmap(s.shape + (1,), dtype=np.complex128,
+                                           filename=d / "wavefunctions.npy")
+            source[..., 0] = s
+            source.flush()
+            out.append(_wf(d, s, array=source))
+        return out
+
+    for attempt in ("first", "cache hit"):
+        tac = TACAWData(wfs(), segment_std=True, chunkFFT=chunk_fft, **_kw())
+        np.testing.assert_allclose(to_numpy(tac.segment_std), np.std(pooled, axis=0, ddof=1),
+                                   rtol=1e-10, err_msg=attempt)
+        np.testing.assert_array_equal(tac.segment_count, [27, 27])
+        np.testing.assert_allclose(tac.array, pooled.mean(axis=0), rtol=1e-12)
+    assert (tmp_path / f"{chunk_fft}_0" / "tacaw_segment_m2.npy").exists()
+
+
 def test_accumulator_probe_batches_keep_a_count_per_row(tmp_path):
     a, b, c = (_random_series(20 + i, nt) for i, nt in enumerate((40, 24, 32)))
     acc = TACAWAccumulator(segment_std=True, n_probes=2, **_kw())
