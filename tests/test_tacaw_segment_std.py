@@ -6,7 +6,6 @@ step = L - round(overlap * L); remove the segment's time mean; multiply by the
 RMS-normalised window; |fftshift(fft(., axis=time))|**2. ``np.std(ddof=1)`` of
 the list of P_s is the expected ``segment_std``.
 """
-import glob
 import json
 import os
 from types import SimpleNamespace
@@ -38,7 +37,6 @@ def _make_backend(name):
 
 def _random_series(seed, n_time, shape=SHAPE):
     rng = np.random.default_rng(seed)
-    full = (n_time,)
     p, nkx, nky = shape
     return (rng.normal(size=(p, n_time, nkx, nky))
             + 1j * rng.normal(size=(p, n_time, nkx, nky))) + 0.3
@@ -144,13 +142,13 @@ def test_segment_std_is_stable_when_the_spread_is_tiny_against_the_mean(tmp_path
 # 2. accumulator and list constructor pool the segments of all trajectories
 # ---------------------------------------------------------------------------
 
-def _trajectories(tmp_path):
+def _trajectories():
     # different lengths -> 9, 5 and 7 segments
     return [_random_series(10 + i, nt) for i, nt in enumerate((40, 24, 32))]
 
 
 def test_accumulator_pools_segments_of_trajectories_with_different_counts(tmp_path):
-    trajs = _trajectories(tmp_path)
+    trajs = _trajectories()
     pooled = np.concatenate([_periodograms(s) for s in trajs], axis=0)
     assert pooled.shape[0] == 9 + 5 + 7
     expected_std = np.std(pooled, axis=0, ddof=1)
@@ -163,6 +161,22 @@ def test_accumulator_pools_segments_of_trajectories_with_different_counts(tmp_pa
     np.testing.assert_allclose(to_numpy(tac.segment_std), expected_std, rtol=1e-10)
     np.testing.assert_array_equal(tac.segment_count, [21, 21])
 
+
+@pytest.mark.parametrize("memmap", [False, True])
+def test_finalized_result_is_independent_of_later_adds(tmp_path, memmap):
+    a, b = _random_series(5, 40), _random_series(6, 32)
+    acc = TACAWAccumulator(segment_std=True,
+                           memmap_path=tmp_path / "acc.npy" if memmap else None, **_kw())
+    acc.add(_wf(tmp_path / "a", a))
+    first = acc.finalize()
+    std, intensity = to_numpy(first.segment_std).copy(), first.array.copy()
+    acc.add(_wf(tmp_path / "b", b))
+    np.testing.assert_array_equal(to_numpy(first.segment_std), std)
+    np.testing.assert_array_equal(first.array, intensity)
+    np.testing.assert_allclose(std, np.std(_periodograms(a), axis=0, ddof=1), rtol=1e-10)
+    both = np.concatenate([_periodograms(a), _periodograms(b)], axis=0)
+    np.testing.assert_allclose(to_numpy(acc.finalize().segment_std),
+                               np.std(both, axis=0, ddof=1), rtol=1e-10)
 
 
 def test_list_constructor_pools_segments_of_trajectories(tmp_path):
@@ -200,7 +214,7 @@ def test_accumulator_probe_batches_keep_a_count_per_row(tmp_path):
 @pytest.mark.parametrize("backend_name", _backends())
 def test_accumulator_on_a_backend_returns_backend_arrays(tmp_path, backend_name):
     backend = _make_backend(backend_name)
-    trajs = _trajectories(tmp_path)[:2]
+    trajs = _trajectories()[:2]
     acc = TACAWAccumulator(segment_std=True, **_kw())
     for i, s in enumerate(trajs):
         acc.add(_wf(tmp_path / f"a{i}", s, backend))
@@ -212,7 +226,7 @@ def test_accumulator_on_a_backend_returns_backend_arrays(tmp_path, backend_name)
 
 
 def test_accumulator_memmap_holds_the_second_moment_on_disk(tmp_path):
-    trajs = _trajectories(tmp_path)
+    trajs = _trajectories()
     pooled = np.concatenate([_periodograms(s) for s in trajs], axis=0)
     acc = TACAWAccumulator(segment_std=True, memmap_path=tmp_path / "acc.npy", **_kw())
     for i, s in enumerate(trajs):
@@ -234,7 +248,7 @@ def test_accumulator_memmap_holds_the_second_moment_on_disk(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_partials_reduce_equals_direct_accumulator(tmp_path):
-    trajs = _trajectories(tmp_path) + [_random_series(99, 24)]
+    trajs = _trajectories() + [_random_series(99, 24)]
     pooled = np.concatenate([_periodograms(s) for s in trajs], axis=0)
 
     direct = TACAWAccumulator(segment_std=True, **_kw())
@@ -297,7 +311,7 @@ def test_reduce_requires_the_second_moment_in_every_partial(tmp_path):
 
 def test_run_tacaw_ensemble_passes_segment_std_through(tmp_path):
     from pyslice.multislice.distributed import run_tacaw_ensemble
-    trajs = _trajectories(tmp_path)
+    trajs = _trajectories()
     producers = [(lambda s=s, i=i: _wf(tmp_path / f"p{i}", s)) for i, s in enumerate(trajs)]
     out = tmp_path / "out"
     for rank in range(2):
@@ -341,8 +355,10 @@ def test_chunked_fft_gives_the_same_segment_std(tmp_path, backend_name):
                                np.std(_periodograms(series), axis=0, ddof=1), rtol=1e-10)
 
 
+@pytest.mark.parametrize("backend_name", _backends())
 @pytest.mark.parametrize("chunk_fft", [False, True])
-def test_memmap_path_gives_the_same_segment_std_and_reuses_the_cache(tmp_path, chunk_fft):
+def test_memmap_path_gives_the_same_segment_std_and_reuses_the_cache(
+        tmp_path, chunk_fft, backend_name):
     series = _random_series(60, 40)
     expected = np.std(_periodograms(series), axis=0, ddof=1)
     cache_dir = tmp_path / str(chunk_fft)
@@ -351,7 +367,7 @@ def test_memmap_path_gives_the_same_segment_std_and_reuses_the_cache(tmp_path, c
                                    filename=cache_dir / "wavefunctions.npy")
     source[..., 0] = series
     source.flush()
-    wf = _wf(cache_dir, series, array=source)
+    wf = _wf(cache_dir, series, _make_backend(backend_name), array=source)
 
     first = TACAWData(wf, segment_std=True, chunkFFT=chunk_fft, force_rerun=True, **_kw())
     np.testing.assert_allclose(to_numpy(first.segment_std), expected, rtol=1e-10)
@@ -384,11 +400,24 @@ def test_cache_with_segment_std_is_separate_from_the_default_cache(tmp_path):
     assert again.segment_std is None
     np.testing.assert_array_equal(again.intensity, plain.intensity)
 
-    # a cache without the moment file is not a hit for segment_std
+    # a cache of identical meta but without the moment file is not a hit for segment_std
+    TACAWData(wf, segment_std=True, **_kw())
     (tmp_path / "tacaw_segment_m2.npy").unlink()
-    TACAWData(wf, **_kw())
     rebuilt = TACAWData(wf, segment_std=True, **_kw())
+    assert (tmp_path / "tacaw_segment_m2.npy").exists()
     np.testing.assert_allclose(to_numpy(rebuilt.segment_std), expected, rtol=1e-10)
+
+
+def test_cache_hit_with_a_wrong_shaped_moment_file_recomputes_cleanly(tmp_path):
+    series = _random_series(71, 40)
+    wf = _wf(tmp_path, series)
+    TACAWData(wf, segment_std=True, **_kw())
+    np.save(tmp_path / "tacaw_segment_m2.npy", np.zeros((1, 2, 3)))
+    tac = TACAWData(wf, segment_std=True, **_kw())
+    periodograms = _periodograms(series)
+    np.testing.assert_allclose(tac.array, periodograms.mean(axis=0), rtol=1e-12)
+    np.testing.assert_allclose(to_numpy(tac.segment_std), np.std(periodograms, axis=0, ddof=1),
+                               rtol=1e-10)
 
 
 # ---------------------------------------------------------------------------
@@ -504,7 +533,7 @@ def test_bose_correction_scales_segment_std_like_the_intensity(tmp_path, backend
 
 
 def test_bose_correction_on_a_finalized_accumulator_scales_segment_std(tmp_path):
-    trajs = _trajectories(tmp_path)[:2]
+    trajs = _trajectories()[:2]
     acc = TACAWAccumulator(segment_std=True, **_kw())
     for i, s in enumerate(trajs):
         acc.add(_wf(tmp_path / f"a{i}", s))
