@@ -111,6 +111,28 @@ def _inversion_indices(coordinates, axis_name: str) -> np.ndarray:
     return indices
 
 
+def _chan_merge(n_a, s_a, m2_a, n_b, s_b, m2_b):
+    """Merge two groups' (count, sum, sum of squared deviations from the mean).
+
+    Chan et al.'s pairwise update: with means ``mu = s / n`` and
+    ``delta = mu_b - mu_a``, the pooled sum of squared deviations is
+    ``m2_a + m2_b + delta**2 * n_a * n_b / (n_a + n_b)``. Counts broadcast
+    against the sums, so a per-probe count of shape ``(rows, 1, 1, 1)`` merges
+    row-wise. A group with zero count contributes nothing. Pure NumPy, so the
+    merge runs on the host in float64 whatever the backend.
+    """
+    n_a = np.asarray(n_a, dtype=np.float64)
+    n_b = np.asarray(n_b, dtype=np.float64)
+    n = n_a + n_b
+    both = (n_a > 0) & (n_b > 0)
+    safe_a = np.where(n_a > 0, n_a, 1.0)
+    safe_b = np.where(n_b > 0, n_b, 1.0)
+    safe_n = np.where(n > 0, n, 1.0)
+    delta = s_b / safe_b - s_a / safe_a
+    cross = np.where(both, delta ** 2 * (safe_a * safe_b / safe_n), 0.0)
+    return n, s_a + s_b, m2_a + m2_b + cross
+
+
 class TACAWData(PySliceSerial, Signal):
     """
     TACAW EELS results: (probe_positions, frequency, kx, ky).
@@ -131,6 +153,12 @@ class TACAWData(PySliceSerial, Signal):
                           'temperature_K': None},
     }
 
+    # Class-level defaults: an object built without ``segment_std`` carries no
+    # extra instance attributes.
+    _want_segment_std = False
+    _segment_m2 = None
+    _segment_count = None
+
     def __init__(self,
                  wf_data: WFData,
                  layer_index: Optional[int] = None,
@@ -144,7 +172,8 @@ class TACAWData(PySliceSerial, Signal):
                  temperature_K: Optional[float] = None,
                  apply_bose: bool = False,
                  fold: bool = False,
-                 fft_batch_max_bytes: Optional[int] = None) -> None:
+                 fft_batch_max_bytes: Optional[int] = None,
+                 segment_std: bool = False) -> None:
         """Transform time-domain exit waves into TACAW frequency data.
 
         Args:
@@ -179,6 +208,12 @@ class TACAWData(PySliceSerial, Signal):
                 one-column batching on CPU. At least one kx
                 column is processed; input/output storage and FFT-library
                 workspace are additional. Does not change the time window.
+            segment_std: Also compute the sample standard deviation of the
+                segment periodograms (see :attr:`segment_std`). Off by default;
+                when on, memory and, with a cache or memmap, disk use for the
+                spectrum double (one extra array of the intensity's shape and
+                dtype). Incompatible with ``keep_complex=True`` and with
+                gain/loss folding (``fold=True``), which raise ``ValueError``.
 
         Notes:
             The spectrum is a periodogram estimate averaged over the segments
@@ -188,6 +223,21 @@ class TACAWData(PySliceSerial, Signal):
             Frequencies are in THz. Negative bins represent gain and positive
             bins represent loss under PySlice's FFT convention.
         """
+
+        if segment_std:
+            if keep_complex:
+                raise ValueError("segment_std requires intensity data; use keep_complex=False")
+            if fold:
+                raise ValueError(
+                    "segment_std cannot be combined with gain/loss folding: the "
+                    "standard deviation of a folded average needs the covariance "
+                    "between each gain/loss pair, which is not kept")
+            self._want_segment_std = True
+            # The segment moments are not written to .sea files.
+            config = dict(type(self)._sea_config)
+            config['exclude_attrs'] = list(config['exclude_attrs']) + [
+                '_segment_m2', '_segment_count']
+            self._sea_config = config
 
         # A list/tuple of WFData -> ensemble average over independent trajectories
         # (Welch-segmented, streamed one trajectory at a time; see _compute_ensemble).
@@ -322,20 +372,32 @@ class TACAWData(PySliceSerial, Signal):
             raise ValueError("ensemble averaging requires intensities; use keep_complex=False")
         b = self._backend
         ref = wfs[0]
-        acc, total_k = None, 0
+        acc, m2, total_k = None, None, 0
+        extra = {'segment_std': True} if self._want_segment_std else {}
         for i, wf in enumerate(wfs):
             self._check_ensemble_compatible(ref, wf, i)
             tac = TACAWData(wf, layer_index=layer_index,
                             segment_length=self.segment_length, overlap=self.overlap,
-                            window=self.window, force_rerun=self.force_rerun)
+                            window=self.window, force_rerun=self.force_rerun, **extra)
             spec = to_numpy(tac._array)          # host; (n_scan, nfreq, nkx, nky), real
             k = int(tac.n_chunks)
-            acc = spec * k if acc is None else acc + spec * k   # weighted host sum
+            if self._want_segment_std:
+                # Pool the segments of all trajectories (Chan merge, float64).
+                m2_t = to_numpy(tac._segment_m2).astype(np.float64)
+                if acc is None:
+                    acc, m2 = spec * k, m2_t
+                else:
+                    _, acc, m2 = _chan_merge(total_k, acc, m2, k, spec * k, m2_t)
+            else:
+                acc = spec * k if acc is None else acc + spec * k   # weighted host sum
             total_k += k
             if self._frequencies is None:
                 self._frequencies = tac._frequencies
         self.n_chunks = total_k
         self._array = b.asarray(acc / total_k)
+        if self._want_segment_std:
+            self._segment_m2 = b.asarray(m2, dtype=self._array.dtype)
+            self._segment_count = np.full(self._array.shape[0], total_k, dtype=np.int64)
 
     @classmethod
     def _from_spectrum(cls, array, frequencies, meta):
@@ -361,6 +423,14 @@ class TACAWData(PySliceSerial, Signal):
         self.n_chunks = int(meta.get('n_segments', 1))
         self._array = b.asarray(array)
         self._frequencies = b.asarray(frequencies)
+        if meta.get('segment_m2') is not None:
+            self._want_segment_std = True
+            self._segment_m2 = b.asarray(meta['segment_m2'], dtype=self._array.dtype)
+            self._segment_count = np.asarray(meta['segment_count'], dtype=np.int64)
+            config = dict(type(self)._sea_config)
+            config['exclude_attrs'] = list(config['exclude_attrs']) + [
+                '_segment_m2', '_segment_count']
+            self._sea_config = config
         self._apply_signal_dimensions()
         return self
 
@@ -412,6 +482,65 @@ class TACAWData(PySliceSerial, Signal):
         """TACAW data converted to a CPU NumPy array."""
         return to_numpy(self._array) if self._array is not None else None
 
+    @property
+    def segment_count(self):
+        """Number of Welch segments behind each probe's spectrum, or None.
+
+        An integer array shaped ``(probe,)``: the segments pooled into the
+        averaged intensity of each probe row (all segments of all trajectories
+        for an ensemble). Probe-batched accumulators can hold different counts
+        per row. None unless the object was built with ``segment_std=True``.
+        """
+        return self._segment_count
+
+    @property
+    def segment_std(self):
+        """Standard deviation of the segment periodograms, or None.
+
+        Available when the object was built with ``segment_std=True`` (or
+        ``TACAWAccumulator(segment_std=True)``); None otherwise. For every
+        (probe, frequency, kx, ky) element ``i`` of :attr:`intensity` this is
+        the sample standard deviation (ddof = 1)
+
+            sqrt( sum_s (P_s[i] - mean_s P_s[i])**2 / (n - 1) ),
+
+        over the ``n`` = :attr:`segment_count` segments ``s`` of that probe,
+        where ``P_s`` is a segment's periodogram exactly as it enters the
+        average: after mean subtraction, windowing and normalisation, summed
+        over incoherent decoherence copies, before any Bose weighting. It is
+        NaN where fewer than two segments exist. For an ensemble the
+        segments of all trajectories are pooled. The array has the intensity's
+        shape, backend and dtype; after :meth:`apply_bose_correction` (without
+        folding) it is scaled by the same factor as the intensity.
+
+        Caveats:
+            * Segments overlapping by ``overlap`` are correlated, so the
+              standard error of the mean intensity is not
+              ``segment_std / sqrt(n)``: it needs the effective number of
+              independent segments, which is smaller than ``n`` and depends on
+              ``overlap``, the window and the signal. Segments from different
+              trajectories are independent; segments within one trajectory are
+              correlated through their shared samples and through the
+              dynamics.
+            * The deviation is per pixel. The standard deviation of a sum over
+              pixels (a ring or aperture average, a k-integrated spectrum)
+              needs the covariances between pixels, which are not kept, and
+              cannot be formed from this array.
+            * It is not defined after gain/loss folding, which therefore
+              raises when segment statistics are present.
+            * Memory (and with a cache or memmap, disk) use is twice that of
+              the intensity alone. ``.sea`` files do not carry it.
+        """
+        m2 = self._segment_m2
+        if m2 is None:
+            return None
+        b = self._backend
+        n = np.asarray(self._segment_count, dtype=np.float64)
+        denom = np.where(n >= 2, n - 1.0, np.nan).reshape((-1,) + (1,) * (m2.ndim - 1))
+        denom = b.asarray(denom, dtype=m2.dtype) if not isinstance(m2, np.ndarray) \
+            else denom.astype(m2.dtype, copy=False)
+        return b.sqrt(b.xp.clip(m2, 0, None) / denom)
+
     def apply_bose_correction(self, temperature_K: float, *, fold: bool = False):
         """Apply signed Bose weighting, optionally folding gain/loss pairs first.
 
@@ -436,6 +565,8 @@ class TACAWData(PySliceSerial, Signal):
             raise ValueError("Bose correction expects intensity data; set keep_complex=False")
         if self.apply_bose:
             raise ValueError("Bose correction has already been applied to this object")
+        if fold and self._segment_m2 is not None:
+            self._raise_fold_with_segment_std()
 
         if fold:
             self.fold_gain_loss()
@@ -444,6 +575,9 @@ class TACAWData(PySliceSerial, Signal):
         factor = (factor.astype(self._array.dtype, copy=False) if isinstance(self._array, np.ndarray)
                   else b.asarray(factor, dtype=self._array.dtype))
         self._array = self._array * factor[None, :, None, None]
+        if self._segment_m2 is not None:
+            # The weight is a per-frequency constant c, so the variance scales by c**2.
+            self._segment_m2 = self._segment_m2 * (factor ** 2)[None, :, None, None]
         self.temperature_K = temperature_K
         self.apply_bose = True
         if hasattr(self, "metadata") and self.metadata is not None:
@@ -451,6 +585,14 @@ class TACAWData(PySliceSerial, Signal):
             self.metadata.Simulation.gain_loss_folded = bool(self.gain_loss_folded)
             self.metadata.Simulation.bose_corrected = True
         return self
+
+    @staticmethod
+    def _raise_fold_with_segment_std():
+        raise ValueError(
+            "gain/loss folding is not available with segment_std: the standard "
+            "deviation of a gain/loss average needs the covariance between the "
+            "two partners' segment periodograms, which is not kept. Build the "
+            "object without segment_std to fold")
 
     def fold_gain_loss(self):
         """Average classical gain/loss partners before quantum correction.
@@ -470,6 +612,8 @@ class TACAWData(PySliceSerial, Signal):
             raise ValueError("Gain/loss folding must be applied before the Bose correction")
         if getattr(self, "gain_loss_folded", False):
             return self
+        if self._segment_m2 is not None:
+            self._raise_fold_with_segment_std()
 
         expected_shape = (
             len(self._frequencies), len(self._kxs), len(self._kys)
@@ -580,6 +724,8 @@ class TACAWData(PySliceSerial, Signal):
         cache_tacaw = None if cache_dir is None else cache_dir / "tacaw.npy"
         cache_freq = None if cache_dir is None else cache_dir / "tacaw_freq.npy"
         cache_meta = None if cache_dir is None else cache_dir / "tacaw_manifest.json"
+        want_std = self._want_segment_std
+        cache_m2 = None if cache_dir is None else cache_dir / "tacaw_segment_m2.npy"
 
         L, starts = self._resolve_segments(len(self._time))
         fft_len = L
@@ -598,7 +744,7 @@ class TACAWData(PySliceSerial, Signal):
         meta = self._tacaw_cache_meta(layer_index, fft_len)
         if (not self.force_rerun and cache_dir is not None
                 and cache_tacaw.exists() and cache_meta.exists()
-                and cache_freq.exists()):
+                and cache_freq.exists() and (not want_std or cache_m2.exists())):
             try:
                 with open(cache_meta) as f:
                     cached_meta = json.load(f)
@@ -610,7 +756,16 @@ class TACAWData(PySliceSerial, Signal):
                     self._frequencies = b.asarray(np.load(cache_freq))
                     self._array = cached if self.use_memmap else b.asarray(
                         cached, dtype=b.complex_dtype if self.keep_complex else b.float_dtype)
-                    return
+                    if want_std:
+                        cached_m2 = np.load(cache_m2, mmap_mode='r' if self.use_memmap else None)
+                        if list(cached_m2.shape) == meta["array_shape"]:
+                            self._segment_m2 = cached_m2 if self.use_memmap else b.asarray(
+                                cached_m2, dtype=b.float_dtype)
+                            self._segment_count = np.full(
+                                self._array.shape[0], self.n_chunks, dtype=np.int64)
+                            return
+                    else:
+                        return
 
         # A (re)compute invalidates any previous completion marker first, so an
         # interrupted run (partial tacaw.npy — notably the memmap accumulator)
@@ -639,6 +794,19 @@ class TACAWData(PySliceSerial, Signal):
                 out = self._fold_incoherent_copies(b.absolute(out) ** 2)
             return out
 
+        # Segment variance (opt-in): the sum of squared deviations M2 of the
+        # periodograms from their running mean, built with Welford's update
+        #     M2_k = M2_{k-1} + (P_k - mean_{k-1}) * (P_k - mean_k),
+        # where mean_{k-1} and mean_k come from the running sum that already
+        # forms the Welch average, so M2 is the only extra array. Accumulating
+        # sum(P) and sum(P**2) and forming (S2 - S1**2 / n) / (n - 1) would
+        # cancel catastrophically wherever the segment-to-segment spread is
+        # small against the mean (strong, steady Bragg or low-q elements), and
+        # in float32 backends already at moderate ratios. Across trajectories
+        # and partials the host merges M2 with Chan's pairwise formula in
+        # float64 (see _chan_merge), which keeps the same property.
+        m2 = None
+
         # Welch: average the (windowed, detrended) segment periodograms.
         if self.chunkFFT:
             # Spatial batching preserves the full selected time window and
@@ -654,6 +822,11 @@ class TACAWData(PySliceSerial, Signal):
                                        filename=cache_tacaw)
             else:
                 self._array = b.zeros(shape, dtype=dtype)
+            if want_std:
+                if self.use_memmap:
+                    m2 = b.memmap(shape, dtype=dtype, filename=cache_m2)
+                else:
+                    m2 = b.zeros(shape, dtype=dtype)
 
             complex_bytes = to_numpy(b.zeros(0, dtype=b.complex_dtype)).dtype.itemsize
             column_bytes = 4 * int(wf_layer.shape[0]) * fft_len * int(wf_layer.shape[3]) * complex_bytes
@@ -662,20 +835,35 @@ class TACAWData(PySliceSerial, Signal):
                 width = 1
             self.fft_batch_kx = width
 
-            for start in starts:
+            for k, start in enumerate(starts, 1):
                 for kx_i in tqdm(range(0, len(self._kxs), width)):
                     kx_end = min(kx_i + width, len(self._kxs))
                     contrib = _segment_periodogram(wf_layer[:, start:start + L, kx_i:kx_end, :])
                     if self.use_memmap:
                         contrib = to_numpy(contrib)
+                    if want_std and k > 1:
+                        prev_mean = self._array[:, :, kx_i:kx_end, :] / (k - 1)
                     self._array[:, :, kx_i:kx_end, :] += contrib
+                    if want_std and k > 1:
+                        m2[:, :, kx_i:kx_end, :] += (contrib - prev_mean) * (
+                            contrib - self._array[:, :, kx_i:kx_end, :] / k)
             self._array /= n_segments
         else:
             # Standard path: FFT over the full segment window
-            for start in starts:
+            for k, start in enumerate(starts, 1):
                 contrib = _segment_periodogram(wf_layer[:, start:start + L, :, :])
+                if want_std:
+                    if k == 1:
+                        m2 = b.zeros_like(contrib)
+                    else:
+                        prev_mean = self._array / (k - 1)
                 self._array = contrib if self._array is None else self._array + contrib
+                if want_std and k > 1:
+                    m2 = m2 + (contrib - prev_mean) * (contrib - self._array / k)
             self._array = self._array / n_segments
+        if want_std:
+            self._segment_m2 = m2
+            self._segment_count = np.full(self._array.shape[0], n_segments, dtype=np.int64)
 
         # Completion marker is written last, after the entire array is flushed.
         if cache_dir is not None:
@@ -684,6 +872,11 @@ class TACAWData(PySliceSerial, Signal):
                 self._array.flush()
             else:
                 np.save(cache_tacaw, to_numpy(self._array))
+            if want_std:
+                if isinstance(m2, np.memmap):
+                    m2.flush()
+                else:
+                    np.save(cache_m2, to_numpy(m2))
             metadata_tmp = cache_meta.with_suffix(".json.tmp")
             metadata_tmp.write_text(json.dumps(meta, sort_keys=True))
             metadata_tmp.replace(cache_meta)
@@ -701,7 +894,7 @@ class TACAWData(PySliceSerial, Signal):
         n_probes = self.n_scan_positions
         nkx = int(self._wf_array.shape[2])
         nky = int(self._wf_array.shape[3])
-        return {
+        meta = {
             "cache_version": self._TACAW_CACHE_VERSION,
             "layer_index": int(layer_index),
             "keep_complex": bool(self.keep_complex),
@@ -720,6 +913,9 @@ class TACAWData(PySliceSerial, Signal):
             "kx_fingerprint": self._array_fingerprint(self._kxs),
             "ky_fingerprint": self._array_fingerprint(self._kys),
         }
+        if self._want_segment_std:
+            meta["segment_std"] = True
+        return meta
 
     def _fold_incoherent_copies(self, intensity):
         """Sum copy-major spectral intensities onto physical scan positions."""
@@ -761,6 +957,8 @@ class TACAWData(PySliceSerial, Signal):
             self._array = None
             self.gain_loss_folded = False
             self.apply_bose = False
+            if self._want_segment_std:
+                self._segment_m2 = None
             self._fft_from_wf_data(layer_index)
             if hasattr(self, "metadata") and self.metadata is not None:
                 self.metadata.Simulation.gain_loss_folded = False
@@ -1114,12 +1312,29 @@ class TACAWAccumulator:
     >>> for wf in trajectory_wavefunctions:      # produced one at a time
     ...     acc.add(wf); del wf
     >>> tacaw = acc.finalize()                    # ensemble-averaged spectrum
+
+    With ``segment_std=True`` the accumulator also pools the segment
+    periodograms of every unit added, per probe row, and ``finalize()`` returns
+    a TACAWData whose :attr:`TACAWData.segment_std` is their sample standard
+    deviation (ddof = 1) and whose :attr:`TACAWData.segment_count` holds the
+    segment count per probe row. The definition and its caveats (correlated
+    overlapping segments, per-pixel values, no folding) are those of
+    :attr:`TACAWData.segment_std`. The accumulator then holds one extra host
+    array of the accumulator's shape and dtype (a second file next to
+    ``memmap_path``, named ``<stem>_segment_m2.npy``), so memory and disk use
+    double. The units are merged with Chan's pairwise formula on the sums of
+    squared deviations, in the accumulator's dtype (float64 by default).
     """
 
     def __init__(self, *, segment_length=None, overlap=0.0, window=None,
-                 layer_index=None, n_probes=None, dtype=np.float64, memmap_path=None):
+                 layer_index=None, n_probes=None, dtype=np.float64, memmap_path=None,
+                 segment_std=False):
         self._kw = dict(segment_length=segment_length, overlap=overlap,
                         window=window, layer_index=layer_index)
+        self._segment_std = bool(segment_std)
+        if self._segment_std:
+            self._kw['segment_std'] = True
+        self._m2 = None
         self.n_probes = n_probes
         self.dtype = dtype
         self.memmap_path = None if memmap_path is None else str(memmap_path)
@@ -1147,11 +1362,26 @@ class TACAWAccumulator:
             else:
                 self._acc = np.zeros(shape, dtype=self.dtype)
             self._count = np.zeros(n, dtype=self.dtype)
+            if self._segment_std:
+                if self.memmap_path is not None:
+                    m2_path = str(Path(self.memmap_path).with_suffix('')) + "_segment_m2.npy"
+                    self._m2 = np.lib.format.open_memmap(
+                        m2_path, mode='w+', dtype=self.dtype, shape=shape)
+                    self._m2[:] = 0
+                else:
+                    self._m2 = np.zeros(shape, dtype=self.dtype)
             self._freqs = to_numpy(tac._frequencies)
             self._meta = {a: getattr(tac, a) for a in
                           ('probe_positions', '_kxs', '_kys', '_xs', '_ys',
                            '_layer', '_time', 'probe', 'cache_dir', '_backend')}
         idx = slice(None) if rows is None else np.asarray(rows)
+        if self._segment_std:
+            _, _, m2 = _chan_merge(
+                np.asarray(self._count[idx], dtype=np.float64)[:, None, None, None],
+                np.asarray(self._acc[idx], dtype=np.float64),
+                np.asarray(self._m2[idx], dtype=np.float64),
+                k, spec * k, to_numpy(tac._segment_m2).astype(np.float64))
+            self._m2[idx] = m2
         self._acc[idx] += spec * k             # weighted by this unit's segment count
         self._count[idx] += k
         return self
@@ -1164,6 +1394,9 @@ class TACAWAccumulator:
         avg = np.asarray(self._acc) / cnt[:, None, None, None]
         meta = dict(self._meta, segment_length=self._kw['segment_length'],
                     overlap=self._kw['overlap'], window=self._kw['window'])
+        if self._segment_std:
+            meta['segment_m2'] = np.asarray(self._m2)
+            meta['segment_count'] = np.rint(np.asarray(self._count)).astype(np.int64)
         return TACAWData._from_spectrum(avg, self._freqs, meta)
 
     def save_partial(self, path) -> str:
@@ -1192,17 +1425,27 @@ class TACAWAccumulator:
                             else int(self._kw['segment_length'])),
             overlap=float(self._kw['overlap']),
             window=("" if self._kw['window'] is None else str(self._kw['window'])),
+            **({'segment_m2': np.asarray(self._m2)} if self._segment_std else {}),
         )
         return str(path)
 
 
-def reduce_tacaw_partials(partials, backend=None) -> "TACAWData":
+def reduce_tacaw_partials(partials, backend=None, segment_std=False) -> "TACAWData":
     """Sum file-based TACAWAccumulator partials into an ensemble-averaged TACAWData.
 
     partials: a directory (globs ``partial_*.npz``) or an explicit list of .npz
     paths written by :meth:`TACAWAccumulator.save_partial`. This is the cross-rank
     (and cross-node) reduce: it sums the per-rank un-averaged periodogram sums and
     counts, then divides. Missing ranks simply do not contribute (fault tolerant).
+
+    With ``segment_std=True`` the partials must have been written by a
+    ``TACAWAccumulator(segment_std=True)``; their sums of squared deviations are
+    merged with Chan's pairwise formula in float64 and the result carries
+    :attr:`TACAWData.segment_std` and :attr:`TACAWData.segment_count`, pooled
+    over every segment of every partial (see :attr:`TACAWData.segment_std` for
+    the definition and caveats). A partial without the second moment raises
+    ``ValueError``. With the default False the second moment is ignored even if
+    the partials carry it.
     """
     from pyslice.backend import NumpyBackend
     if isinstance(partials, (str, Path)):
@@ -1212,9 +1455,22 @@ def reduce_tacaw_partials(partials, backend=None) -> "TACAWData":
     if not paths:
         raise FileNotFoundError(f"no partial_*.npz found in {partials!r}")
 
-    acc = count = ref = None
+    acc = count = ref = m2 = None
     for p in paths:
         d = np.load(p, allow_pickle=False)
+        if segment_std:
+            if 'segment_m2' not in d.files:
+                raise ValueError(
+                    f"{p} has no segment second moment; write the partials with "
+                    "TACAWAccumulator(segment_std=True)")
+            m2_p = d['segment_m2'].astype(np.float64)
+            if acc is None:
+                m2 = m2_p
+            else:
+                _, _, m2 = _chan_merge(
+                    count[:, None, None, None], acc, m2,
+                    d['count'].astype(np.float64)[:, None, None, None],
+                    d['acc'].astype(np.float64), m2_p)
         acc = d['acc'].astype(np.float64) if acc is None else acc + d['acc']
         count = d['count'].astype(np.float64) if count is None else count + d['count']
         ref = ref or {k: d[k] for k in d.files}
@@ -1235,4 +1491,7 @@ def reduce_tacaw_partials(partials, backend=None) -> "TACAWData":
         _layer=b.asarray(ref['layer']), _time=b.asarray(ref['time']),
         segment_length=seg, overlap=float(ref['overlap']), window=win,
         n_segments=int(np.max(count)) if count.size else 1)
+    if segment_std:
+        meta['segment_m2'] = m2
+        meta['segment_count'] = np.rint(count).astype(np.int64)
     return TACAWData._from_spectrum(avg, b.asarray(ref['freqs']), meta)
