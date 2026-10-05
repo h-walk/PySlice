@@ -42,6 +42,24 @@ normalization.
 | `chunk_size_time=None` | one full window | best available `Δf` |
 | `chunk_size_time=M` | sums block intensities | coarser `Δf`; block phases discarded |
 
+## Spread across Welch segments
+
+`segment_std=True` (on `TACAWData`, `TACAWAccumulator`, `reduce_tacaw_partials`
+and `run_tacaw_ensemble`) also keeps the sample standard deviation (ddof = 1)
+of the segment periodograms, per (probe, frequency, kx, ky) element, as
+`tacaw.segment_std`, with the segment count per probe in `tacaw.segment_count`.
+Segments of all trajectories in an accumulator or reduce are pooled; elements
+with fewer than two segments are NaN. After `apply_bose_correction` (without
+folding) it carries the same factor as the intensity.
+
+- Segments overlapping by `overlap` are correlated, so the standard error of
+  the mean is not `segment_std / sqrt(n)`; the effective number of independent
+  segments is smaller than `n`.
+- The value is per pixel. The standard deviation of a sum over pixels (a ring
+  or aperture average) needs covariances between pixels, which are not kept.
+- Gain/loss folding (`fold=True`, `fold_gain_loss`) raises with `segment_std`.
+- Memory, and disk for a cache, a memmap or partial files, double.
+
 ## k paths and masks
 
 Paths use Cartesian simulation-frame cycles/Å, not radians/Å or fractional
