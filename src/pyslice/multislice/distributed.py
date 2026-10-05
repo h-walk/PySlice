@@ -62,6 +62,7 @@ def run_tacaw_ensemble(
     rows_of: Optional[Callable[[int], object]] = None,
     reduce: bool = False,
     backend=None,
+    segment_std: bool = False,
 ):
     """Accumulate this rank's assigned units and write its partial for the reduce.
 
@@ -79,6 +80,10 @@ def run_tacaw_ensemble(
         reduce: if True, also reduce all partials (call from rank 0 only, after a
             barrier that guarantees every rank has written its partial) and
             return the averaged TACAWData. Otherwise return the partial path.
+        segment_std: also accumulate the segment second moment into each partial
+            and, with ``reduce=True``, expose the pooled standard deviation on
+            the result (see :attr:`TACAWData.segment_std`). Off by default;
+            partials and memory then double.
 
     Returns:
         The partial-file path, or the averaged ``TACAWData`` if ``reduce=True``.
@@ -92,7 +97,8 @@ def run_tacaw_ensemble(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     acc = TACAWAccumulator(segment_length=segment_length, overlap=overlap,
-                           window=window, n_probes=n_probes)
+                           window=window, n_probes=n_probes,
+                           segment_std=segment_std)
     my_units = assign_units(len(producers), rank, world)
     for i in my_units:
         item = producers[i]
@@ -103,5 +109,6 @@ def run_tacaw_ensemble(
     acc.save_partial(partial_path)
 
     if reduce:
-        return reduce_tacaw_partials(out_dir, backend=backend)
+        return reduce_tacaw_partials(out_dir, backend=backend,
+                                     segment_std=segment_std)
     return str(partial_path)
