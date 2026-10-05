@@ -83,7 +83,8 @@ def run_tacaw_ensemble(
         segment_std: also accumulate the segment second moment into each partial
             and, with ``reduce=True``, expose the pooled standard deviation on
             the result (see :attr:`TACAWData.segment_std`). Off by default;
-            partials and memory then double.
+            partials and memory then double
+            (peak figures: :attr:`TACAWData.segment_std`).
 
     Returns:
         The partial-file path, or the averaged ``TACAWData`` if ``reduce=True``.

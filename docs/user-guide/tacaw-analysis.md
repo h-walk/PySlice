@@ -58,7 +58,12 @@ folding) it carries the same factor as the intensity.
 - The value is per pixel. The standard deviation of a sum over pixels (a ring
   or aperture average) needs covariances between pixels, which are not kept.
 - Gain/loss folding (`fold=True`, `fold_gain_loss`) raises with `segment_std`.
-- Memory, and disk for a cache, a memmap or partial files, double.
+- Resident memory, and disk for a cache, a memmap or partial files, double.
+  Peak allocations (NumPy, float64, tracemalloc, in spectrum-sized arrays) rise
+  from 8.0 to 9.0 for one computation, from 3.6 to 7.0 for
+  `TACAWAccumulator.add` and from 3.0 to 6.0 for `reduce_tacaw_partials`.
+- A `cache_dir` holds either kind of spectrum: alternating `segment_std` on and
+  off recomputes each time.
 
 ## k paths and masks
 
